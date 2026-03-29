@@ -197,7 +197,10 @@ const CreatureCanvasComponent = {
 
       // ── Autonomous behaviour state machine ──────────────────
       // _behavX    : current horizontal offset from canvas centre (pixels)
-      // _behavVX   : velocity in pixels/second (+ve = right, −ve = left)
+      // _behavY    : current vertical offset (pixels, +ve = down; sinusoidal wander)
+      // _behavVX   : horizontal velocity in pixels/second (+ve = right, −ve = left)
+      // _behavT    : accumulated movement time (seconds) — drives vertical wander
+      // _walkPhase : leg-cycle phase in radians — advances proportional to speed
       // _behavState: "idle" | "walk" | "run" | "jump" | "sleep"
       // _behavTimer: id from setTimeout for next state transition
       // _rafId     : requestAnimationFrame handle for the movement loop
@@ -205,7 +208,10 @@ const CreatureCanvasComponent = {
       // _jumpY     : current vertical offset during a jump arc (pixels)
       // _jumpVY    : vertical velocity for jump physics
       _behavX:     0,
+      _behavY:     0,
       _behavVX:    0,
+      _behavT:     0,
+      _walkPhase:  0,
       _behavState: "idle",
       _behavTimer: null,
       _rafId:      null,
@@ -386,6 +392,7 @@ const CreatureCanvasComponent = {
 
       if (state === "idle") {
         this._behavVX = 0;
+        this._behavY  = 0;
         this.pose     = "standing";
         this.draw();
         // Schedule next behaviour after 2–6 seconds.
@@ -398,6 +405,9 @@ const CreatureCanvasComponent = {
                   : this._behavX < -limit * 0.6 ?  1
                   : (Math.random() < 0.5 ? 1 : -1);
         this._behavVX    = dir * 40;   // 40 px/s
+        this._behavY     = 0;
+        this._behavT     = 0;
+        this._walkPhase  = 0;
         this.facingRight = dir > 0;
         this.pose        = "standing";
         this._lastTs     = null;
@@ -411,6 +421,9 @@ const CreatureCanvasComponent = {
                   : this._behavX < -limit * 0.6 ?  1
                   : (Math.random() < 0.5 ? 1 : -1);
         this._behavVX    = dir * 110;  // 110 px/s
+        this._behavY     = 0;
+        this._behavT     = 0;
+        this._walkPhase  = 0;
         this.facingRight = dir > 0;
         this.pose        = "alert";
         this._lastTs     = null;
@@ -421,6 +434,7 @@ const CreatureCanvasComponent = {
 
       } else if (state === "jump") {
         this._behavVX = 0;
+        this._behavY  = 0;
         this._jumpY   = 0;
         this._jumpVY  = -260;   // initial upward velocity (px/s, canvas Y is inverted)
         this.pose     = "playful";
@@ -430,6 +444,7 @@ const CreatureCanvasComponent = {
 
       } else if (state === "sleep") {
         this._behavVX = 0;
+        this._behavY  = 0;
         this.pose     = "sleeping";
         this.draw();
         // Sleep duration: 6–18 seconds (longer when unhealthier).
@@ -449,8 +464,8 @@ const CreatureCanvasComponent = {
 
     // ----------------------------------------------------------
     // rAF tick — called every frame while in a moving state.
-    // Updates position, applies edge bounce, handles jump arc,
-    // then redraws.
+    // Updates position, advances walk phase & vertical wander,
+    // applies edge bounce, handles jump arc, then redraws.
     // ----------------------------------------------------------
     _rafTick(ts) {
       if (!this._lastTs) this._lastTs = ts;
@@ -458,11 +473,24 @@ const CreatureCanvasComponent = {
       this._lastTs = ts;
 
       const W     = this.canvasW;
+      const H     = this.canvasH;
       const limit = W * 0.38;   // max horizontal offset from centre
       const state = this._behavState;
 
       if (state === "walk" || state === "run") {
         this._behavX += this._behavVX * dt;
+        this._behavT += dt;
+
+        // Advance leg-cycle phase proportional to horizontal speed.
+        // Walk cadence ≈ 2.5 Hz, run ≈ 4.5 Hz — tuned to look natural.
+        const phaseRate = state === "run" ? 4.5 * Math.PI * 2 : 2.5 * Math.PI * 2;
+        this._walkPhase += phaseRate * dt;
+
+        // Sinusoidal vertical wander — gentle up/down as the creature
+        // moves.  Amplitude is smaller for running (less head-bob at speed).
+        const wanderAmp  = state === "run" ? 8 : 18;
+        const wanderFreq = state === "run" ? 1.8 : 1.1; // Hz
+        this._behavY = Math.sin(this._behavT * wanderFreq * Math.PI * 2) * wanderAmp;
 
         // Bounce off edges: reverse velocity and flip facing.
         if (this._behavX > limit) {
@@ -474,6 +502,10 @@ const CreatureCanvasComponent = {
           this._behavVX =  Math.abs(this._behavVX);
           this.facingRight = true;
         }
+
+        // Also clamp vertical wander so creature doesn't float off canvas.
+        const vLimit = H * 0.18;
+        this._behavY = Math.max(-vLimit, Math.min(vLimit, this._behavY));
 
       } else if (state === "jump") {
         // Simple gravity: upward velocity decays, creature arcs up then lands.
@@ -506,6 +538,108 @@ const CreatureCanvasComponent = {
     _behaviourLoop() {
       const jitter = Math.random() * 3000;   // 0–3 s stagger
       this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), jitter);
+    },
+
+    // ----------------------------------------------------------
+    // Draw four legs in a walking/running gait.
+    //
+    // phase      : _walkPhase in radians — advances each frame
+    // isRunning  : true → wider stride, more air time
+    //
+    // Gait model: each of the 4 legs gets a phase offset so that
+    // diagonally opposite pairs move together (trot gait):
+    //   Front-left  + Back-right : phase + 0
+    //   Front-right + Back-left  : phase + π
+    //
+    // Each leg is rendered with a forward/back swing angle derived
+    // from sin(phase + offset).  The leg root stays fixed at the
+    // torso attachment point; only the lower leg + paw pivot.
+    // ----------------------------------------------------------
+    _drawWalkingLegs(ctx, p, sc, ox, oy, hue, sat, lit, phase, isRunning) {
+      const lLen   = p.legLen * sc;
+      const lW     = p.legThick * sc;
+      const stride = isRunning ? 0.52 : 0.32;   // max swing angle in radians
+      // Air-time: at peak stride the paw lifts off the ground slightly.
+      const liftAmp = isRunning ? lLen * 0.22 : lLen * 0.10;
+
+      // Leg attachment points on the torso (matching the standing pose).
+      // Two back legs (tail side, +x), two front legs (head side, -x).
+      // "behind" = drawn at reduced alpha for depth.
+      const legs = [
+        // back-right (behind)
+        { x: ox + p.bodyLen * sc * 0.52, yBase: oy + p.bodyH * sc * 0.55, phOff: 0,          behind: true  },
+        // back-left  (front)
+        { x: ox - p.bodyLen * sc * 0.18, yBase: oy + p.bodyH * sc * 0.55, phOff: Math.PI,    behind: false },
+        // front-right (behind)
+        { x: ox + p.bodyLen * sc * 0.42, yBase: oy + p.bodyH * sc * 0.60, phOff: Math.PI,    behind: true  },
+        // front-left  (front)
+        { x: ox - p.bodyLen * sc * 0.08, yBase: oy + p.bodyH * sc * 0.60, phOff: 0,          behind: false },
+      ];
+
+      for (const leg of legs) {
+        const swing  = Math.sin(phase + leg.phOff) * stride;  // −stride … +stride
+        // Lift paw off ground when swinging forward (positive swing = forward).
+        const lift   = Math.max(0, Math.sin(phase + leg.phOff)) * liftAmp;
+
+        const alpha  = leg.behind ? 0.62 : 1.0;
+        ctx.globalAlpha = alpha;
+
+        // Upper leg: fixed at attachment point, rotated by swing angle.
+        const upperLen = lLen * 0.55;
+        const lowerLen = lLen * 0.55;
+        const ux  = leg.x + Math.sin(swing) * upperLen;
+        const uy  = leg.yBase + Math.cos(swing) * upperLen;
+
+        // Lower leg: continues from knee, with a slight counter-angle
+        // so the paw stays closer to the ground during mid-swing.
+        const kneeAngle = swing * 0.5;
+        const px  = ux + Math.sin(swing - kneeAngle) * lowerLen;
+        const py  = uy + Math.cos(swing - kneeAngle) * lowerLen - lift;
+
+        // Draw upper leg (thigh)
+        const legGr = this.linGrad(ctx, leg.x, leg.yBase, ux, uy,
+          [[0, this.hsl(hue, sat - 5, lit - 5)], [1, this.hsl(hue, sat - 10, lit - 14)]]
+        );
+        ctx.fillStyle   = legGr;
+        ctx.strokeStyle = this.hsl(hue, sat, lit - 22);
+        ctx.lineWidth   = 1;
+        ctx.beginPath();
+        // Thigh as a rounded trapezoid centred on the attachment → knee line
+        const tx = ux - leg.x, ty = uy - leg.yBase;
+        const tLen = Math.sqrt(tx * tx + ty * ty) || 1;
+        const nx = -ty / tLen * lW * 0.5, ny = tx / tLen * lW * 0.5;
+        ctx.moveTo(leg.x + nx * 1.0, leg.yBase + ny * 1.0);
+        ctx.quadraticCurveTo(leg.x + tx * 0.4 + nx * 0.8, leg.yBase + ty * 0.4 + ny * 0.8,
+                             ux + nx * 0.6,                uy + ny * 0.6);
+        ctx.lineTo(ux - nx * 0.6, uy - ny * 0.6);
+        ctx.quadraticCurveTo(leg.x + tx * 0.4 - nx * 0.8, leg.yBase + ty * 0.4 - ny * 0.8,
+                             leg.x - nx * 1.0,             leg.yBase - ny * 1.0);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+
+        // Draw lower leg (shin)
+        const lx = px - ux, ly = py - uy;
+        const lLenV = Math.sqrt(lx * lx + ly * ly) || 1;
+        const lnx = -ly / lLenV * lW * 0.4, lny = lx / lLenV * lW * 0.4;
+        ctx.beginPath();
+        ctx.moveTo(ux + lnx, uy + lny);
+        ctx.quadraticCurveTo(ux + lx * 0.5 + lnx * 0.7, uy + ly * 0.5 + lny * 0.7,
+                             px + lnx * 0.5,             py + lny * 0.5);
+        ctx.lineTo(px - lnx * 0.5, py - lny * 0.5);
+        ctx.quadraticCurveTo(ux + lx * 0.5 - lnx * 0.7, uy + ly * 0.5 - lny * 0.7,
+                             ux - lnx,                   uy - lny);
+        ctx.closePath();
+        ctx.fill(); ctx.stroke();
+
+        // Paw
+        ctx.fillStyle   = this.hsl(hue, sat - 15, lit + 10);
+        ctx.strokeStyle = this.hsl(hue, sat, lit - 22);
+        ctx.lineWidth   = 0.8;
+        ctx.beginPath();
+        ctx.ellipse(px, py, lW * 0.72, lW * 0.42, swing * 0.6, 0, Math.PI * 2);
+        ctx.fill(); ctx.stroke();
+      }
+      ctx.globalAlpha = 1;
     },
 
     // ----------------------------------------------------------
@@ -1072,16 +1206,15 @@ const CreatureCanvasComponent = {
       // Expression: animation override takes priority over game-state-derived expression.
       const expression = this.animExpression || this._buildExpression(pose, this.feedState, this.activityState);
 
-      // Horizontal position: _behavX offsets the creature from canvas centre.
-      // _jumpY offsets it upward (negative canvas-Y) during a jump arc.
-      // We apply a single ctx.translate so all subsequent drawing is shifted.
+      // Horizontal drift + vertical wander + jump arc all applied as a
+      // single translate so every subsequent draw call is shifted together.
+      // _behavY  : slow sinusoidal wander during walk/run
+      // _jumpY   : physics-driven upward arc (negative = above ground)
       const centreX = W * 0.46;
       const centreY = H * 0.52;
 
       ctx.save();
-
-      // Horizontal drift offset — applied before any facing flip.
-      ctx.translate(this._behavX, -this._jumpY);
+      ctx.translate(this._behavX, this._behavY - this._jumpY);
 
       if (this.facingRight) {
         // Mirror: translate to right edge of canvas, flip, then draw normally.
@@ -1157,7 +1290,21 @@ const CreatureCanvasComponent = {
       }
 
       // ---- LEGS ----
-      if (pt.legOverride) {
+      // During walk/run the autonomous behaviour system supplies a
+      // gait-animated leg override using the live _walkPhase value.
+      // All other states (idle, jump, reaction anim) use the pose's
+      // own legOverride (or the standard standing legs if null).
+      const isWalking = !p.fossil &&
+        (this._behavState === "walk" || this._behavState === "run") &&
+        !this.animPose;  // reaction animation takes priority
+
+      if (isWalking) {
+        this._drawWalkingLegs(
+          ctx, p, sc, ox, oy, hue, sat, lit,
+          this._walkPhase,
+          this._behavState === "run"
+        );
+      } else if (pt.legOverride) {
         pt.legOverride(ctx, p, sc, ox, oy, hue, sat, lit);
       } else {
         // Standard standing legs
