@@ -197,9 +197,11 @@ const CreatureCanvasComponent = {
 
       // ── Autonomous behaviour state machine ──────────────────
       // _behavX    : current horizontal offset from canvas centre (pixels)
-      // _behavY    : current vertical offset (pixels, +ve = down; sinusoidal wander)
+      // _behavY    : current vertical offset from canvas centre (pixels, +ve = down)
+      //              Driven by _behavVY — creature actually travels up/down the canvas.
       // _behavVX   : horizontal velocity in pixels/second (+ve = right, −ve = left)
-      // _behavT    : accumulated movement time (seconds) — drives vertical wander
+      // _behavVY   : vertical velocity in pixels/second (+ve = down, −ve = up)
+      // _behavT    : accumulated movement time (seconds) — drives body-bob sine wave
       // _walkPhase : leg-cycle phase in radians — advances proportional to speed
       // _behavState: "idle" | "walk" | "run" | "jump" | "sleep"
       // _behavTimer: id from setTimeout for next state transition
@@ -210,6 +212,7 @@ const CreatureCanvasComponent = {
       _behavX:     0,
       _behavY:     0,
       _behavVX:    0,
+      _behavVY:    0,
       _behavT:     0,
       _walkPhase:  0,
       _behavState: "idle",
@@ -392,6 +395,7 @@ const CreatureCanvasComponent = {
 
       if (state === "idle") {
         this._behavVX = 0;
+        this._behavVY = 0;
         this._behavY  = 0;
         this.pose     = "standing";
         this.draw();
@@ -400,15 +404,20 @@ const CreatureCanvasComponent = {
         this._behavTimer = setTimeout(() => this._enterBehaviour(this._pickBehaviour()), delay);
 
       } else if (state === "walk") {
-        // Choose a direction; prefer moving toward centre if near an edge.
-        const dir = this._behavX > limit * 0.6 ? -1
-                  : this._behavX < -limit * 0.6 ?  1
-                  : (Math.random() < 0.5 ? 1 : -1);
-        this._behavVX    = dir * 40;   // 40 px/s
-        this._behavY     = 0;
+        // Pick independent random horizontal and vertical directions.
+        // Prefer moving back toward centre if near an edge.
+        const dirX = this._behavX > limit * 0.6 ? -1
+                   : this._behavX < -limit * 0.6 ?  1
+                   : (Math.random() < 0.5 ? 1 : -1);
+        const vLimit = this.canvasH * 0.38;
+        const dirY = this._behavY > vLimit * 0.6 ? -1
+                   : this._behavY < -vLimit * 0.6 ?  1
+                   : (Math.random() < 0.5 ? 1 : -1);
+        this._behavVX    = dirX * 40;   // 40 px/s horizontal
+        this._behavVY    = dirY * 28;   // 28 px/s vertical (~70% of horizontal)
         this._behavT     = 0;
         this._walkPhase  = 0;
-        this.facingRight = dir > 0;
+        this.facingRight = dirX > 0;
         this.pose        = "standing";
         this._lastTs     = null;
         this._startRaf();
@@ -417,14 +426,18 @@ const CreatureCanvasComponent = {
         this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), dur);
 
       } else if (state === "run") {
-        const dir = this._behavX > limit * 0.6 ? -1
-                  : this._behavX < -limit * 0.6 ?  1
-                  : (Math.random() < 0.5 ? 1 : -1);
-        this._behavVX    = dir * 110;  // 110 px/s
-        this._behavY     = 0;
+        const dirX = this._behavX > limit * 0.6 ? -1
+                   : this._behavX < -limit * 0.6 ?  1
+                   : (Math.random() < 0.5 ? 1 : -1);
+        const vLimit = this.canvasH * 0.38;
+        const dirY = this._behavY > vLimit * 0.6 ? -1
+                   : this._behavY < -vLimit * 0.6 ?  1
+                   : (Math.random() < 0.5 ? 1 : -1);
+        this._behavVX    = dirX * 110;  // 110 px/s horizontal
+        this._behavVY    = dirY * 75;   // 75 px/s vertical (~70% of horizontal)
         this._behavT     = 0;
         this._walkPhase  = 0;
-        this.facingRight = dir > 0;
+        this.facingRight = dirX > 0;
         this.pose        = "alert";
         this._lastTs     = null;
         this._startRaf();
@@ -434,6 +447,7 @@ const CreatureCanvasComponent = {
 
       } else if (state === "jump") {
         this._behavVX = 0;
+        this._behavVY = 0;
         this._behavY  = 0;
         this._jumpY   = 0;
         this._jumpVY  = -260;   // initial upward velocity (px/s, canvas Y is inverted)
@@ -444,6 +458,7 @@ const CreatureCanvasComponent = {
 
       } else if (state === "sleep") {
         this._behavVX = 0;
+        this._behavVY = 0;
         this._behavY  = 0;
         this.pose     = "sleeping";
         this.draw();
@@ -479,33 +494,35 @@ const CreatureCanvasComponent = {
 
       if (state === "walk" || state === "run") {
         this._behavX += this._behavVX * dt;
+        this._behavY += this._behavVY * dt;
         this._behavT += dt;
 
-        // Advance leg-cycle phase proportional to horizontal speed.
+        // Advance leg-cycle phase proportional to speed.
         // Walk cadence ≈ 2.5 Hz, run ≈ 4.5 Hz — tuned to look natural.
         const phaseRate = state === "run" ? 4.5 * Math.PI * 2 : 2.5 * Math.PI * 2;
         this._walkPhase += phaseRate * dt;
 
-        // Sinusoidal vertical wander — gentle up/down as the creature
-        // moves.  Amplitude is smaller for running (less head-bob at speed).
-        const wanderAmp  = state === "run" ? 8 : 18;
-        const wanderFreq = state === "run" ? 1.8 : 1.1; // Hz
-        this._behavY = Math.sin(this._behavT * wanderFreq * Math.PI * 2) * wanderAmp;
-
-        // Bounce off edges: reverse velocity and flip facing.
-        if (this._behavX > limit) {
-          this._behavX  =  limit;
+        // Horizontal edge bounce — reverse X velocity and flip facing.
+        const xLimit = W * 0.38;
+        if (this._behavX > xLimit) {
+          this._behavX  =  xLimit;
           this._behavVX = -Math.abs(this._behavVX);
           this.facingRight = false;
-        } else if (this._behavX < -limit) {
-          this._behavX  = -limit;
+        } else if (this._behavX < -xLimit) {
+          this._behavX  = -xLimit;
           this._behavVX =  Math.abs(this._behavVX);
           this.facingRight = true;
         }
 
-        // Also clamp vertical wander so creature doesn't float off canvas.
-        const vLimit = H * 0.18;
-        this._behavY = Math.max(-vLimit, Math.min(vLimit, this._behavY));
+        // Vertical edge bounce — reverse Y velocity.
+        const yLimit = H * 0.38;
+        if (this._behavY > yLimit) {
+          this._behavY  =  yLimit;
+          this._behavVY = -Math.abs(this._behavVY);
+        } else if (this._behavY < -yLimit) {
+          this._behavY  = -yLimit;
+          this._behavVY =  Math.abs(this._behavVY);
+        }
 
       } else if (state === "jump") {
         // Simple gravity: upward velocity decays, creature arcs up then lands.
@@ -1214,7 +1231,18 @@ const CreatureCanvasComponent = {
       const centreY = H * 0.52;
 
       ctx.save();
-      ctx.translate(this._behavX, this._behavY - this._jumpY);
+
+      // _behavY = directional vertical travel (bounces off edges like _behavX).
+      // _bobY   = tiny sinusoidal body-bob layered on top — 5px walk, 3px run.
+      //           Gives a natural rhythm without competing with the real movement.
+      const isMoving = this._behavState === "walk" || this._behavState === "run";
+      const bobAmp   = this._behavState === "run" ? 3 : 5;
+      const bobFreq  = this._behavState === "run" ? 1.8 : 1.1;
+      const _bobY    = isMoving
+        ? Math.sin(this._behavT * bobFreq * Math.PI * 2) * bobAmp
+        : 0;
+
+      ctx.translate(this._behavX, this._behavY + _bobY - this._jumpY);
 
       if (this.facingRight) {
         // Mirror: translate to right edge of canvas, flip, then draw normally.
