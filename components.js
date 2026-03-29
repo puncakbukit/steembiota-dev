@@ -107,10 +107,6 @@ const AuthComponent = {
 };
 
 // ---- LoadingSpinnerComponent ----
-// NOTE: The @keyframes spin animation is declared in index.html's global <style>
-// block, not inline here.  Injecting <style> inside a component template is
-// non-standard HTML (only valid inside <head>) and may break in strict rendering
-// modes or future shadow-DOM encapsulation.
 const LoadingSpinnerComponent = {
   name: "LoadingSpinnerComponent",
   props: {
@@ -124,6 +120,7 @@ const LoadingSpinnerComponent = {
         border-radius:50%;animation:spin 0.8s linear infinite;
       "></div>
       <p style="margin-top:10px;font-size:14px;">{{ message }}</p>
+      <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
     </div>
   `
 };
@@ -133,10 +130,6 @@ const UserProfileComponent = {
   name: "UserProfileComponent",
   props: { profileData: Object },
   methods: {
-    // Validates that a profile image/cover URL uses HTTPS, blocking mixed-content
-    // and javascript: protocol injection.  The URL is not further validated as an
-    // image host — browsers do not execute scripts loaded via CSS url(), so the
-    // security risk of a non-image URL is limited to an unwanted network fetch.
     safeUrl(url) {
       try {
         const u = new URL(url);
@@ -201,12 +194,39 @@ const CreatureCanvasComponent = {
       animPose:        null,
       animExpression:  null,
       _animTimers:     [],   // pending setTimeout ids so we can cancel on unmount
+
+      // ── Autonomous behaviour state machine ──────────────────
+      // _behavX    : current horizontal offset from canvas centre (pixels)
+      // _behavVX   : velocity in pixels/second (+ve = right, −ve = left)
+      // _behavState: "idle" | "walk" | "run" | "jump" | "sleep"
+      // _behavTimer: id from setTimeout for next state transition
+      // _rafId     : requestAnimationFrame handle for the movement loop
+      // _lastTs    : timestamp of the previous rAF tick (for delta-time)
+      // _jumpY     : current vertical offset during a jump arc (pixels)
+      // _jumpVY    : vertical velocity for jump physics
+      _behavX:     0,
+      _behavVX:    0,
+      _behavState: "idle",
+      _behavTimer: null,
+      _rafId:      null,
+      _lastTs:     null,
+      _jumpY:      0,
+      _jumpVY:     0,
     };
   },
   watch: {
     genome()           { this.$nextTick(() => this.draw()); },
     age()              { this.$nextTick(() => this.draw()); },
-    fossil()           { this.$nextTick(() => this.draw()); },
+    fossil(isFossil)   {
+      this.$nextTick(() => this.draw());
+      if (isFossil) {
+        // Fossils don't move — stop the behaviour loop cleanly.
+        if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+        if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+        this._behavState = "idle";
+        this._behavVX    = 0;
+      }
+    },
     feedState()        { this.$nextTick(() => this.draw()); },
     activityState()    { this.$nextTick(() => this.draw()); },
     reactionTrigger(v) { if (v > 0) this._startReaction(); }
@@ -214,12 +234,28 @@ const CreatureCanvasComponent = {
   mounted() {
     this.$emit("facing-resolved", this.facingRight);
     this.$emit("pose-resolved", this.pose);
+    // Restore saved position from sessionStorage so the creature
+    // remembers where it was between page navigations.
+    if (this.genome) {
+      const key = `sb_bx_${this.genome.GEN}_${this.genome.MOR}`;
+      const saved = sessionStorage.getItem(key);
+      if (saved !== null) this._behavX = parseFloat(saved) || 0;
+    }
     this.draw();
+    if (!this.fossil) this._behaviourLoop();
   },
   beforeUnmount() {
     // Cancel any pending animation timers to avoid drawing on a detached canvas.
     this._animTimers.forEach(id => clearTimeout(id));
     this._animTimers = [];
+    // Stop the autonomous behaviour loop.
+    if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+    if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+    // Persist current position so the creature remembers where it was.
+    if (this.genome) {
+      const key = `sb_bx_${this.genome.GEN}_${this.genome.MOR}`;
+      sessionStorage.setItem(key, String(this._behavX));
+    }
   },
   methods: {
 
@@ -228,11 +264,19 @@ const CreatureCanvasComponent = {
     // played with, or walked. Cycles through 4 pose+expression
     // pairs 2–3 times, then restores the resting state.
     // If called while already animating, restarts cleanly.
+    // Pauses autonomous behaviour for the duration.
     // ----------------------------------------------------------
     _startReaction() {
       // Cancel any in-progress animation.
       this._animTimers.forEach(id => clearTimeout(id));
       this._animTimers = [];
+
+      // Pause autonomous movement — stop the rAF loop and any pending
+      // state transition so the reaction plays without interference.
+      if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+      if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+      this._behavVX    = 0;
+      this._behavState = "idle";
 
       // The 4-step sequence: same order every time, predictable and legible.
       const POSES       = ["standing", "alert",   "playful",  "sitting"];
@@ -262,13 +306,206 @@ const CreatureCanvasComponent = {
         }
       }
 
-      // Restore resting state after the full sequence.
+      // Restore resting state after the full sequence, then resume behaviour.
       const restId = setTimeout(() => {
         this.animPose       = null;
         this.animExpression = null;
         this.draw();
+        if (!this.fossil) this._behaviourLoop();
       }, elapsed);
       this._animTimers.push(restId);
+    },
+
+    // ==============================================================
+    // AUTONOMOUS BEHAVIOUR SYSTEM
+    //
+    // A lightweight state machine that makes the creature move and
+    // act on its own.  States:
+    //
+    //   idle   — standing still; waits a random interval then picks
+    //            the next behaviour.
+    //   walk   — drifts horizontally at ~40 px/s; uses "standing"
+    //            pose with a subtle leg-bob.
+    //   run    — drifts at ~110 px/s; uses "alert" pose.
+    //   jump   — parabolic arc upward then back down; uses "playful"
+    //            pose on the way up, "alert" on landing.
+    //   sleep  — stays still using "sleeping" pose for a long random
+    //            duration.
+    //
+    // Health/mood bias (strong):
+    //   health ≥ 0.80 (thriving)  →  prefer run + jump, rarely sleep
+    //   health ≥ 0.55 (happy)     →  balanced mix
+    //   health ≥ 0.30 (content)   →  more walk, some sleep
+    //   health  > 0   (hungry)    →  mostly sleep/idle
+    //   health = 0    (unfed)     →  almost entirely sleep
+    //
+    // Movement is driven by requestAnimationFrame for smooth 60fps
+    // sliding; the state machine uses setTimeout for coarse timing.
+    // Position is saved to sessionStorage on unmount and restored on
+    // mount so the creature remembers where it was between navigations.
+    // ==============================================================
+
+    // ----------------------------------------------------------
+    // Compute a weighted behaviour probability table from health.
+    // Returns { idle, walk, run, jump, sleep } summing to 1.0.
+    // ----------------------------------------------------------
+    _behaviourWeights() {
+      const h = this.feedState ? this.feedState.healthPct : 0.5;
+      if (h >= 0.80) return { idle: 0.05, walk: 0.20, run: 0.35, jump: 0.35, sleep: 0.05 };
+      if (h >= 0.55) return { idle: 0.15, walk: 0.35, run: 0.20, jump: 0.20, sleep: 0.10 };
+      if (h >= 0.30) return { idle: 0.20, walk: 0.40, run: 0.05, jump: 0.05, sleep: 0.30 };
+      if (h >  0.00) return { idle: 0.15, walk: 0.15, run: 0.00, jump: 0.00, sleep: 0.70 };
+      return              { idle: 0.05, walk: 0.05, run: 0.00, jump: 0.00, sleep: 0.90 };
+    },
+
+    // Pick one behaviour key from the weight table using a uniform draw.
+    _pickBehaviour() {
+      const w = this._behaviourWeights();
+      let r = Math.random();
+      for (const [key, prob] of Object.entries(w)) {
+        r -= prob;
+        if (r <= 0) return key;
+      }
+      return "idle";
+    },
+
+    // ----------------------------------------------------------
+    // Enter a new behaviour state.  Stops the rAF loop if the
+    // new state is stationary, starts it if moving.
+    // ----------------------------------------------------------
+    _enterBehaviour(state) {
+      // Clear any pending state-transition timer.
+      if (this._behavTimer) { clearTimeout(this._behavTimer); this._behavTimer = null; }
+      // Stop existing rAF loop — will be restarted below if needed.
+      if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+
+      this._behavState = state;
+      const W = this.canvasW;
+      // Half the canvas width minus a margin so the creature stays visible.
+      const limit = W * 0.38;
+
+      if (state === "idle") {
+        this._behavVX = 0;
+        this.pose     = "standing";
+        this.draw();
+        // Schedule next behaviour after 2–6 seconds.
+        const delay = 2000 + Math.random() * 4000;
+        this._behavTimer = setTimeout(() => this._enterBehaviour(this._pickBehaviour()), delay);
+
+      } else if (state === "walk") {
+        // Choose a direction; prefer moving toward centre if near an edge.
+        const dir = this._behavX > limit * 0.6 ? -1
+                  : this._behavX < -limit * 0.6 ?  1
+                  : (Math.random() < 0.5 ? 1 : -1);
+        this._behavVX    = dir * 40;   // 40 px/s
+        this.facingRight = dir > 0;
+        this.pose        = "standing";
+        this._lastTs     = null;
+        this._startRaf();
+        // Walk for 2–5 seconds then go idle.
+        const dur = 2000 + Math.random() * 3000;
+        this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), dur);
+
+      } else if (state === "run") {
+        const dir = this._behavX > limit * 0.6 ? -1
+                  : this._behavX < -limit * 0.6 ?  1
+                  : (Math.random() < 0.5 ? 1 : -1);
+        this._behavVX    = dir * 110;  // 110 px/s
+        this.facingRight = dir > 0;
+        this.pose        = "alert";
+        this._lastTs     = null;
+        this._startRaf();
+        // Run for 1–2.5 seconds then idle.
+        const dur = 1000 + Math.random() * 1500;
+        this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), dur);
+
+      } else if (state === "jump") {
+        this._behavVX = 0;
+        this._jumpY   = 0;
+        this._jumpVY  = -260;   // initial upward velocity (px/s, canvas Y is inverted)
+        this.pose     = "playful";
+        this._lastTs  = null;
+        this._startRaf();
+        // Jump ends when the rAF loop detects landing (see _rafTick).
+
+      } else if (state === "sleep") {
+        this._behavVX = 0;
+        this.pose     = "sleeping";
+        this.draw();
+        // Sleep duration: 6–18 seconds (longer when unhealthier).
+        const h   = this.feedState ? this.feedState.healthPct : 0.5;
+        const dur = (6 + Math.random() * 12 + (1 - h) * 8) * 1000;
+        this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), dur);
+      }
+    },
+
+    // ----------------------------------------------------------
+    // Start (or restart) the requestAnimationFrame movement loop.
+    // ----------------------------------------------------------
+    _startRaf() {
+      if (this._rafId) cancelAnimationFrame(this._rafId);
+      this._rafId = requestAnimationFrame(ts => this._rafTick(ts));
+    },
+
+    // ----------------------------------------------------------
+    // rAF tick — called every frame while in a moving state.
+    // Updates position, applies edge bounce, handles jump arc,
+    // then redraws.
+    // ----------------------------------------------------------
+    _rafTick(ts) {
+      if (!this._lastTs) this._lastTs = ts;
+      const dt = Math.min((ts - this._lastTs) / 1000, 0.1);  // seconds; capped at 0.1s
+      this._lastTs = ts;
+
+      const W     = this.canvasW;
+      const limit = W * 0.38;   // max horizontal offset from centre
+      const state = this._behavState;
+
+      if (state === "walk" || state === "run") {
+        this._behavX += this._behavVX * dt;
+
+        // Bounce off edges: reverse velocity and flip facing.
+        if (this._behavX > limit) {
+          this._behavX  =  limit;
+          this._behavVX = -Math.abs(this._behavVX);
+          this.facingRight = false;
+        } else if (this._behavX < -limit) {
+          this._behavX  = -limit;
+          this._behavVX =  Math.abs(this._behavVX);
+          this.facingRight = true;
+        }
+
+      } else if (state === "jump") {
+        // Simple gravity: upward velocity decays, creature arcs up then lands.
+        const GRAVITY = 520;    // px/s²
+        this._jumpVY += GRAVITY * dt;
+        this._jumpY  += this._jumpVY  * dt;
+
+        if (this._jumpY >= 0) {
+          // Landed — snap to ground, switch to alert pose briefly then idle.
+          this._jumpY  = 0;
+          this._jumpVY = 0;
+          this.pose    = "alert";
+          this.draw();
+          this._rafId = null;
+          // Brief landing pause then go idle.
+          this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), 600);
+          return;
+        }
+      }
+
+      this.draw();
+      this._rafId = requestAnimationFrame(ts2 => this._rafTick(ts2));
+    },
+
+    // ----------------------------------------------------------
+    // Entry point — called from mounted() to start the loop.
+    // Begins with a short random delay so creatures on the same
+    // page don't all move in lockstep.
+    // ----------------------------------------------------------
+    _behaviourLoop() {
+      const jitter = Math.random() * 3000;   // 0–3 s stagger
+      this._behavTimer = setTimeout(() => this._enterBehaviour("idle"), jitter);
     },
 
     // ----------------------------------------------------------
@@ -824,25 +1061,36 @@ const CreatureCanvasComponent = {
       const W = canvas.width, H = canvas.height;
       ctx.clearRect(0, 0, W, H);
 
-      if (this.facingRight) {
-        ctx.save();
-        ctx.translate(W, 0);
-        ctx.scale(-1, 1);
-      }
-
       const g = this.genome;
       const p = this.buildPhenotype(g, this.age, this.feedState);
       const sc = p.bodyScale;
 
-      // Pose: animation override takes priority over resting random pose.
+      // Pose priority: reaction anim > behaviour state > resting random pose.
       const pose = (!p.fossil && (this.animPose || this.pose)) ? (this.animPose || this.pose) : "standing";
       const pt   = this.buildPoseTransform(pose, p, sc, W, H);
 
       // Expression: animation override takes priority over game-state-derived expression.
       const expression = this.animExpression || this._buildExpression(pose, this.feedState, this.activityState);
 
-      const ox = W * 0.46;
-      const oy = H * 0.52 + pt.oyDelta;
+      // Horizontal position: _behavX offsets the creature from canvas centre.
+      // _jumpY offsets it upward (negative canvas-Y) during a jump arc.
+      // We apply a single ctx.translate so all subsequent drawing is shifted.
+      const centreX = W * 0.46;
+      const centreY = H * 0.52;
+
+      ctx.save();
+
+      // Horizontal drift offset — applied before any facing flip.
+      ctx.translate(this._behavX, -this._jumpY);
+
+      if (this.facingRight) {
+        // Mirror: translate to right edge of canvas, flip, then draw normally.
+        ctx.translate(W, 0);
+        ctx.scale(-1, 1);
+      }
+
+      const ox = centreX;
+      const oy = centreY + pt.oyDelta;
 
       const H1  = this.hsl;
       const hue = p.finalHue;
@@ -869,7 +1117,7 @@ const CreatureCanvasComponent = {
           ctx.stroke();
         }
         ctx.globalAlpha = 1;
-        if (this.facingRight) ctx.restore();
+        ctx.restore();   // always restore — we always ctx.save() now
         return;
       }
 
@@ -1157,7 +1405,7 @@ const CreatureCanvasComponent = {
         ctx.globalAlpha = 1;
       }
 
-      if (this.facingRight) ctx.restore();
+      ctx.restore();   // always restore — we always ctx.save() now
     },
 
     // ----------------------------------------------------------
