@@ -107,6 +107,10 @@ const AuthComponent = {
 };
 
 // ---- LoadingSpinnerComponent ----
+// NOTE: The @keyframes spin animation is declared in index.html's global <style>
+// block, not inline here.  Injecting <style> inside a component template is
+// non-standard HTML (only valid inside <head>) and may break in strict rendering
+// modes or future shadow-DOM encapsulation.
 const LoadingSpinnerComponent = {
   name: "LoadingSpinnerComponent",
   props: {
@@ -120,7 +124,6 @@ const LoadingSpinnerComponent = {
         border-radius:50%;animation:spin 0.8s linear infinite;
       "></div>
       <p style="margin-top:10px;font-size:14px;">{{ message }}</p>
-      <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
     </div>
   `
 };
@@ -130,6 +133,10 @@ const UserProfileComponent = {
   name: "UserProfileComponent",
   props: { profileData: Object },
   methods: {
+    // Validates that a profile image/cover URL uses HTTPS, blocking mixed-content
+    // and javascript: protocol injection.  The URL is not further validated as an
+    // image host — browsers do not execute scripts loaded via CSS url(), so the
+    // security risk of a non-image URL is limited to an unwanted network fetch.
     safeUrl(url) {
       try {
         const u = new URL(url);
