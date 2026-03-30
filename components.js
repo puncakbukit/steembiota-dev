@@ -234,6 +234,7 @@ const CreatureCanvasComponent = {
         if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
         this._behavState = "idle";
         this._behavVX    = 0;
+        this._behavVY    = 0;
       }
     },
     feedState()        { this.$nextTick(() => this.draw()); },
@@ -246,9 +247,15 @@ const CreatureCanvasComponent = {
     // Restore saved position from sessionStorage so the creature
     // remembers where it was between page navigations.
     if (this.genome) {
-      const key = `sb_bx_${this.genome.GEN}_${this.genome.MOR}`;
+      const key = `sb_pos_${this.genome.GEN}_${this.genome.MOR}`;
       const saved = sessionStorage.getItem(key);
-      if (saved !== null) this._behavX = parseFloat(saved) || 0;
+      if (saved) {
+        try {
+          const { x, y } = JSON.parse(saved);
+          this._behavX = parseFloat(x) || 0;
+          this._behavY = parseFloat(y) || 0;
+        } catch {}
+      }
     }
     this.draw();
     if (!this.fossil) this._behaviourLoop();
@@ -262,8 +269,8 @@ const CreatureCanvasComponent = {
     if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
     // Persist current position so the creature remembers where it was.
     if (this.genome) {
-      const key = `sb_bx_${this.genome.GEN}_${this.genome.MOR}`;
-      sessionStorage.setItem(key, String(this._behavX));
+      const key = `sb_pos_${this.genome.GEN}_${this.genome.MOR}`;
+      sessionStorage.setItem(key, JSON.stringify({ x: this._behavX, y: this._behavY }));
     }
   },
   methods: {
@@ -282,9 +289,12 @@ const CreatureCanvasComponent = {
 
       // Pause autonomous movement — stop the rAF loop and any pending
       // state transition so the reaction plays without interference.
+      // Zero velocities but keep _behavX/_behavY so the creature
+      // reacts in place without teleporting back to the canvas centre.
       if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
       if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
       this._behavVX    = 0;
+      this._behavVY    = 0;
       this._behavState = "idle";
 
       // The 4-step sequence: same order every time, predictable and legible.
@@ -396,7 +406,7 @@ const CreatureCanvasComponent = {
       if (state === "idle") {
         this._behavVX = 0;
         this._behavVY = 0;
-        this._behavY  = 0;
+        // Do NOT reset _behavX / _behavY — creature stays where it stopped.
         this.pose     = "standing";
         this.draw();
         // Schedule next behaviour after 2–6 seconds.
@@ -448,7 +458,7 @@ const CreatureCanvasComponent = {
       } else if (state === "jump") {
         this._behavVX = 0;
         this._behavVY = 0;
-        this._behavY  = 0;
+        // Do NOT reset _behavX / _behavY — jump from current position.
         this._jumpY   = 0;
         this._jumpVY  = -260;   // initial upward velocity (px/s, canvas Y is inverted)
         this.pose     = "playful";
@@ -459,7 +469,7 @@ const CreatureCanvasComponent = {
       } else if (state === "sleep") {
         this._behavVX = 0;
         this._behavVY = 0;
-        this._behavY  = 0;
+        // Do NOT reset _behavX / _behavY — sleep in place.
         this.pose     = "sleeping";
         this.draw();
         // Sleep duration: 6–18 seconds (longer when unhealthier).
