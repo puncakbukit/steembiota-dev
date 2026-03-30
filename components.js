@@ -184,7 +184,7 @@ const CreatureCanvasComponent = {
     canvasW:         { type: Number,  default: 400   },
     canvasH:         { type: Number,  default: 320   }
   },
-  emits: ["facing-resolved", "pose-resolved"],
+  emits: ["facing-resolved", "pose-resolved", "clicked"],
   data() {
     const poses = ["standing", "sitting", "sleeping", "alert", "playful"];
     return {
@@ -203,12 +203,14 @@ const CreatureCanvasComponent = {
       // _behavVY   : vertical velocity in pixels/second (+ve = down, −ve = up)
       // _behavT    : accumulated movement time (seconds) — drives body-bob sine wave
       // _walkPhase : leg-cycle phase in radians — advances proportional to speed
-      // _behavState: "idle" | "walk" | "run" | "jump" | "sleep"
+      // _behavState: "idle" | "walk" | "run" | "jump" | "sleep" | "walkto"
       // _behavTimer: id from setTimeout for next state transition
       // _rafId     : requestAnimationFrame handle for the movement loop
       // _lastTs    : timestamp of the previous rAF tick (for delta-time)
       // _jumpY     : current vertical offset during a jump arc (pixels)
       // _jumpVY    : vertical velocity for jump physics
+      // _walkToX/Y : target canvas-offset coords for the "walkto" state
+      // _clickReactionIndex : cycles through poke reactions in order
       _behavX:     0,
       _behavY:     0,
       _behavVX:    0,
@@ -221,6 +223,9 @@ const CreatureCanvasComponent = {
       _lastTs:     null,
       _jumpY:      0,
       _jumpVY:     0,
+      _walkToX:    0,
+      _walkToY:    0,
+      _clickReactionIndex: 0,
     };
   },
   watch: {
@@ -490,7 +495,8 @@ const CreatureCanvasComponent = {
     // ----------------------------------------------------------
     // rAF tick — called every frame while in a moving state.
     // Updates position, advances walk phase & vertical wander,
-    // applies edge bounce, handles jump arc, then redraws.
+    // applies edge bounce, handles jump arc and walk-to-point,
+    // then redraws.
     // ----------------------------------------------------------
     _rafTick(ts) {
       if (!this._lastTs) this._lastTs = ts;
@@ -499,7 +505,6 @@ const CreatureCanvasComponent = {
 
       const W     = this.canvasW;
       const H     = this.canvasH;
-      const limit = W * 0.38;   // max horizontal offset from centre
       const state = this._behavState;
 
       if (state === "walk" || state === "run") {
@@ -534,6 +539,35 @@ const CreatureCanvasComponent = {
           this._behavVY =  Math.abs(this._behavVY);
         }
 
+      } else if (state === "walkto") {
+        // Walk toward _walkToX / _walkToY at walk speed.
+        const dx   = this._walkToX - this._behavX;
+        const dy   = this._walkToY - this._behavY;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const ARRIVE_THRESHOLD = 6;   // pixels — close enough to stop
+
+        if (dist < ARRIVE_THRESHOLD) {
+          // Arrived — snap to target and go idle.
+          this._behavX = this._walkToX;
+          this._behavY = this._walkToY;
+          this._rafId  = null;
+          this._enterBehaviour("idle");
+          return;
+        }
+
+        // Normalise direction and move at walk speed (40 px/s).
+        const SPEED = 40;
+        const step  = Math.min(SPEED * dt, dist);  // never overshoot
+        this._behavX += (dx / dist) * step;
+        this._behavY += (dy / dist) * step;
+        this._behavT += dt;
+
+        // Advance leg phase at walk cadence.
+        this._walkPhase += 2.5 * Math.PI * 2 * dt;
+
+        // Face the direction of travel.
+        this.facingRight = dx > 0;
+
       } else if (state === "jump") {
         // Simple gravity: upward velocity decays, creature arcs up then lands.
         const GRAVITY = 520;    // px/s²
@@ -555,6 +589,129 @@ const CreatureCanvasComponent = {
 
       this.draw();
       this._rafId = requestAnimationFrame(ts2 => this._rafTick(ts2));
+    },
+
+    // ----------------------------------------------------------
+    // Walk-to-point — creature walks directly toward a canvas
+    // offset position (targetX, targetY in _behavX/_behavY space).
+    // Cancels any current autonomous behaviour cleanly.
+    // ----------------------------------------------------------
+    _enterWalkTo(targetX, targetY) {
+      if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+      if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+
+      this._walkToX    = targetX;
+      this._walkToY    = targetY;
+      this._behavState = "walkto";
+      this._behavVX    = 0;
+      this._behavVY    = 0;
+      this._behavT     = 0;
+      this._walkPhase  = 0;
+      this.pose        = "standing";
+      this._lastTs     = null;
+      this._startRaf();
+    },
+
+    // ----------------------------------------------------------
+    // Poke reaction — short expressive response when the creature
+    // is clicked directly.  Cycles through three moods in order
+    // so repeated pokes feel varied rather than repetitive:
+    //   0: Surprised  — alert pose + alert expression (1.2 s)
+    //   1: Happy      — playful pose + thriving expression (1.5 s)
+    //   2: Grumpy     — sitting pose + hungry expression (1.2 s)
+    // After the flash the creature resumes autonomous behaviour.
+    // ----------------------------------------------------------
+    _pokeReaction() {
+      // Cancel any running autonomous state but preserve position.
+      if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+      if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+      this._behavVX    = 0;
+      this._behavVY    = 0;
+      this._behavState = "idle";
+
+      const REACTIONS = [
+        { pose: "alert",    expression: "alert",    dur: 1200 },
+        { pose: "playful",  expression: "thriving", dur: 1500 },
+        { pose: "sitting",  expression: "hungry",   dur: 1200 },
+      ];
+      const r = REACTIONS[this._clickReactionIndex % REACTIONS.length];
+      this._clickReactionIndex++;
+
+      this.animPose       = r.pose;
+      this.animExpression = r.expression;
+      this.draw();
+
+      const id = setTimeout(() => {
+        this.animPose       = null;
+        this.animExpression = null;
+        this.draw();
+        if (!this.fossil) this._behaviourLoop();
+      }, r.dur);
+      this._animTimers.push(id);
+
+      // Emit so parent views can react (e.g. show a tooltip).
+      this.$emit("clicked", { reaction: r.pose });
+    },
+
+    // ----------------------------------------------------------
+    // Canvas click handler — decides whether the click hit the
+    // creature's body or empty space, and responds accordingly.
+    //
+    // Hit test: the creature body is an ellipse centred at the
+    // creature's current canvas position.  We use the standard
+    // ellipse equation:  (dx/a)² + (dy/b)² ≤ 1
+    // where a = bodyLen*scale, b = bodyH*scale from buildPhenotype.
+    // The canvas transform (translate + optional flip) is accounted
+    // for by converting the click into creature-local coordinates.
+    // ----------------------------------------------------------
+    _handleCanvasClick(event) {
+      if (this.fossil || !this.genome) return;
+
+      const canvas = this.$refs.canvas;
+      const rect   = canvas.getBoundingClientRect();
+
+      // Click position in CSS pixels → canvas pixels.
+      const scaleX = canvas.width  / rect.width;
+      const scaleY = canvas.height / rect.height;
+      const clickX = (event.clientX - rect.left) * scaleX;
+      const clickY = (event.clientY - rect.top)  * scaleY;
+
+      const W = canvas.width, H = canvas.height;
+
+      // Creature's current centre in canvas coordinates.
+      const isMoving = this._behavState === "walk" || this._behavState === "run"
+                    || this._behavState === "walkto";
+      const bobAmp   = this._behavState === "run" ? 3 : 5;
+      const bobFreq  = this._behavState === "run" ? 1.8 : 1.1;
+      const bobY     = isMoving
+        ? Math.sin(this._behavT * bobFreq * Math.PI * 2) * bobAmp : 0;
+
+      const creatureCanvasX = W * 0.46 + this._behavX;
+      const creatureCanvasY = H * 0.52 + this._behavY + bobY - this._jumpY;
+
+      // Hit test against body ellipse.
+      const p  = this.buildPhenotype(this.genome, this.age, this.feedState);
+      const sc = p.bodyScale;
+      const a  = p.bodyLen * sc;   // half-width (generous — includes head side)
+      const b  = p.bodyH   * sc * 1.4;  // half-height with a small tap margin
+
+      const dx = clickX - creatureCanvasX;
+      const dy = clickY - creatureCanvasY;
+      const hitCreature = (dx * dx) / (a * a) + (dy * dy) / (b * b) <= 1;
+
+      if (hitCreature) {
+        this._pokeReaction();
+      } else {
+        // Convert click to _behavX/_behavY offset space and walk there.
+        const targetX = clickX - W * 0.46;
+        const targetY = clickY - H * 0.52;
+        // Clamp to the movement limits so the creature never walks off-canvas.
+        const xLimit  = W * 0.38;
+        const yLimit  = H * 0.38;
+        const clampedX = Math.max(-xLimit, Math.min(xLimit, targetX));
+        const clampedY = Math.max(-yLimit, Math.min(yLimit, targetY));
+        this._enterWalkTo(clampedX, clampedY);
+      }
     },
 
     // ----------------------------------------------------------
@@ -1245,7 +1402,8 @@ const CreatureCanvasComponent = {
       // _behavY = directional vertical travel (bounces off edges like _behavX).
       // _bobY   = tiny sinusoidal body-bob layered on top — 5px walk, 3px run.
       //           Gives a natural rhythm without competing with the real movement.
-      const isMoving = this._behavState === "walk" || this._behavState === "run";
+      const isMoving = this._behavState === "walk" || this._behavState === "run"
+                    || this._behavState === "walkto";
       const bobAmp   = this._behavState === "run" ? 3 : 5;
       const bobFreq  = this._behavState === "run" ? 1.8 : 1.1;
       const _bobY    = isMoving
@@ -1333,7 +1491,8 @@ const CreatureCanvasComponent = {
       // All other states (idle, jump, reaction anim) use the pose's
       // own legOverride (or the standard standing legs if null).
       const isWalking = !p.fossil &&
-        (this._behavState === "walk" || this._behavState === "run") &&
+        (this._behavState === "walk" || this._behavState === "run" ||
+         this._behavState === "walkto") &&
         !this.animPose;  // reaction animation takes priority
 
       if (isWalking) {
@@ -1774,7 +1933,7 @@ const CreatureCanvasComponent = {
       ctx.globalAlpha = 1;
     }
   },
-  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;"></canvas>`
+  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;" @click="_handleCanvasClick"></canvas>`
 };
 
 // ---- CreatureCardComponent ----
