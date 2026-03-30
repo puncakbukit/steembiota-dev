@@ -657,14 +657,16 @@ const CreatureCanvasComponent = {
     // Canvas click handler — decides whether the click hit the
     // creature's body or empty space, and responds accordingly.
     //
+    // Named without underscore prefix so Vue 3's template proxy
+    // exposes it — Vue 3 blocks underscore-prefixed names from
+    // template scope as a private-method convention.
+    //
     // Hit test: the creature body is an ellipse centred at the
     // creature's current canvas position.  We use the standard
     // ellipse equation:  (dx/a)² + (dy/b)² ≤ 1
     // where a = bodyLen*scale, b = bodyH*scale from buildPhenotype.
-    // The canvas transform (translate + optional flip) is accounted
-    // for by converting the click into creature-local coordinates.
     // ----------------------------------------------------------
-    _handleCanvasClick(event) {
+    onCanvasClick(event) {
       if (this.fossil || !this.genome) return;
 
       const canvas = this.$refs.canvas;
@@ -1933,7 +1935,7 @@ const CreatureCanvasComponent = {
       ctx.globalAlpha = 1;
     }
   },
-  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;" @click="_handleCanvasClick"></canvas>`
+  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;" @click="onCanvasClick"></canvas>`
 };
 
 // ---- CreatureCardComponent ----
