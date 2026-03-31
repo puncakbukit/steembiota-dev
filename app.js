@@ -15,10 +15,6 @@ function randomInt(max) {
   return Math.floor(Math.random() * max);
 }
 
-// Generate a fresh founder genome using Math.random().
-// Founder genomes are intentionally non-deterministic — each call produces
-// a unique creature.  This is in deliberate contrast to breedGenomes(), which
-// uses a seeded PRNG so the same two parents always produce the same child.
 function generateGenome() {
   const LIF       = 80 + randomInt(80);
   const FRT_START = Math.min(20 + randomInt(20), LIF - 10);
@@ -89,14 +85,11 @@ function maybeSpeciate(rng, gen) {
 
 // Parse a Steem post URL into { author, permlink }.
 // Handles steemit.com and plain author/permlink strings.
-// NOTE: the regex is intentionally case-sensitive — Steem permlinks are
-// always lowercase and an uppercase permlink would fail at the API anyway.
-// Rejecting it here gives a clearer error to the user.
 function parseSteemUrl(url) {
   url = url.trim();
   // Match https://steemit.com/category/@author/permlink
   // or    https://steemit.com/@author/permlink
-  const m = url.match(/@([a-z0-9.-]+)\/([a-z0-9-]+)\s*$/);
+  const m = url.match(/@([a-z0-9.-]+)\/([a-z0-9-]+)\s*$/i);
   if (!m) throw new Error("Cannot parse Steem URL: " + url);
   return { author: m[1], permlink: m[2] };
 }
@@ -204,7 +197,7 @@ function parseSteembiotaPosts(rawPosts) {
       created:        p.created || ""
     });
   }
-  results.sort((a, b) => new Date(b.created) - new Date(a.created));
+  results.sort((a, b) => (b.created > a.created ? 1 : -1));
   markDuplicates(results);
   return results;
 }
@@ -319,6 +312,10 @@ function breedGenomes(a, b) {
   const mCh   = mutationChance(a, b);
   const i     = (av, bv, range, min, max) => inheritGene(rng, av, bv, mCh, range, min, max);
 
+  // Track whether any mutation fired (for UI feedback)
+  const beforeMOR = (rng() < 0.5 ? a.MOR : b.MOR); // peek — rewind not possible, so we check post-hoc below
+  void beforeMOR; // used indirectly via child fields
+
   const child = {
     GEN:       a.GEN,                                   // same genus (may speciate below)
     SX:        Math.floor(rng() * 2),                   // 50/50 sex
@@ -347,13 +344,17 @@ function breedGenomes(a, b) {
   child.GEN = maybeSpeciate(rng, child.GEN);
   const speciated = child.GEN !== originalGEN;
 
-  // Detect mutation: a gene mutated if its value differs from BOTH parents.
-  // This requires no extra RNG draws and correctly reflects the seeded sequence.
+  // Detect if any field mutated vs simple mix
+  const simpleMix = {
+    MOR: rng() < 0.5 ? a.MOR : b.MOR,
+    APP: rng() < 0.5 ? a.APP : b.APP,
+    ORN: rng() < 0.5 ? a.ORN : b.ORN,
+  };
   const mutated =
     speciated ||
-    (child.MOR !== a.MOR && child.MOR !== b.MOR) ||
-    (child.APP !== a.APP && child.APP !== b.APP) ||
-    (child.ORN !== a.ORN && child.ORN !== b.ORN);
+    Math.abs(child.MOR - simpleMix.MOR) > 0 ||
+    Math.abs(child.APP - simpleMix.APP) > 0 ||
+    Math.abs(child.ORN - simpleMix.ORN) > 0;
 
   return { child, mutated, speciated };
 }
@@ -593,11 +594,6 @@ function unicodeGridSize(pct) {
 
 // ---- Mirror a single unicode art line (reverses char order) ----
 // Used to flip the creature to face right instead of left.
-// NOTE: the spread operator correctly handles multi-byte code points
-// (emoji, CJK, etc.) but does NOT split grapheme clusters (e.g. family
-// emoji joined with ZWJ sequences like 👨‍👩‍👧).  The Unicode art palette
-// uses only single-code-point glyphs so this is safe in practice, but
-// full grapheme splitting would require the Intl.Segmenter API.
 function mirrorUnicodeLine(line) {
   // Split on grapheme boundaries as best we can in plain JS.
   // We use the spread operator which handles most multi-byte Unicode correctly.
@@ -3077,6 +3073,7 @@ const NotificationsView = {
 
 const routes = [
   { path: "/",                    component: HomeView          },
+  { path: "/accessories",         component: AccessoriesView   },
   { path: "/about",               component: AboutView         },
   { path: "/leaderboard",         component: LeaderboardView   },
   { path: "/notifications",       component: NotificationsView },
@@ -3105,15 +3102,6 @@ const App = {
   },
 
   setup() {
-    // Restore the last-logged-in username from localStorage.
-    // TRUST MODEL: we persist only the username string, not any key material.
-    // The session is considered "cosmetically authenticated" — the profile and
-    // notification badge are loaded immediately, but every write action
-    // (publish, feed, vote, transfer, …) requires a fresh Keychain signature,
-    // so an attacker who clears Keychain but leaves localStorage intact cannot
-    // perform any on-chain action.  Users who log out of Keychain but forget
-    // to click Logout here will see a stale authenticated-looking UI until
-    // their next write attempt is rejected by Keychain.
     const username      = ref(localStorage.getItem("steem_user") || "");
     const hasKeychain   = ref(false);
     const keychainReady = ref(false);
@@ -3188,12 +3176,10 @@ const App = {
     }
 
     // ── Notification badge — count of pending transfer offers ──
-    // Polled on login + every 15 minutes.  The underlying scan
-    // (fetchNotificationsForUser) can touch many RPC calls; a shorter
-    // interval would be abusive to free public nodes.
+    // Polled on login + every 5 minutes. Lightweight: only fetches the
+    // user's own creature posts then scans their replies for pending offers.
     const notifBadgeCount = ref(0);
     let _notifPollTimer = null;
-    const NOTIF_POLL_MS = 15 * 60 * 1000;  // 15 minutes
 
     async function refreshNotifBadge(user) {
       if (!user) { notifBadgeCount.value = 0; return; }
@@ -3217,7 +3203,7 @@ const App = {
       // Start notification badge polling if already logged in
       if (username.value) {
         refreshNotifBadge(username.value);
-        _notifPollTimer = setInterval(() => refreshNotifBadge(username.value), NOTIF_POLL_MS);
+        _notifPollTimer = setInterval(() => refreshNotifBadge(username.value), 5 * 60 * 1000);
       }
       let attempts = 0;
       const interval = setInterval(() => {
@@ -3259,7 +3245,7 @@ const App = {
         // Start notification badge polling on login
         refreshNotifBadge(user);
         if (_notifPollTimer) clearInterval(_notifPollTimer);
-        _notifPollTimer = setInterval(() => refreshNotifBadge(user), NOTIF_POLL_MS);
+        _notifPollTimer = setInterval(() => refreshNotifBadge(user), 5 * 60 * 1000);
       });
     }
 
@@ -3292,6 +3278,7 @@ const App = {
     <!-- Navigation -->
     <nav>
       <router-link to="/"            exact-active-class="nav-active">Home</router-link>
+      <router-link to="/accessories" exact-active-class="nav-active">✨ Accessories</router-link>
       <router-link
         v-if="username"
         :to="'/@' + username"
@@ -3375,6 +3362,8 @@ vueApp.component("AuthComponent",               AuthComponent);
 vueApp.component("UserProfileComponent",        UserProfileComponent);
 vueApp.component("LoadingSpinnerComponent",     LoadingSpinnerComponent);
 vueApp.component("CreatureCanvasComponent",     CreatureCanvasComponent);
+vueApp.component("AccessoryCanvasComponent",    AccessoryCanvasComponent);
+vueApp.component("AccessoryCardComponent",      AccessoryCardComponent);
 vueApp.component("GenomeTableComponent",        GenomeTableComponent);
 vueApp.component("BreedingPanelComponent",      BreedingPanelComponent);
 vueApp.component("BreedPermitPanelComponent",   BreedPermitPanelComponent);

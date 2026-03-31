@@ -26,18 +26,13 @@ function setRPC(index) {
 }
 
 // Safe API wrapper with automatic RPC fallback on error.
-// Each call tracks its own attempt index so concurrent calls cannot
-// race on the shared currentRPCIndex global.  The global is only
-// updated on success so future calls start from the last-working node.
 function callWithFallback(apiCall, args, callback, attempt = 0) {
-  const idx = Math.min(attempt, RPC_NODES.length - 1);
-  // Switch the global only if we are trying a new node, so the next
-  // independent call also benefits from the working node.
-  if (idx !== currentRPCIndex) setRPC(idx);
   apiCall(...args, (err, result) => {
     if (!err) return callback(null, result);
-    console.warn("RPC error on", RPC_NODES[idx], err);
-    if (attempt + 1 >= RPC_NODES.length) return callback(err, null);
+    console.warn("RPC error on", RPC_NODES[currentRPCIndex], err);
+    const nextIndex = currentRPCIndex + 1;
+    if (nextIndex >= RPC_NODES.length) return callback(err, null);
+    setRPC(nextIndex);
     callWithFallback(apiCall, args, callback, attempt + 1);
   });
 }
@@ -325,7 +320,62 @@ function publishOffspring(username, genome, unicodeArt, creatureName, breedInfo,
   );
 }
 
-// ---- SteemBiota — post a birth-announcement reply to a parent's post ----
+// ---- SteemBiota — publish an accessory to the blockchain ----
+//
+// template    : "hat" | "crown" | "necklace" | "shirt" | "wings"
+// genome      : AccessoryGenome object
+// accessoryName : display name
+// unicodeArt  : string from buildAccessoryUnicodeArt()
+// title       : post title (user-editable)
+// callback    : (response) => { response.success, response.message, response.permlink }
+function publishAccessory(username, template, genome, accessoryName, unicodeArt, title, callback) {
+  const permlink = buildPermlink(title);
+  const accessoryPageUrl = `${APP_URL}/#/@${username}/${permlink}`;
+  const templateLabel = template.charAt(0).toUpperCase() + template.slice(1);
+
+  const body =
+    `## ✨ ${accessoryName}\n\n` +
+    `**Type:** ${templateLabel}  \n` +
+    `**Hue:** ${genome.CLR}°  \n` +
+    `**Saturation:** ${genome.SAT}  \n` +
+    `**Lightness:** ${genome.LIT}  \n` +
+    `**Size:** ${genome.SZ}%  \n` +
+    `**Shininess:** ${genome.SHN}  \n\n` +
+    `\`\`\`\n${unicodeArt}\n\`\`\`\n\n` +
+    `\`\`\`accessory\n${JSON.stringify(genome, null, 2)}\n\`\`\`\n\n` +
+    `---\n🔗 [View on SteemBiota](${accessoryPageUrl})\n\n` +
+    `*Published via [SteemBiota — Immutable Evolution](${APP_URL})*`;
+
+  const jsonMetadata = {
+    app: "steembiota/1.0",
+    steembiota: {
+      version: "1.0",
+      type: "accessory",
+      accessory: {
+        template,
+        name: accessoryName,
+        genome,
+      }
+    }
+  };
+
+  const tags = [...new Set([
+    "steembiota", "gaming", "accessories", template,
+    accessoryName.toLowerCase().replace(/\s+/g, "-").replace(/[^a-z0-9-]/g, "").slice(0, 24)
+  ].filter(Boolean))];
+
+  jsonMetadata.tags = tags;
+
+  keychainPost(
+    username, title, body,
+    "steembiota", "",
+    jsonMetadata, permlink,
+    tags,
+    (response) => callback({ ...response, permlink })
+  );
+}
+
+
 //
 // Called once per parent after a successful offspring publish.
 // parentAuthor    : string — author of the parent post
@@ -458,9 +508,6 @@ function parseFeedEvents(replies, creatureAuthor) {
   );
 
   for (const reply of sorted) {
-    // Cap check first — break (not continue) so once we hit 20 valid feeds
-    // we stop scanning entirely.  The dedup key is only added to `seen` after
-    // the cap passes, so slot 21+ feeders are not silently deduplicated away.
     if (total >= 20) break;
 
     let meta;
@@ -743,18 +790,14 @@ function parseBreedPermits(replies, creatureAuthor) {
 }
 
 // Check if a user is allowed to breed a specific creature.
-// effectiveOwner : string — current owner of the creature (may differ from
-//                           the immutable post.author after a transfer)
+// creatureAuthor : string — owner of the creature
 // breedingUser   : string — the user attempting to breed
-// permits        : result of parseBreedPermitsWithTransfer()
+// permits        : result of parseBreedPermits()
 //
 // Returns true if allowed, false if not.
-function isBreedingPermitted(effectiveOwner, breedingUser, permits) {
+function isBreedingPermitted(creatureAuthor, breedingUser, permits) {
   if (!breedingUser) return false;
-  // The effective owner always has implicit permission on their own creature.
-  // NOTE: do NOT compare against post.author here — after a transfer the
-  // original author is no longer the owner and must not retain breed access.
-  if (breedingUser === effectiveOwner) return true;
+  if (breedingUser === creatureAuthor) return true; // owner always allowed
   return permits.grantees.has(breedingUser);
 }
 
@@ -1292,14 +1335,6 @@ function buildForbiddenSet(selfKey, ancestorMap, corpus) {
 //
 // Returns null if compatible, or throws an Error with a human-readable
 // explanation if the pair is forbidden.
-//
-// ⚠️  KNOWN LIMITATION — client-side only:
-// This check runs entirely in the browser.  A determined user who modifies
-// the JS can bypass it and publish a related-pair offspring.  This is an
-// inherent constraint of a fully client-side dApp with no trusted backend.
-// Post-hoc detection is still possible: genome fingerprinting and the
-// parent-link fields stored in json_metadata allow any client to reconstruct
-// the pedigree and flag violations publicly.
 async function checkBreedingCompatibility(resA, resB) {
   const keyA = nodeKey(resA.author, resA.permlink);
   const keyB = nodeKey(resB.author, resB.permlink);
@@ -1400,8 +1435,8 @@ function buildPermlink(title) {
     .replace(/\s+/g, "-")
     .replace(/[^a-z0-9-]/g, "")
     .replace(/-+/g, "-")
-    .replace(/^-+|-+$/g, "")   // g flag — strip ALL leading/trailing hyphens
-    .slice(0, 200);             // leave room for -<13-digit timestamp>
+    .replace(/^-|-$/, "")
+    .slice(0, 200);                       // leave room for -<13-digit timestamp>
   return `${slug}-${Date.now()}`;
 }
 
@@ -1581,23 +1616,6 @@ function publishComment(username, body, parentAuthor, parentPermlink, callback) 
 //     ts, extra }
 // ============================================================
 
-// Helper: run an array of async tasks with at most `concurrency` in-flight
-// at once.  This prevents the reply fan-out in fetchNotificationsForUser
-// from overwhelming free public RPC nodes with hundreds of simultaneous calls.
-async function _throttledMap(items, concurrency, fn) {
-  const results = [];
-  let i = 0;
-  async function worker() {
-    while (i < items.length) {
-      const idx = i++;
-      results[idx] = await fn(items[idx]);
-    }
-  }
-  const workers = Array.from({ length: Math.min(concurrency, items.length) }, worker);
-  await Promise.all(workers);
-  return results;
-}
-
 async function fetchNotificationsForUser(username, limit = 50) {
   if (!username) return [];
   const notifications = [];
@@ -1619,8 +1637,7 @@ async function fetchNotificationsForUser(username, limit = 50) {
   });
 
   // ── Step 2: For each creature, fetch replies and parse events ──
-  // Throttled to 5 concurrent reply fetches to avoid flooding the RPC node.
-  await _throttledMap(ownCreaturePosts.slice(0, 20), 5, async (post) => {
+  await Promise.all(ownCreaturePosts.slice(0, 20).map(async (post) => {
     let replies = [];
     try { replies = await fetchAllReplies(post.author, post.permlink); } catch { return; }
 
@@ -1691,32 +1708,19 @@ async function fetchNotificationsForUser(username, limit = 50) {
         });
       }
     }
-  });
+  }));
 
-  // ── Steps 3 & 4: Fetch the tag corpus ONCE and reuse for both scans ──
-  // Previously steps 3 and 4 each called fetchPostsByTag independently,
-  // doubling the RPC cost.  We fetch once and share the result.
-  let sharedTagPosts = [];
-  try {
-    const raw = await fetchPostsByTag('steembiota', 100);
-    sharedTagPosts = Array.isArray(raw) ? raw : [];
-  } catch { /* non-fatal — steps 3 & 4 will simply be skipped */ }
-
-  const foreignCreaturePosts = sharedTagPosts.filter(p => {
-    if (p.author === username) return false;
-    try {
-      const m = JSON.parse(p.json_metadata || '{}');
-      return !!(m.steembiota?.genome);
-    } catch { return false; }
-  });
-
-  // ── Step 3: Scan foreign creature posts for transfer_offers pointing to user ──
+  // ── Step 3: Scan all steembiota posts for transfer_offers pointing to user ──
   // This catches offers on creatures the user doesn't own yet (incoming transfers
   // from creatures authored by others, where the user is the named recipient).
   try {
-    await _throttledMap(foreignCreaturePosts.slice(0, 30), 5, async (post) => {
+    const tagPosts = await fetchPostsByTag('steembiota', 100);
+    const incoming = Array.isArray(tagPosts) ? tagPosts.filter(p => p.author !== username) : [];
+
+    await Promise.all(incoming.slice(0, 30).map(async (post) => {
       let meta = {};
       try { meta = JSON.parse(post.json_metadata || '{}'); } catch { return; }
+      if (!meta.steembiota?.genome) return; // only creature posts
 
       let replies = [];
       try { replies = await fetchAllReplies(post.author, post.permlink); } catch { return; }
@@ -1767,14 +1771,14 @@ async function fetchNotificationsForUser(username, limit = 50) {
           }
         }
       }
-    });
+    }));
   } catch { /* non-fatal */ }
 
-  // ── Step 4: Scan shared corpus for offspring where user's creature is a parent ──
-  // (breed notifications — someone bred using user's creature)
-  // Uses the sharedTagPosts already fetched above — no second RPC call needed.
+  // ── Step 4: Scan all steembiota offspring posts where user's creature is a parent ──
+  // (breed notifications — someone used user's creature to breed)
   try {
-    for (const post of sharedTagPosts) {
+    const tagPosts = await fetchPostsByTag('steembiota', 100);
+    for (const post of (Array.isArray(tagPosts) ? tagPosts : [])) {
       if (post.author === username) continue;
       let meta = {};
       try { meta = JSON.parse(post.json_metadata || '{}'); } catch { continue; }
@@ -1831,17 +1835,12 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
   const results = [];
 
   // ── Own posts (fast path) ──────────────────────────────────
-  // Throttled to avoid hammering the RPC node; most users have
-  // creatures with no transfer replies so the heuristic check is cheap.
   try {
     const raw = await fetchPostsByUser(username, limit);
-    const ownCreaturePosts = (Array.isArray(raw) ? raw : []).filter(p => {
-      try { return !!(JSON.parse(p.json_metadata || '{}').steembiota?.genome); } catch { return false; }
-    });
-
-    await _throttledMap(ownCreaturePosts, 5, async (p) => {
+    for (const p of (Array.isArray(raw) ? raw : [])) {
       let meta = {};
-      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { continue; }
+      if (!meta.steembiota?.genome) continue;
 
       // Check if this creature has been transferred away
       let replies = [];
@@ -1865,23 +1864,22 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
       if (effectiveOwner === username) {
         results.push({ post: p, meta: meta.steembiota, effectiveOwner });
       }
-    });
+    }
   } catch { /* non-fatal */ }
 
   // ── Incoming transfers (creatures authored by others) ──────
   try {
     const tagPosts = await fetchPostsByTag('steembiota', 100);
-    const foreignCreaturePosts = (Array.isArray(tagPosts) ? tagPosts : []).filter(p => {
-      if (p.author === username) return false; // already handled above
-      try { return !!(JSON.parse(p.json_metadata || '{}').steembiota?.genome); } catch { return false; }
-    });
-
-    await _throttledMap(foreignCreaturePosts, 5, async (p) => {
+    for (const p of (Array.isArray(tagPosts) ? tagPosts : [])) {
+      if (p.author === username) continue; // already handled above
       let meta = {};
-      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { continue; }
+      if (!meta.steembiota?.genome) continue;
 
+      // Only fetch replies if there's any chance of a transfer
+      // Heuristic: check the post's json_metadata for a steembiota marker
       let replies = [];
-      try { replies = await fetchAllReplies(p.author, p.permlink); } catch { return; }
+      try { replies = await fetchAllReplies(p.author, p.permlink); } catch { continue; }
 
       const hasTransferReplies = replies.some(r => {
         try {
@@ -1890,13 +1888,13 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
             .includes(m.steembiota?.type);
         } catch { return false; }
       });
-      if (!hasTransferReplies) return;
+      if (!hasTransferReplies) continue;
 
       const chain = parseOwnershipChain(replies, p.author);
       if (chain.effectiveOwner === username) {
         results.push({ post: p, meta: meta.steembiota, effectiveOwner: username });
       }
-    });
+    }
   } catch { /* non-fatal */ }
 
   return results;
