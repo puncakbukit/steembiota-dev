@@ -760,7 +760,7 @@ const AccessoryCardComponent = {
   },
   data() { return { copied: false }; },
   computed: {
-    routePath()  { return "/@" + this.post.author + "/" + this.post.permlink; },
+    routePath()  { return "/acc/@" + this.post.author + "/" + this.post.permlink; },
     steemitUrl() { return "https://steemit.com/@" + this.post.author + "/" + this.post.permlink; },
     templateInfo() {
       return ACCESSORY_TEMPLATES.find(t => t.id === this.post.template) || ACCESSORY_TEMPLATES[0];
@@ -910,7 +910,7 @@ const AccessoriesView = {
           this.publishing = false;
           if (response.success) {
             this.notify(`✨ ${this.accessoryName} published!`, "success");
-            this.$router.push("/@" + this.username + "/" + response.permlink);
+            this.$router.push("/acc/@" + this.username + "/" + response.permlink);
           } else {
             this.notify("Publish failed: " + (response.message || "Unknown error"), "error");
           }
@@ -1101,7 +1101,378 @@ const AccessoriesView = {
 };
 
 // ============================================================
-// parseSteembiotaAccessories
+// AccessoryItemView  — route /@:author/:permlink (accessory posts)
+//
+// Detected by CreatureView when json_metadata.steembiota.type === "accessory".
+// Shows the canvas, parameter table, transfer panel (owner + recipient),
+// social interactions, and unicode art.
+// ============================================================
+
+const AccessoryItemView = {
+  name: "AccessoryItemView",
+  inject: ["username", "notify"],
+  components: { AccessoryCanvasComponent, LoadingSpinnerComponent },
+
+  data() {
+    return {
+      loading:        true,
+      loadError:      null,
+      genome:         null,
+      accTemplate:    "hat",
+      accName:        "",
+      author:         null,
+      permlink:       null,
+      created:        null,
+      effectiveOwner: null,
+      transferState:  null,
+      // Social
+      votes:          [],
+      rebloggers:     [],
+      socialLoading:  false,
+      // Transfer UI
+      transferExpanded:  false,
+      recipientInput:    "",
+      transferPublishing: false,
+      urlCopied:         false,
+    };
+  },
+
+  created() { this.loadAccessory(); },
+
+  computed: {
+    isOwner() {
+      return !!(this.username && this.effectiveOwner &&
+                this.username === this.effectiveOwner);
+    },
+    isPendingRecipient() {
+      if (!this.username || !this.transferState?.pendingOffer) return false;
+      return this.username === this.transferState.pendingOffer.to;
+    },
+    pendingOffer()    { return this.transferState?.pendingOffer    || null; },
+    transferHistory() { return this.transferState?.transferHistory || [];  },
+    hasHistory()      { return this.transferHistory.length > 0; },
+    steemitUrl() {
+      if (!this.author || !this.permlink) return null;
+      return `https://steemit.com/@${this.author}/${this.permlink}`;
+    },
+    templateInfo() {
+      return ACCESSORY_TEMPLATES.find(t => t.id === this.accTemplate)
+          || ACCESSORY_TEMPLATES[0];
+    },
+    unicodeArt() {
+      if (!this.genome) return "";
+      return buildAccessoryUnicodeArt(this.accTemplate, this.genome);
+    },
+  },
+
+  methods: {
+    async loadAccessory() {
+      this.loading   = true;
+      this.loadError = null;
+      const { author, permlink } = this.$route.params;
+      this.author   = author;
+      this.permlink = permlink;
+      try {
+        const post = await fetchPost(author, permlink);
+        if (!post || !post.author) throw new Error("Post not found.");
+        let meta = {};
+        try { meta = JSON.parse(post.json_metadata || "{}"); } catch {}
+        const sb = meta.steembiota;
+        if (!sb || sb.type !== "accessory" || !sb.accessory)
+          throw new Error("This post is not a SteemBiota accessory.");
+
+        this.accTemplate = sb.accessory.template || "hat";
+        this.genome      = sb.accessory.genome;
+        this.accName     = sb.accessory.name || author;
+        this.created     = post.created || null;
+
+        // Ownership chain
+        const replies       = await fetchAllReplies(author, permlink);
+        const ownership     = parseOwnershipChain(replies, author);
+        this.transferState  = ownership;
+        this.effectiveOwner = ownership.effectiveOwner;
+
+      } catch (err) {
+        this.loadError = err.message || "Failed to load accessory.";
+      }
+      this.loading = false;
+
+      if (!this.loadError) this.loadSocial();
+    },
+
+    async loadSocial() {
+      this.socialLoading = true;
+      try {
+        const [v, r] = await Promise.all([
+          fetchVotes(this.author, this.permlink),
+          fetchRebloggers(this.author, this.permlink),
+        ]);
+        this.votes      = v;
+        this.rebloggers = r;
+      } catch {}
+      this.socialLoading = false;
+    },
+
+    formatDate(ts) {
+      if (!ts) return "?";
+      return new Date(ts).toLocaleDateString(undefined,
+        { year: "numeric", month: "short", day: "numeric" });
+    },
+
+    copyUrl() {
+      if (!this.steemitUrl) return;
+      navigator.clipboard.writeText(this.steemitUrl).then(() => {
+        this.urlCopied = true;
+        setTimeout(() => { this.urlCopied = false; }, 1800);
+      }).catch(() => {});
+    },
+
+    // ── Transfer actions ──────────────────────────────────────
+    async sendOffer() {
+      const to = this.recipientInput.trim().toLowerCase();
+      if (!to)             { this.notify("Please enter a recipient username.", "error"); return; }
+      if (to === this.username) { this.notify("You cannot transfer to yourself.", "error"); return; }
+      if (!window.steem_keychain) { this.notify("Steem Keychain is not installed.", "error"); return; }
+      this.transferPublishing = true;
+      publishTransferOffer(
+        this.username, this.author, this.permlink, this.accName, to,
+        (res) => {
+          this.transferPublishing = false;
+          if (res.success) {
+            this.notify(`🤝 Transfer offer sent to @${to}.`, "success");
+            this.recipientInput = "";
+            this.transferState = {
+              ...(this.transferState || {}),
+              pendingOffer: { to, offerPermlink: res.permlink || "pending", offeredBy: this.username, ts: new Date() },
+            };
+          } else {
+            this.notify("Offer failed: " + (res.message || "Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    async cancelOffer() {
+      if (!window.steem_keychain) { this.notify("Steem Keychain is not installed.", "error"); return; }
+      this.transferPublishing = true;
+      publishTransferCancel(
+        this.username, this.author, this.permlink, this.accName,
+        (res) => {
+          this.transferPublishing = false;
+          if (res.success) {
+            this.notify("❌ Transfer offer cancelled.", "success");
+            this.transferState = { ...(this.transferState || {}), pendingOffer: null };
+          } else {
+            this.notify("Cancel failed: " + (res.message || "Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    async acceptOffer() {
+      if (!this.pendingOffer) return;
+      if (!window.steem_keychain) { this.notify("Steem Keychain is not installed.", "error"); return; }
+      this.transferPublishing = true;
+      publishTransferAccept(
+        this.username, this.author, this.permlink, this.accName,
+        this.pendingOffer.offerPermlink,
+        (res) => {
+          this.transferPublishing = false;
+          if (res.success) {
+            this.notify("✅ Ownership accepted! This accessory is now yours.", "success");
+            this.effectiveOwner = this.username;
+            this.transferState = {
+              ...(this.transferState || {}),
+              effectiveOwner:  this.username,
+              pendingOffer:    null,
+              transferHistory: [
+                ...(this.transferHistory),
+                { from: this.pendingOffer.offeredBy, to: this.username, ts: new Date() }
+              ],
+            };
+          } else {
+            this.notify("Accept failed: " + (res.message || "Unknown error"), "error");
+          }
+        }
+      );
+    },
+  },
+
+  template: `
+    <div style="padding:20px 16px;max-width:680px;margin:0 auto;">
+
+      <loading-spinner-component v-if="loading"></loading-spinner-component>
+
+      <div v-else-if="loadError"
+        style="color:#ff8a80;font-size:14px;text-align:center;padding:40px 0;">
+        ⚠ {{ loadError }}
+      </div>
+
+      <template v-else>
+
+        <!-- Header -->
+        <div style="text-align:center;margin-bottom:16px;">
+          <div style="font-size:1.4rem;font-weight:bold;color:#ce93d8;margin-bottom:4px;">
+            {{ templateInfo.icon }} {{ accName }}
+          </div>
+          <div style="font-size:0.78rem;color:#666;">
+            {{ templateInfo.label }} · @{{ author }}
+            <span v-if="created"> · {{ created.slice(0,10) }}</span>
+          </div>
+          <div style="font-size:0.75rem;margin-top:4px;">
+            <span style="color:#555;">Owner: </span>
+            <span style="color:#ce93d8;">@{{ effectiveOwner }}</span>
+          </div>
+        </div>
+
+        <!-- Canvas -->
+        <div style="text-align:center;margin-bottom:20px;">
+          <accessory-canvas-component
+            :template="accTemplate"
+            :genome="genome"
+            :canvas-w="400"
+            :canvas-h="320"
+            style="margin:0 auto;background:#111;border-radius:8px;
+                   border:1px solid #2a1a2a;display:block;"
+          ></accessory-canvas-component>
+        </div>
+
+        <!-- Parameter table -->
+        <div style="max-width:400px;margin:0 auto 20px;background:#0a0a0a;
+                    border:1px solid #1e1e1e;border-radius:8px;padding:14px;">
+          <div style="font-size:0.72rem;color:#666;letter-spacing:0.06em;margin-bottom:10px;">
+            PARAMETERS
+          </div>
+          <div v-for="[key, label] in [
+              ['CLR','Hue'],['SAT','Saturation'],['LIT','Lightness'],
+              ['SZ','Size %'],['SHN','Shininess'],['VAR','Shape Var'],
+              ['ACC','Accent'],['STR','Structure'],['ORN','Ornament']
+            ]" :key="key"
+            style="display:flex;justify-content:space-between;
+                   font-size:0.75rem;padding:3px 0;border-bottom:1px solid #111;">
+            <span style="color:#666;">{{ label }}</span>
+            <span style="color:#aaa;font-family:monospace;">{{ genome[key] }}</span>
+          </div>
+        </div>
+
+        <!-- Pending recipient accept panel -->
+        <div v-if="isPendingRecipient && pendingOffer"
+          style="max-width:480px;margin:0 auto 16px;padding:16px 18px;border-radius:10px;
+                 background:#0d1a0d;border:1px solid #2e7d32;">
+          <div style="font-size:1rem;font-weight:bold;color:#a5d6a7;margin-bottom:8px;">
+            🤝 Ownership Transfer Offer
+          </div>
+          <p style="font-size:0.83rem;color:#888;margin:0 0 14px;line-height:1.5;">
+            @{{ pendingOffer.offeredBy || "The current owner" }} is offering to transfer
+            <strong style="color:#eee;">{{ accName }}</strong> to you.
+          </p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap;">
+            <button @click="acceptOffer" :disabled="transferPublishing"
+              style="background:#1a3a1a;">
+              {{ transferPublishing ? "Publishing…" : "✅ Accept Ownership" }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Owner transfer panel -->
+        <div v-if="isOwner" style="max-width:480px;margin:0 auto 16px;">
+          <div @click="transferExpanded = !transferExpanded"
+            style="display:flex;align-items:center;justify-content:space-between;
+                   cursor:pointer;padding:10px 14px;border-radius:8px;
+                   background:#0a0a12;border:1px solid #1a1a2e;user-select:none;">
+            <span style="font-size:0.88rem;color:#80cbc4;font-weight:bold;">
+              🤝 Transfer Ownership
+              <span v-if="pendingOffer"
+                style="font-weight:normal;color:#ffb74d;font-size:0.80rem;margin-left:8px;">
+                ⏳ pending → @{{ pendingOffer.to }}
+              </span>
+              <span v-else-if="hasHistory"
+                style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
+                {{ transferHistory.length }} transfer{{ transferHistory.length===1?"":"s" }}
+              </span>
+            </span>
+            <span style="color:#444;font-size:0.78rem;">
+              {{ transferExpanded ? "▲ collapse" : "▼ manage" }}
+            </span>
+          </div>
+
+          <div v-if="transferExpanded"
+            style="border:1px solid #1a1a2e;border-top:none;border-radius:0 0 8px 8px;
+                   background:#08080f;padding:14px;">
+            <div v-if="pendingOffer"
+              style="padding:12px;border-radius:8px;background:#1a1200;
+                     border:1px solid #3a2800;margin-bottom:14px;">
+              <div style="font-size:0.80rem;color:#ffb74d;font-weight:bold;margin-bottom:6px;">
+                ⏳ Pending → @{{ pendingOffer.to }}
+              </div>
+              <button @click="cancelOffer" :disabled="transferPublishing"
+                style="background:#1a0000;color:#ff8a80;border:1px solid #3b0000;font-size:0.78rem;">
+                {{ transferPublishing ? "Publishing…" : "❌ Cancel Offer" }}
+              </button>
+            </div>
+            <template v-else>
+              <div style="font-size:0.75rem;color:#80cbc4;text-transform:uppercase;
+                          letter-spacing:0.07em;margin-bottom:8px;">Send Transfer Offer</div>
+              <div style="display:flex;flex-direction:column;gap:8px;">
+                <input v-model="recipientInput" type="text"
+                  placeholder="Recipient username (without @)"
+                  style="font-size:13px;width:100%;"
+                  @keydown.enter="sendOffer"
+                />
+                <button @click="sendOffer"
+                  :disabled="transferPublishing || !recipientInput.trim()"
+                  style="background:#0d1a2e;">
+                  {{ transferPublishing ? "Publishing…" : "🤝 Send Offer" }}
+                </button>
+              </div>
+            </template>
+
+            <template v-if="hasHistory">
+              <div style="font-size:0.75rem;color:#80cbc4;text-transform:uppercase;
+                          letter-spacing:0.07em;margin:14px 0 8px;">Transfer History</div>
+              <div v-for="(t, i) in transferHistory" :key="i"
+                style="font-size:0.75rem;color:#555;padding:5px 0;
+                       border-bottom:1px solid #111;display:flex;gap:8px;align-items:center;">
+                <span style="color:#3a3a3a;">{{ formatDate(t.ts) }}</span>
+                <span style="color:#444;">@{{ t.from }}</span>
+                <span style="color:#2a2a2a;">→</span>
+                <span style="color:#80cbc4;">@{{ t.to }}</span>
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- Social bar -->
+        <div style="max-width:480px;margin:0 auto 16px;display:flex;gap:14px;
+                    align-items:center;justify-content:center;font-size:0.78rem;color:#666;">
+          <span v-if="!socialLoading">❤️ {{ votes.length }} vote{{ votes.length===1?"":"s" }}</span>
+          <span v-if="!socialLoading">🔁 {{ rebloggers.length }} resteem{{ rebloggers.length===1?"":"s" }}</span>
+          <span v-if="steemitUrl">
+            <a :href="steemitUrl" target="_blank" style="color:#7b1fa2;font-size:0.75rem;">
+              View on Steemit ↗
+            </a>
+          </span>
+          <button @click="copyUrl"
+            style="font-size:0.72rem;background:#1a1a1a;color:#555;
+                   border:1px solid #2a2a2a;padding:3px 10px;">
+            {{ urlCopied ? "✓ Copied" : "🔗 Copy URL" }}
+          </button>
+        </div>
+
+        <!-- Unicode art -->
+        <div style="max-width:480px;margin:0 auto;">
+          <div style="font-size:0.72rem;color:#444;letter-spacing:0.06em;margin-bottom:6px;">
+            UNICODE RENDER
+          </div>
+          <pre style="background:#000;padding:14px;border-radius:6px;color:#afa;
+                      font-size:13px;line-height:1.4;display:block;overflow-x:auto;">{{ unicodeArt }}</pre>
+        </div>
+
+      </template>
+    </div>
+  `
+};
+
 // Filters raw Steem posts down to accessory posts, newest first.
 // ============================================================
 

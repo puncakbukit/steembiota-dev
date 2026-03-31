@@ -330,7 +330,7 @@ function publishOffspring(username, genome, unicodeArt, creatureName, breedInfo,
 // callback    : (response) => { response.success, response.message, response.permlink }
 function publishAccessory(username, template, genome, accessoryName, unicodeArt, title, callback) {
   const permlink = buildPermlink(title);
-  const accessoryPageUrl = `${APP_URL}/#/@${username}/${permlink}`;
+  const accessoryPageUrl = `${APP_URL}/#/acc/@${username}/${permlink}`;
   const templateLabel = template.charAt(0).toUpperCase() + template.slice(1);
 
   const body =
@@ -341,7 +341,9 @@ function publishAccessory(username, template, genome, accessoryName, unicodeArt,
     `**Lightness:** ${genome.LIT}  \n` +
     `**Size:** ${genome.SZ}%  \n` +
     `**Shininess:** ${genome.SHN}  \n\n` +
+    `### Unicode Render\n\n` +
     `\`\`\`\n${unicodeArt}\n\`\`\`\n\n` +
+    `### Accessory Data\n\n` +
     `\`\`\`accessory\n${JSON.stringify(genome, null, 2)}\n\`\`\`\n\n` +
     `---\n🔗 [View on SteemBiota](${accessoryPageUrl})\n\n` +
     `*Published via [SteemBiota — Immutable Evolution](${APP_URL})*`;
@@ -1598,7 +1600,62 @@ function publishComment(username, body, parentAuthor, parentPermlink, callback) 
 }
 
 // ============================================================
-// NOTIFICATION SYSTEM
+// OWNED ACCESSORIES — mirrors fetchCreaturesOwnedBy but for
+// type:"accessory" posts.  Resolves effective ownership from
+// the same two-sided transfer chain used by creatures.
+// ============================================================
+
+async function fetchAccessoriesOwnedBy(username, limit = 100) {
+  if (!username) return [];
+  const results = [];
+
+  // ── Own posts ──────────────────────────────────────────────
+  try {
+    const raw = await fetchPostsByUser(username, limit);
+    await _throttledMap((Array.isArray(raw) ? raw : []).filter(p => {
+      try { const m = JSON.parse(p.json_metadata || '{}'); return m.steembiota?.type === 'accessory'; } catch { return false; }
+    }), 5, async (p) => {
+      let meta = {};
+      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+      let replies = [];
+      try { replies = await fetchAllReplies(p.author, p.permlink); } catch {}
+      const hasTransfer = replies.some(r => {
+        try { const m = JSON.parse(r.json_metadata || '{}'); return ['transfer_offer','transfer_accept','transfer_cancel'].includes(m.steembiota?.type); } catch { return false; }
+      });
+      const effectiveOwner = hasTransfer ? parseOwnershipChain(replies, p.author).effectiveOwner : p.author;
+      if (effectiveOwner === username) {
+        const acc = meta.steembiota.accessory;
+        results.push({ author: p.author, permlink: p.permlink, name: acc?.name || p.author, template: acc?.template || 'hat', genome: acc?.genome, created: p.created || '', effectiveOwner });
+      }
+    });
+  } catch {}
+
+  // ── Incoming transfers ─────────────────────────────────────
+  try {
+    const tagPosts = await fetchPostsByTag('steembiota', 100);
+    await _throttledMap((Array.isArray(tagPosts) ? tagPosts : []).filter(p => {
+      if (p.author === username) return false;
+      try { const m = JSON.parse(p.json_metadata || '{}'); return m.steembiota?.type === 'accessory'; } catch { return false; }
+    }), 5, async (p) => {
+      let meta = {};
+      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+      let replies = [];
+      try { replies = await fetchAllReplies(p.author, p.permlink); } catch { return; }
+      const hasTransfer = replies.some(r => {
+        try { const m = JSON.parse(r.json_metadata || '{}'); return ['transfer_offer','transfer_accept','transfer_cancel'].includes(m.steembiota?.type); } catch { return false; }
+      });
+      if (!hasTransfer) return;
+      const chain = parseOwnershipChain(replies, p.author);
+      if (chain.effectiveOwner === username) {
+        const acc = meta.steembiota.accessory;
+        results.push({ author: p.author, permlink: p.permlink, name: acc?.name || p.author, template: acc?.template || 'hat', genome: acc?.genome, created: p.created || '', effectiveOwner: username });
+      }
+    });
+  } catch {}
+
+  return results;
+}
+
 //
 // Scans the reply trees of a user's own creature posts to find
 // events where other users interacted with them.
