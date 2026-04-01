@@ -47,6 +47,27 @@ function callWithFallbackAsync(apiCall, args) {
   });
 }
 
+// Run an array of async tasks with at most `concurrency` in-flight at once.
+// Used by fetchCreaturesOwnedBy, fetchAccessoriesOwnedBy, and
+// fetchNotificationsForUser to avoid flooding free public RPC nodes
+// with hundreds of simultaneous reply fetches.
+async function _throttledMap(items, concurrency, fn) {
+  const results = [];
+  let i = 0;
+  async function worker() {
+    while (i < items.length) {
+      const idx = i++;
+      results[idx] = await fn(items[idx]);
+    }
+  }
+  const workers = Array.from(
+    { length: Math.min(concurrency, Math.max(1, items.length)) },
+    worker
+  );
+  await Promise.all(workers);
+  return results;
+}
+
 // ---- Account helpers ----
 
 // Fetch a single Steem account and extract its profile metadata.
