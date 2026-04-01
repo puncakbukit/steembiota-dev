@@ -1449,8 +1449,9 @@ const ProfileView = {
 
   async created() {
     const user = this.$route.params.user;
-    // Load both tabs in parallel — each is non-fatal independently
-    Promise.all([
+    // Load both tabs in parallel — await so errors surface and Vue
+    // reactivity picks up the results correctly.
+    await Promise.all([
       this.loadCreatures(user),
       this.loadAccessories(user),
     ]);
