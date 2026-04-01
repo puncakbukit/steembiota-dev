@@ -1613,6 +1613,7 @@ async function fetchAccessoriesOwnedBy(username, limit = 100) {
   try {
     const raw = await fetchPostsByUser(username, limit);
     await _throttledMap((Array.isArray(raw) ? raw : []).filter(p => {
+      if (p.author !== username) return false;  // skip resteems
       try { const m = JSON.parse(p.json_metadata || '{}'); return m.steembiota?.type === 'accessory'; } catch { return false; }
     }), 5, async (p) => {
       let meta = {};
@@ -1767,22 +1768,39 @@ async function fetchNotificationsForUser(username, limit = 50) {
     }
   }));
 
-  // ── Step 3: Scan all steembiota posts for transfer_offers pointing to user ──
-  // This catches offers on creatures the user doesn't own yet (incoming transfers
-  // from creatures authored by others, where the user is the named recipient).
+  // ── Steps 3 & 4: Fetch the tag corpus ONCE, reuse for both scans ──────
+  // A single fetchPostsByTag call covers both steps, halving the RPC cost.
+  // Step 3 now covers BOTH creature and accessory posts so that accessory
+  // transfer_offers also generate notifications for the named recipient.
+  let sharedTagPosts = [];
   try {
-    const tagPosts = await fetchPostsByTag('steembiota', 100);
-    const incoming = Array.isArray(tagPosts) ? tagPosts.filter(p => p.author !== username) : [];
+    const raw = await fetchPostsByTag('steembiota', 100);
+    sharedTagPosts = Array.isArray(raw) ? raw : [];
+  } catch { /* non-fatal */ }
 
-    await Promise.all(incoming.slice(0, 30).map(async (post) => {
+  // ── Step 3: Scan foreign steembiota posts for transfer_offers TO this user ──
+  // Covers creatures AND accessories authored by others.
+  try {
+    const foreignPosts = sharedTagPosts.filter(p => {
+      if (p.author === username) return false;
+      try {
+        const m = JSON.parse(p.json_metadata || '{}');
+        // Accept any steembiota post with content (creature genome or accessory)
+        return !!(m.steembiota?.genome || m.steembiota?.accessory);
+      } catch { return false; }
+    });
+
+    await _throttledMap(foreignPosts.slice(0, 30), 5, async (post) => {
       let meta = {};
       try { meta = JSON.parse(post.json_metadata || '{}'); } catch { return; }
-      if (!meta.steembiota?.genome) return; // only creature posts
 
       let replies = [];
       try { replies = await fetchAllReplies(post.author, post.permlink); } catch { return; }
 
-      const sbName = meta.steembiota?.name || post.author;
+      // Item name: creature name or accessory name
+      const sbName = meta.steembiota?.name
+        || meta.steembiota?.accessory?.name
+        || post.author;
 
       for (const reply of replies) {
         if (reply.author === username) continue;
@@ -1809,7 +1827,6 @@ async function fetchNotificationsForUser(username, limit = 50) {
 
         if (!cancelled && !accepted) {
           const ts = new Date(reply.created.endsWith('Z') ? reply.created : reply.created + 'Z');
-          // Only add if not already found in own-post scan
           const alreadyHave = notifications.some(n =>
             n.type === 'transfer_offer' &&
             n.creatureAuthor === post.author &&
@@ -1828,14 +1845,12 @@ async function fetchNotificationsForUser(username, limit = 50) {
           }
         }
       }
-    }));
+    });
   } catch { /* non-fatal */ }
 
-  // ── Step 4: Scan all steembiota offspring posts where user's creature is a parent ──
-  // (breed notifications — someone used user's creature to breed)
+  // ── Step 4: Scan shared corpus for offspring where user's creature is a parent ──
   try {
-    const tagPosts = await fetchPostsByTag('steembiota', 100);
-    for (const post of (Array.isArray(tagPosts) ? tagPosts : [])) {
+    for (const post of sharedTagPosts) {
       if (post.author === username) continue;
       let meta = {};
       try { meta = JSON.parse(post.json_metadata || '{}'); } catch { continue; }
@@ -1892,18 +1907,27 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
   const results = [];
 
   // ── Own posts (fast path) ──────────────────────────────────
+  // fetchPostsByUser uses getDiscussionsByBlog which includes resteems.
+  // Filter strictly to posts authored by the user that have a creature genome.
+  // Accessory posts (type:"accessory") do NOT have a genome field so they
+  // are naturally excluded by the meta.steembiota?.genome check.
   try {
     const raw = await fetchPostsByUser(username, limit);
-    for (const p of (Array.isArray(raw) ? raw : [])) {
-      let meta = {};
-      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { continue; }
-      if (!meta.steembiota?.genome) continue;
+    const ownCreaturePosts = (Array.isArray(raw) ? raw : []).filter(p => {
+      if (p.author !== username) return false;  // skip resteems
+      try {
+        const m = JSON.parse(p.json_metadata || '{}');
+        return !!(m.steembiota?.genome);         // creatures only
+      } catch { return false; }
+    });
 
-      // Check if this creature has been transferred away
+    await _throttledMap(ownCreaturePosts, 5, async (p) => {
+      let meta = {};
+      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+
       let replies = [];
       try { replies = await fetchAllReplies(p.author, p.permlink); } catch {}
 
-      // Quick check: does any reply look like a transfer event?
       const hasTransferReplies = replies.some(r => {
         try {
           const m = JSON.parse(r.json_metadata || '{}');
@@ -1912,31 +1936,33 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
         } catch { return false; }
       });
 
-      let effectiveOwner = p.author;
-      if (hasTransferReplies) {
-        const chain = parseOwnershipChain(replies, p.author);
-        effectiveOwner = chain.effectiveOwner;
-      }
+      const effectiveOwner = hasTransferReplies
+        ? parseOwnershipChain(replies, p.author).effectiveOwner
+        : p.author;
 
       if (effectiveOwner === username) {
         results.push({ post: p, meta: meta.steembiota, effectiveOwner });
       }
-    }
+    });
   } catch { /* non-fatal */ }
 
   // ── Incoming transfers (creatures authored by others) ──────
   try {
     const tagPosts = await fetchPostsByTag('steembiota', 100);
-    for (const p of (Array.isArray(tagPosts) ? tagPosts : [])) {
-      if (p.author === username) continue; // already handled above
-      let meta = {};
-      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { continue; }
-      if (!meta.steembiota?.genome) continue;
+    const foreignCreaturePosts = (Array.isArray(tagPosts) ? tagPosts : []).filter(p => {
+      if (p.author === username) return false;
+      try {
+        const m = JSON.parse(p.json_metadata || '{}');
+        return !!(m.steembiota?.genome);  // creatures only, excludes accessories
+      } catch { return false; }
+    });
 
-      // Only fetch replies if there's any chance of a transfer
-      // Heuristic: check the post's json_metadata for a steembiota marker
+    await _throttledMap(foreignCreaturePosts, 5, async (p) => {
+      let meta = {};
+      try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+
       let replies = [];
-      try { replies = await fetchAllReplies(p.author, p.permlink); } catch { continue; }
+      try { replies = await fetchAllReplies(p.author, p.permlink); } catch { return; }
 
       const hasTransferReplies = replies.some(r => {
         try {
@@ -1945,13 +1971,13 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
             .includes(m.steembiota?.type);
         } catch { return false; }
       });
-      if (!hasTransferReplies) continue;
+      if (!hasTransferReplies) return;
 
       const chain = parseOwnershipChain(replies, p.author);
       if (chain.effectiveOwner === username) {
         results.push({ post: p, meta: meta.steembiota, effectiveOwner: username });
       }
-    }
+    });
   } catch { /* non-fatal */ }
 
   return results;

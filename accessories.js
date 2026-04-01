@@ -1474,6 +1474,10 @@ const AccessoryItemView = {
 };
 
 // Filters raw Steem posts down to accessory posts, newest first.
+// NOTE: effectiveOwner after transfers is NOT derived here — doing a
+// per-post reply scan for every grid item would be too expensive.
+// The card shows post.author; the detail page (AccessoryItemView)
+// fetches replies and shows the true effective owner.
 // ============================================================
 
 function parseSteembiotaAccessories(rawPosts) {
@@ -1485,12 +1489,14 @@ function parseSteembiotaAccessories(rawPosts) {
     if (!sb || sb.type !== "accessory" || !sb.accessory) continue;
     const acc = sb.accessory;
     results.push({
-      author:   p.author,
-      permlink: p.permlink,
-      name:     acc.name     || p.author,
-      template: acc.template || "hat",
-      genome:   acc.genome,
-      created:  p.created    || "",
+      author:         p.author,
+      permlink:       p.permlink,
+      name:           acc.name     || p.author,
+      template:       acc.template || "hat",
+      genome:         acc.genome,
+      created:        p.created    || "",
+      // Use post.author as the displayed creator; real owner is on detail page
+      effectiveOwner: p.author,
     });
   }
   results.sort((a, b) => new Date(b.created) - new Date(a.created));
