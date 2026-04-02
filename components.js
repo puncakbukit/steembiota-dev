@@ -630,9 +630,9 @@ const CreatureCanvasComponent = {
       this._behavState = "idle";
 
       const REACTIONS = [
-        { pose: "alert",    expression: "alert",    dur: 1200 },
-        { pose: "playful",  expression: "thriving", dur: 1500 },
-        { pose: "sitting",  expression: "hungry",   dur: 1200 },
+        { pose: "alert",    expression: "alert",   dur: 1200 },
+        { pose: "playful",  expression: "happy",   dur: 1500 },
+        { pose: "sitting",  expression: "content", dur: 1200 },
       ];
       const r = REACTIONS[this._clickReactionIndex % REACTIONS.length];
       this._clickReactionIndex++;
@@ -1935,7 +1935,7 @@ const CreatureCanvasComponent = {
       ctx.globalAlpha = 1;
     }
   },
-  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;" @click="onCanvasClick"></canvas>`
+  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent;outline:none;user-select:none;" @click="onCanvasClick"></canvas>`
 };
 
 // ---- CreatureCardComponent ----
