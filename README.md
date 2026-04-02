@@ -4,6 +4,8 @@
 
 Creatures are generated from deterministic **genomes**, rendered procedurally as canvas paintings, and their entire existence — from birth through feeding, play, walking, breeding, ownership transfer, and fossilisation — is **permanently recorded on-chain**.
 
+SteemBiota also includes an **Accessory system**: users can procedurally generate wearable items, publish them on-chain, browse all accessories, and transfer ownership using the same two-sided handshake protocol used by creatures.
+
 🌐 **Live app:** https://puncakbukit.github.io/steembiota
 
 ---
@@ -31,7 +33,7 @@ The dApp runs entirely in the browser with no build tools and no backend.
 | Hosting | GitHub Pages |
 | Build tools | None |
 
-Files: `index.html`, `blockchain.js`, `components.js`, `app.js`
+Files: `index.html`, `blockchain.js`, `components.js`, `accessories.js`, `app.js`
 
 ---
 
@@ -160,6 +162,45 @@ Art width grows with lifecycle stage (14 chars at Baby up to 36 at Young Adult, 
 | `ORN` continuous | Orb count (1–4) and position |
 | `GEN` mod 4 | Eye glyph |
 | `GEN` mod 6 | Header sigil |
+
+---
+
+## Accessory System
+
+SteemBiota supports procedurally generated, on-chain **accessories** in addition to creatures.
+
+- Accessory creation and browsing live on `/#/accessories`.
+- Each accessory has its own deterministic **Accessory Genome** and render template.
+- Published accessories are regular Steem posts with `json_metadata.steembiota.type = "accessory"`.
+- Accessories support the same transfer offer / accept / cancel ownership flow as creatures.
+- Accessory item pages live at `/#/acc/@author/permlink`.
+
+### Accessory templates
+
+Five templates are currently implemented:
+
+- 🎩 Hat
+- 👑 Crown
+- 📿 Necklace
+- 👕 Shirt
+- 🪽 Wings
+
+### Accessory genome (10 parameters)
+
+| Parameter | Description | Range |
+|---|---|---|
+| `CLR` | Primary hue | 0–359 |
+| `SAT` | Saturation | 0–100 |
+| `LIT` | Lightness | 10–90 |
+| `SZ` | Size scalar | 20–100 |
+| `VAR` | Shape variation seed | 0–9999 |
+| `ACC` | Accent seed | 0–9999 |
+| `STR` | Structure seed | 0–9999 |
+| `ORN` | Ornament seed | 0–9999 |
+| `SHN` | Shininess / metallic level | 0–100 |
+| `SYM` | Symmetry bias | 0–1 |
+
+Accessory names are generated deterministically from template + genome (material adjective + type-specific noun).
 
 ---
 
@@ -343,7 +384,7 @@ The **🔔 Notifications** page (`/#/notifications`) aggregates all on-chain eve
 
 ### Pending transfer offers
 
-Incoming transfer offers are highlighted in a dedicated banner at the top of the Notifications page with a one-click **✅ Accept** button — no need to navigate to the individual creature page. Accepting publishes a `transfer_accept` reply via Steem Keychain and immediately updates the UI.
+Incoming transfer offers are highlighted in a dedicated banner at the top of the Notifications page with a one-click **✅ Accept** button — no need to navigate to the individual item page. This includes both creatures and accessories. Accepting publishes a `transfer_accept` reply via Steem Keychain and immediately updates the UI.
 
 ### Notification badge
 
@@ -356,6 +397,19 @@ Because Steem has no server-side notification API, events are discovered entirel
 1. The user's own creature posts are fetched and their reply trees are scanned for `feed`, `play`, `walk`, `birth`, and `transfer_offer` events.
 2. All recent steembiota-tagged posts authored by others are scanned for pending `transfer_offer` replies naming the user as recipient.
 3. Recent steembiota offspring posts are checked for cases where the user's creature appears as a parent (`breed` notifications).
+
+---
+
+## Social Interactions
+
+On creature and accessory detail pages, SteemBiota includes a social panel powered by Steem primitives:
+
+- **Upvote** via Steem Keychain (adjustable vote percentage)
+- **Resteem** (reblog)
+- **Comments** (compose and publish on-chain)
+- Live counts/listing of votes, rebloggers, and non-SteemBiota social replies
+
+User XP and leaderboard scores include upvotes cast on SteemBiota creature posts (counted once per creature).
 
 ---
 
@@ -448,11 +502,13 @@ Filters can be combined and are cleared individually. Pagination resets automati
 | URL | View |
 |---|---|
 | `/#/` | Home — creature grid with filters, founder creator |
+| `/#/accessories` | Accessories — accessory creator + global accessory browse grid (template filters) |
 | `/#/about` | About page |
 | `/#/leaderboard` | Global XP leaderboard |
 | `/#/notifications` | Notifications — activity feed and pending transfer offer accepts (login required) |
-| `/#/@user` | Profile — all creatures **currently owned** by the user, including received transfers; grid with filters, level/XP badge, Steem profile header |
+| `/#/@user` | Profile — tabbed inventory of all items **currently owned** by the user (Creatures + Accessories), including received transfers; creature/accessory filters, level/XP badge, Steem profile header |
 | `/#/@author/permlink` | Creature — canvas + reaction animation, unified activities panel (feed/play/walk), breed permit manager (owner only), breed panel (fertile window + permitted users only), ownership transfer panel (owner and pending recipient), unicode render, genome table, family/kinship panel, provenance badges and banners |
+| `/#/acc/@author/permlink` | Accessory — deterministic accessory canvas, parameter table, unicode render, social panel, ownership transfer panel (owner and pending recipient) |
 
 ---
 
@@ -483,6 +539,20 @@ Offspring (additional fields only):
   "parentB": { "author": "bob",   "permlink": "vyrex-shadowpaw-..." },
   "mutated": false,
   "speciated": false
+}
+```
+
+### Accessory post (`json_metadata.steembiota`)
+
+```json
+{
+  "version": "1.0",
+  "type": "accessory",
+  "accessory": {
+    "template": "crown",
+    "name": "Radiant Diadem",
+    "genome": { "CLR": 280, "SAT": 76, "LIT": 58, "SZ": 84, "VAR": 9021, "ACC": 4422, "STR": 7811, "ORN": 1103, "SHN": 67, "SYM": 0.42 }
+  }
 }
 ```
 
