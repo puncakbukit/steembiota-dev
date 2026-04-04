@@ -182,7 +182,9 @@ const CreatureCanvasComponent = {
     activityState:   { type: Object,  default: null  },
     reactionTrigger: { type: Number,  default: 0     },
     canvasW:         { type: Number,  default: 400   },
-    canvasH:         { type: Number,  default: 320   }
+    canvasH:         { type: Number,  default: 320   },
+    // Accessory being worn — { template, genome } or null
+    wearing:         { type: Object,  default: null  },
   },
   emits: ["facing-resolved", "pose-resolved", "clicked"],
   data() {
@@ -244,6 +246,7 @@ const CreatureCanvasComponent = {
     },
     feedState()        { this.$nextTick(() => this.draw()); },
     activityState()    { this.$nextTick(() => this.draw()); },
+    wearing()          { this.$nextTick(() => this.draw()); },
     reactionTrigger(v) { if (v > 0) this._startReaction(); }
   },
   mounted() {
@@ -825,6 +828,93 @@ const CreatureCanvasComponent = {
         ctx.ellipse(px, py, lW * 0.72, lW * 0.42, swing * 0.6, 0, Math.PI * 2);
         ctx.fill(); ctx.stroke();
       }
+      ctx.globalAlpha = 1;
+    },
+
+    // ----------------------------------------------------------
+    // Draw an equipped accessory on top of the creature.
+    //
+    // Called at the end of draw(), inside the creature's ctx.save()
+    // block so it automatically inherits the facing-flip transform.
+    //
+    // Attachment points (in creature-local coordinates):
+    //   hat / crown  — above the head (headX, headY - headR * 1.1)
+    //   necklace     — at the neck base (between head and torso)
+    //   shirt        — at the torso centre (ox, oy)
+    //   wings        — behind the torso mid-back (ox + bodyLen * 0.3, oy)
+    //
+    // The accessory is rendered into a temporary off-screen canvas
+    // then composited onto the creature canvas at reduced scale,
+    // so the full drawXxx() renderers are reused without change.
+    // ----------------------------------------------------------
+    _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H) {
+      if (!this.wearing || !this.wearing.genome) return;
+      const { template, genome: ag } = this.wearing;
+
+      // Compute attachment point in creature-local canvas coords
+      const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
+      const headY = oy - p.bodyH  * sc * 0.35  + pt.headDY;
+      const hR    = p.headSize * sc;
+
+      // Scale the accessory relative to the creature's current body scale.
+      // Base size is 40% of the canvas dimension, then scaled by bodyScale.
+      const accScale = p.bodyScale * 0.55;
+      const accW = Math.round(W * 0.40);
+      const accH = Math.round(H * 0.40);
+
+      // Per-template anchor (where the accessory's canvas centre lands on the creature)
+      let anchorX, anchorY;
+      switch (template) {
+        case 'hat':
+          // Sits on top of the head, centred horizontally
+          anchorX = headX;
+          anchorY = headY - hR * 1.05;
+          break;
+        case 'crown':
+          // Slightly higher than hat, more centred on the skull
+          anchorX = headX;
+          anchorY = headY - hR * 1.25;
+          break;
+        case 'necklace':
+          // Base of the neck, just above the torso top
+          anchorX = headX + p.headSize * sc * 0.25;
+          anchorY = headY + hR * 0.8;
+          break;
+        case 'shirt':
+          // Torso centre
+          anchorX = ox - p.bodyLen * sc * 0.12;
+          anchorY = oy;
+          break;
+        case 'wings':
+          // Behind the mid-back; shifted toward the tail side
+          anchorX = ox + p.bodyLen * sc * 0.25;
+          anchorY = oy - p.bodyH * sc * 0.15;
+          break;
+        default:
+          anchorX = headX;
+          anchorY = headY - hR * 1.05;
+      }
+
+      // Render the accessory into an off-screen canvas
+      const offscreen = document.createElement('canvas');
+      offscreen.width  = accW;
+      offscreen.height = accH;
+      const offCtx = offscreen.getContext('2d');
+      // drawAccessory is defined in accessories.js (loaded before components.js)
+      if (typeof drawAccessory === 'function') {
+        drawAccessory(offCtx, template, ag, accW, accH);
+      }
+
+      // Composite onto the creature canvas, centred on the anchor point
+      const dw = Math.round(accW  * accScale);
+      const dh = Math.round(accH  * accScale);
+      ctx.globalAlpha = 0.95;
+      ctx.drawImage(
+        offscreen,
+        anchorX - dw * 0.5,
+        anchorY - dh * 0.5,
+        dw, dh
+      );
       ctx.globalAlpha = 1;
     },
 
@@ -1749,6 +1839,13 @@ const CreatureCanvasComponent = {
         ctx.fillStyle = aura;
         ctx.beginPath(); ctx.arc(ox, oy, p.bodyLen * sc * 1.6, 0, Math.PI * 2); ctx.fill();
         ctx.globalAlpha = 1;
+      }
+
+      // ---- WEARING ACCESSORY ----
+      // Drawn last so it appears on top of the creature.
+      // Only shown for non-fossil creatures with an equipped accessory.
+      if (!p.fossil && this.wearing) {
+        this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H);
       }
 
       ctx.restore();   // always restore — we always ctx.save() now

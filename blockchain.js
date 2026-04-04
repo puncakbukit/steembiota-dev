@@ -2003,3 +2003,301 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
 
   return results;
 }
+
+// ============================================================
+// ACCESSORY WEAR SYSTEM
+//
+// Philosophy: two-sided opt-in — creature owner requests,
+// accessory owner grants. Either party can revoke at any time.
+// The accessory post is the single anchor: all wear state is
+// derived by scanning its reply tree.
+//
+// Reply types (all posted on the ACCESSORY post):
+//   wear_request  — creature owner asks to equip this accessory
+//   wear_grant    — accessory owner approves a specific creature
+//   wear_revoke   — either party ends the wearing relationship
+//
+// One extra reply type (posted on the CREATURE post):
+//   wear_off      — creature owner removes an equipped accessory
+//
+// State machine (per accessory):
+//   idle → (wear_request) → requested
+//   requested → (wear_grant by acc owner) → worn
+//   requested → (wear_revoke by acc owner OR requester) → idle
+//   worn → (wear_revoke by acc owner OR wear_off by creature owner) → idle
+//
+// Exclusivity (rule 4): enforced at read time — parseWearState
+// returns the currently-worn creature. The UI disables new
+// requests when the accessory is already worn.
+// ============================================================
+
+// ── Parse functions ────────────────────────────────────────
+
+// Walk the accessory post's reply tree and derive wear state.
+// Returns:
+//   { status: "idle"|"requested"|"worn",
+//     creature:    { author, permlink } | null,
+//     requestedBy: string | null,   — creature owner username
+//     grantedAt:   Date | null }
+function parseWearState(replies, accAuthor) {
+  const sorted = [...replies].sort((a, b) =>
+    new Date(a.created) - new Date(b.created)
+  );
+
+  let status      = "idle";
+  let creature    = null;   // { author, permlink }
+  let requestedBy = null;
+  let grantedAt   = null;
+
+  for (const reply of sorted) {
+    let meta;
+    try { meta = JSON.parse(reply.json_metadata || '{}'); } catch { continue; }
+    if (!meta.steembiota) continue;
+
+    const type = meta.steembiota.type;
+    const ts   = new Date(reply.created.endsWith('Z') ? reply.created : reply.created + 'Z');
+
+    if (type === 'wear_request') {
+      // Any user can request (creature owner); replaces any previous pending request.
+      const c = meta.steembiota.creature;
+      if (!c?.author || !c?.permlink) continue;
+      status      = 'requested';
+      creature    = { author: c.author, permlink: c.permlink };
+      requestedBy = reply.author;
+      grantedAt   = null;
+
+    } else if (type === 'wear_grant') {
+      // Only the accessory owner may grant.
+      if (reply.author !== accAuthor) continue;
+      if (status !== 'requested') continue;  // must follow a request
+      status    = 'worn';
+      grantedAt = ts;
+
+    } else if (type === 'wear_revoke') {
+      // Accessory owner or the creature owner (requestedBy) may revoke.
+      if (reply.author !== accAuthor && reply.author !== requestedBy) continue;
+      status      = 'idle';
+      creature    = null;
+      requestedBy = null;
+      grantedAt   = null;
+    }
+  }
+
+  return { status, creature, requestedBy, grantedAt };
+}
+
+// Walk the creature post's reply tree for wear_off events.
+// Returns the currently equipped accessory ref, or null.
+// wear_off posted by the creature owner removes the equipped accessory.
+function parseCreatureWearing(replies, creatureOwner) {
+  const sorted = [...replies].sort((a, b) =>
+    new Date(a.created) - new Date(b.created)
+  );
+
+  // Track: map of accKey → last action ("on" | "off")
+  // wear_off sets it to "off"; we infer "on" from the grant being newer than any off.
+  // Simpler: the creature page fetches the accessory's own wear state for confirmation.
+  // This function just extracts what the creature post itself records.
+  let equipped = null;   // { author, permlink } — most recently equipped, not yet taken off
+
+  for (const reply of sorted) {
+    if (reply.author !== creatureOwner) continue;
+    let meta;
+    try { meta = JSON.parse(reply.json_metadata || '{}'); } catch { continue; }
+    if (!meta.steembiota) continue;
+
+    const type = meta.steembiota.type;
+    if (type === 'wear_off') {
+      // Creature owner took off an accessory
+      equipped = null;
+    }
+    // wear_on is implicit — the accessory's wear_grant is authoritative.
+    // The creature post stores wear_off for the creature's side.
+  }
+
+  return equipped;
+}
+
+// ── Publish functions ──────────────────────────────────────
+
+// Creature owner requests permission to equip an accessory.
+// Reply is posted on the ACCESSORY post.
+function publishWearRequest(
+  username, accAuthor, accPermlink, accName,
+  creatureAuthor, creaturePermlink, creatureName,
+  callback
+) {
+  const permlink = buildPermlink('steembiota-wear-request');
+  const accUrl      = `${APP_URL}/#/acc/@${accAuthor}/${accPermlink}`;
+  const creatureUrl = `${APP_URL}/#/@${creatureAuthor}/${creaturePermlink}`;
+
+  const body =
+    `👗 **Wear Request**\n\n` +
+    `@${username} is requesting permission for **${creatureName}** to wear **${accName}**.\n\n` +
+    `The accessory owner (@${accAuthor}) can approve or ignore this request.\n\n` +
+    `\`\`\`\nSTEEMBIOTA_WEAR_REQUEST\naccessory: @${accAuthor}/${accPermlink}\ncreature: @${creatureAuthor}/${creaturePermlink}\n\`\`\`\n\n` +
+    `🔗 [View ${accName}](${accUrl}) · [View ${creatureName}](${creatureUrl})\n\n` +
+    `*Recorded via [SteemBiota — Immutable Evolution](${APP_URL})*`;
+
+  const jsonMetadata = {
+    app: 'steembiota/1.0', tags: ['steembiota'],
+    steembiota: {
+      version: '1.0', type: 'wear_request',
+      accessory: { author: accAuthor, permlink: accPermlink },
+      creature:  { author: creatureAuthor, permlink: creaturePermlink },
+      ts: new Date().toISOString()
+    }
+  };
+
+  keychainPost(username, '', body, accPermlink, accAuthor,
+    jsonMetadata, permlink, ['steembiota'], callback);
+}
+
+// Accessory owner grants the pending wear request.
+// Reply is posted on the ACCESSORY post.
+function publishWearGrant(
+  username, accAuthor, accPermlink, accName,
+  creatureAuthor, creaturePermlink, creatureName,
+  callback
+) {
+  const permlink = buildPermlink('steembiota-wear-grant');
+  const accUrl      = `${APP_URL}/#/acc/@${accAuthor}/${accPermlink}`;
+  const creatureUrl = `${APP_URL}/#/@${creatureAuthor}/${creaturePermlink}`;
+
+  const body =
+    `✅ **Wear Grant**\n\n` +
+    `@${username} has approved **${creatureName}** to wear **${accName}**.\n\n` +
+    `\`\`\`\nSTEEMBIOTA_WEAR_GRANT\naccessory: @${accAuthor}/${accPermlink}\ncreature: @${creatureAuthor}/${creaturePermlink}\n\`\`\`\n\n` +
+    `🔗 [View ${accName}](${accUrl}) · [View ${creatureName}](${creatureUrl})\n\n` +
+    `*Recorded via [SteemBiota — Immutable Evolution](${APP_URL})*`;
+
+  const jsonMetadata = {
+    app: 'steembiota/1.0', tags: ['steembiota'],
+    steembiota: {
+      version: '1.0', type: 'wear_grant',
+      accessory: { author: accAuthor, permlink: accPermlink },
+      creature:  { author: creatureAuthor, permlink: creaturePermlink },
+      ts: new Date().toISOString()
+    }
+  };
+
+  keychainPost(username, '', body, accPermlink, accAuthor,
+    jsonMetadata, permlink, ['steembiota'], callback);
+}
+
+// Either party revokes the wear (accessory owner or creature owner).
+// Reply is posted on the ACCESSORY post.
+function publishWearRevoke(
+  username, accAuthor, accPermlink, accName,
+  creatureAuthor, creaturePermlink, creatureName,
+  callback
+) {
+  const permlink = buildPermlink('steembiota-wear-revoke');
+  const accUrl = `${APP_URL}/#/acc/@${accAuthor}/${accPermlink}`;
+
+  const body =
+    `🚫 **Wear Revoked**\n\n` +
+    `@${username} has revoked the wear permission for **${creatureName}** wearing **${accName}**.\n\n` +
+    `\`\`\`\nSTEEMBIOTA_WEAR_REVOKE\naccessory: @${accAuthor}/${accPermlink}\ncreature: @${creatureAuthor}/${creaturePermlink}\n\`\`\`\n\n` +
+    `🔗 [View ${accName}](${accUrl})\n\n` +
+    `*Recorded via [SteemBiota — Immutable Evolution](${APP_URL})*`;
+
+  const jsonMetadata = {
+    app: 'steembiota/1.0', tags: ['steembiota'],
+    steembiota: {
+      version: '1.0', type: 'wear_revoke',
+      accessory: { author: accAuthor, permlink: accPermlink },
+      creature:  { author: creatureAuthor, permlink: creaturePermlink },
+      ts: new Date().toISOString()
+    }
+  };
+
+  keychainPost(username, '', body, accPermlink, accAuthor,
+    jsonMetadata, permlink, ['steembiota'], callback);
+}
+
+// Creature owner takes off the accessory (recorded on the CREATURE post).
+function publishWearOff(
+  username, creatureAuthor, creaturePermlink, creatureName,
+  accAuthor, accPermlink, accName,
+  callback
+) {
+  const permlink    = buildPermlink('steembiota-wear-off');
+  const creatureUrl = `${APP_URL}/#/@${creatureAuthor}/${creaturePermlink}`;
+
+  const body =
+    `👚 **Accessory Removed**\n\n` +
+    `@${username} has removed **${accName}** from **${creatureName}**.\n\n` +
+    `\`\`\`\nSTEEMBIOTA_WEAR_OFF\ncreature: @${creatureAuthor}/${creaturePermlink}\naccessory: @${accAuthor}/${accPermlink}\n\`\`\`\n\n` +
+    `🔗 [View ${creatureName}](${creatureUrl})\n\n` +
+    `*Recorded via [SteemBiota — Immutable Evolution](${APP_URL})*`;
+
+  const jsonMetadata = {
+    app: 'steembiota/1.0', tags: ['steembiota'],
+    steembiota: {
+      version: '1.0', type: 'wear_off',
+      creature:  { author: creatureAuthor, permlink: creaturePermlink },
+      accessory: { author: accAuthor, permlink: accPermlink },
+      ts: new Date().toISOString()
+    }
+  };
+
+  keychainPost(username, '', body, creaturePermlink, creatureAuthor,
+    jsonMetadata, permlink, ['steembiota'], callback);
+}
+
+// Fetch the accessory currently being worn by a creature.
+// Checks creature replies for a wear_off, then checks the
+// accessory's own wear state to confirm it's still worn.
+// Returns { template, genome, accAuthor, accPermlink, accName } or null.
+async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
+  // Step 1: scan creature replies for wear_off (creature owner took it off)
+  // and for any wear_grant references from the accessory side.
+  // The accessory's own reply tree is authoritative — check it for confirmation.
+
+  // Collect all distinct accessories that appear in creature replies
+  const sorted = [...creatureReplies].sort((a, b) =>
+    new Date(a.created) - new Date(b.created)
+  );
+
+  // Find the last wear_off from the creature owner
+  let lastWearOff = null;
+  for (const r of sorted) {
+    let m; try { m = JSON.parse(r.json_metadata || '{}'); } catch { continue; }
+    if (m.steembiota?.type === 'wear_off' && r.author === creatureAuthor) {
+      lastWearOff = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
+    }
+  }
+
+  // Step 2: fetch the steembiota tag posts and find any accessory that
+  // is in "worn" state with this specific creature.
+  // We limit to 100 tag posts to keep this fast.
+  try {
+    const tagPosts = await fetchPostsByTag('steembiota', 100);
+    for (const post of (Array.isArray(tagPosts) ? tagPosts : [])) {
+      let meta; try { meta = JSON.parse(post.json_metadata || '{}'); } catch { continue; }
+      if (meta.steembiota?.type !== 'accessory') continue;
+
+      const accReplies = await fetchAllReplies(post.author, post.permlink);
+      const wearState  = parseWearState(accReplies, post.author);
+
+      if (wearState.status !== 'worn') continue;
+      if (wearState.creature?.author !== creatureAuthor) continue;
+      if (wearState.creature?.permlink !== creaturePermlink) continue;
+
+      // Check if creature owner took it off after the grant
+      if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) continue;
+
+      const acc = meta.steembiota.accessory;
+      return {
+        template:    acc?.template || 'hat',
+        genome:      acc?.genome   || null,
+        accAuthor:   post.author,
+        accPermlink: post.permlink,
+        accName:     acc?.name || post.author,
+      };
+    }
+  } catch {}
+
+  return null;
+}

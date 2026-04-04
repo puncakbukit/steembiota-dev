@@ -1743,7 +1743,9 @@ const CreatureView = {
       votingInProgress:    false,  // true while keychain vote request is open
       resteemInProgress:   false,  // true while keychain resteem request is open
       votePickerOpen:      false,  // true when the % slider popover is visible
-      votePct:             100     // last chosen upvote percentage (1–100)
+      votePct:             100,    // last chosen upvote percentage (1–100)
+      // Equipped accessory — { template, genome, accAuthor, accPermlink, accName } | null
+      wearing:             null,
     };
   },
   created() {
@@ -1933,6 +1935,11 @@ const CreatureView = {
         // Store parent refs from metadata (no extra fetch needed for display)
         this._rawParentA = sb.parentA || null;
         this._rawParentB = sb.parentB || null;
+
+        // Fetch equipped accessory in background (non-blocking — may take a moment)
+        fetchCreatureWearing(author, permlink, replies).then(w => {
+          this.wearing = w;
+        }).catch(() => { this.wearing = null; });
 
       } catch (err) {
         this.loadError = err.message || "Failed to load creature.";
@@ -2356,6 +2363,7 @@ const CreatureView = {
         <creature-canvas-component :genome="genome" :age="postAge" :fossil="fossil" :feed-state="feedState"
           :activity-state="activityState"
           :reaction-trigger="reactionTrigger"
+          :wearing="wearing"
           @facing-resolved="onFacingResolved"
           @pose-resolved="onPoseResolved"
         ></creature-canvas-component>
@@ -3447,6 +3455,7 @@ vueApp.component("LoadingSpinnerComponent",     LoadingSpinnerComponent);
 vueApp.component("CreatureCanvasComponent",     CreatureCanvasComponent);
 vueApp.component("AccessoryCanvasComponent",    AccessoryCanvasComponent);
 vueApp.component("AccessoryCardComponent",      AccessoryCardComponent);
+vueApp.component("WearPanelComponent",          WearPanelComponent);
 vueApp.component("AccessoryItemView",           AccessoryItemView);
 vueApp.component("GenomeTableComponent",        GenomeTableComponent);
 vueApp.component("BreedingPanelComponent",      BreedingPanelComponent);

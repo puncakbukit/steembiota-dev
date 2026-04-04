@@ -1101,6 +1101,219 @@ const AccessoriesView = {
 };
 
 // ============================================================
+// WearPanelComponent
+//
+// Shown on AccessoryItemView. Two audiences:
+//   A) Any logged-in user (creature owner) — can send a wear
+//      request by pasting their creature URL.
+//   B) Accessory owner — can grant or revoke.
+//
+// Props: username, accAuthor, accPermlink, accName,
+//        wearState (from parseWearState), isAccOwner
+// Emits: notify(msg,type), wear-updated(newState)
+// ============================================================
+const WearPanelComponent = {
+  name: "WearPanelComponent",
+  props: {
+    username:    { type: String,  default: "" },
+    accAuthor:   { type: String,  required: true },
+    accPermlink: { type: String,  required: true },
+    accName:     { type: String,  default: "this accessory" },
+    wearState:   { type: Object,  default: () => ({ status:"idle", creature:null, requestedBy:null, grantedAt:null }) },
+    isAccOwner:  { type: Boolean, default: false },
+  },
+  emits: ["notify", "wear-updated"],
+  data() { return { expanded: false, creatureUrlInput: "", publishing: false }; },
+  computed: {
+    status()      { return this.wearState?.status      || "idle"; },
+    creature()    { return this.wearState?.creature    || null;   },
+    requestedBy() { return this.wearState?.requestedBy || null;   },
+    isRequester() { return !!this.username && this.username === this.requestedBy; },
+  },
+  methods: {
+    parseCreatureUrl(raw) {
+      const m = raw.trim().match(/@([a-z0-9.-]+)\/([a-z0-9-]+)\s*$/);
+      if (!m) throw new Error("Cannot parse creature URL");
+      return { author: m[1], permlink: m[2] };
+    },
+
+    async sendRequest() {
+      if (!this.creatureUrlInput.trim()) { this.$emit("notify", "Paste your creature URL.", "error"); return; }
+      if (!window.steem_keychain)        { this.$emit("notify", "Steem Keychain not installed.", "error"); return; }
+      let ca, cp;
+      try { ({ author: ca, permlink: cp } = this.parseCreatureUrl(this.creatureUrlInput)); }
+      catch { this.$emit("notify", "Could not parse creature URL.", "error"); return; }
+      this.publishing = true;
+      publishWearRequest(
+        this.username, this.accAuthor, this.accPermlink, this.accName,
+        ca, cp, ca,
+        (res) => {
+          this.publishing = false;
+          if (res.success) {
+            this.$emit("notify", `👗 Wear request sent to @${this.accAuthor}!`, "success");
+            this.creatureUrlInput = "";
+            this.$emit("wear-updated", { status:"requested", creature:{author:ca,permlink:cp}, requestedBy:this.username, grantedAt:null });
+          } else {
+            this.$emit("notify", "Request failed: " + (res.message||"Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    async grantWear() {
+      if (!window.steem_keychain || !this.creature) return;
+      this.publishing = true;
+      publishWearGrant(
+        this.username, this.accAuthor, this.accPermlink, this.accName,
+        this.creature.author, this.creature.permlink, "the creature",
+        (res) => {
+          this.publishing = false;
+          if (res.success) {
+            this.$emit("notify", "✅ Wear approved!", "success");
+            this.$emit("wear-updated", { ...this.wearState, status:"worn", grantedAt:new Date() });
+          } else {
+            this.$emit("notify", "Grant failed: " + (res.message||"Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    async revokeWear() {
+      if (!window.steem_keychain || !this.creature) return;
+      this.publishing = true;
+      publishWearRevoke(
+        this.username, this.accAuthor, this.accPermlink, this.accName,
+        this.creature.author, this.creature.permlink, "the creature",
+        (res) => {
+          this.publishing = false;
+          if (res.success) {
+            this.$emit("notify", "🚫 Revoked.", "success");
+            this.$emit("wear-updated", { status:"idle", creature:null, requestedBy:null, grantedAt:null });
+          } else {
+            this.$emit("notify", "Revoke failed: " + (res.message||"Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    async takeOff() {
+      if (!window.steem_keychain || !this.creature) return;
+      this.publishing = true;
+      publishWearOff(
+        this.username, this.creature.author, this.creature.permlink, "the creature",
+        this.accAuthor, this.accPermlink, this.accName,
+        (res) => {
+          this.publishing = false;
+          if (res.success) {
+            this.$emit("notify", "👚 Accessory removed.", "success");
+            this.$emit("wear-updated", { status:"idle", creature:null, requestedBy:null, grantedAt:null });
+          } else {
+            this.$emit("notify", "Failed: " + (res.message||"Unknown error"), "error");
+          }
+        }
+      );
+    },
+  },
+
+  template: `
+    <div style="max-width:480px;margin:0 auto 20px;">
+      <!-- Header toggle -->
+      <div @click="expanded=!expanded"
+        style="display:flex;align-items:center;justify-content:space-between;
+               cursor:pointer;padding:10px 14px;border-radius:8px;
+               background:#0a0a1a;border:1px solid #1a1a3a;user-select:none;">
+        <span style="font-size:0.88rem;color:#ce93d8;font-weight:bold;">
+          👗 Wear Permissions
+          <span v-if="status==='worn'"
+            style="font-weight:normal;color:#a5d6a7;font-size:0.80rem;margin-left:8px;">
+            ✓ worn by @{{ creature?.author }}
+          </span>
+          <span v-else-if="status==='requested'"
+            style="font-weight:normal;color:#ffb74d;font-size:0.80rem;margin-left:8px;">
+            ⏳ pending from @{{ requestedBy }}
+          </span>
+          <span v-else style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
+            not being worn
+          </span>
+        </span>
+        <span style="color:#444;font-size:0.78rem;">{{ expanded ? "▲" : "▼" }}</span>
+      </div>
+
+      <div v-if="expanded"
+        style="border:1px solid #1a1a3a;border-top:none;border-radius:0 0 8px 8px;
+               background:#08080f;padding:14px;">
+
+        <!-- WORN -->
+        <template v-if="status==='worn'">
+          <p style="font-size:0.80rem;color:#a5d6a7;margin:0 0 12px;">
+            ✅ Worn by
+            <a :href="'/#/@'+creature.author+'/'+creature.permlink" style="color:#a5d6a7;">
+              @{{ creature.author }}'s creature
+            </a>.
+          </p>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button v-if="isAccOwner" @click="revokeWear" :disabled="publishing"
+              style="background:#1a0000;color:#ff8a80;border:1px solid #3b0000;font-size:0.78rem;">
+              {{ publishing ? "…" : "🚫 Revoke" }}
+            </button>
+            <button v-if="username===creature?.author" @click="takeOff" :disabled="publishing"
+              style="background:#1a1a00;color:#ffb74d;border:1px solid #3a3a00;font-size:0.78rem;">
+              {{ publishing ? "…" : "👚 Take Off" }}
+            </button>
+          </div>
+        </template>
+
+        <!-- REQUESTED -->
+        <template v-else-if="status==='requested'">
+          <p style="font-size:0.80rem;color:#ffb74d;margin:0 0 12px;">
+            ⏳ @{{ requestedBy }} wants to equip
+            <a :href="'/#/@'+creature.author+'/'+creature.permlink" style="color:#ffb74d;">
+              this creature
+            </a>.
+          </p>
+          <div v-if="isAccOwner" style="display:flex;gap:8px;flex-wrap:wrap;">
+            <button @click="grantWear" :disabled="publishing"
+              style="background:#0d1a0d;color:#a5d6a7;border:1px solid #2e7d32;font-size:0.78rem;">
+              {{ publishing ? "…" : "✅ Approve" }}
+            </button>
+            <button @click="revokeWear" :disabled="publishing"
+              style="background:#1a0000;color:#ff8a80;border:1px solid #3b0000;font-size:0.78rem;">
+              {{ publishing ? "…" : "❌ Decline" }}
+            </button>
+          </div>
+          <button v-else-if="isRequester" @click="revokeWear" :disabled="publishing"
+            style="background:#1a1a1a;color:#888;border:1px solid #333;font-size:0.78rem;">
+            {{ publishing ? "…" : "✕ Cancel Request" }}
+          </button>
+        </template>
+
+        <!-- IDLE — any logged-in user can request -->
+        <template v-else>
+          <p style="font-size:0.78rem;color:#555;margin:0 0 10px;line-height:1.5;">
+            Paste your creature's SteemBiota URL to request wearing this accessory.
+            The accessory owner must approve before it appears on your creature.
+          </p>
+          <div v-if="username" style="display:flex;flex-direction:column;gap:8px;">
+            <input v-model="creatureUrlInput" type="text"
+              placeholder="https://steemit.com/@you/your-creature-permlink"
+              style="font-size:12px;width:100%;background:#0f0f0f;color:#ccc;
+                     border:1px solid #2a2a2a;border-radius:6px;padding:7px 10px;box-sizing:border-box;"
+              @keydown.enter="sendRequest"
+            />
+            <button @click="sendRequest" :disabled="publishing || !creatureUrlInput.trim()"
+              style="background:#1a0a2e;color:#ce93d8;border:1px solid #7b1fa2;font-size:0.78rem;">
+              {{ publishing ? "Publishing…" : "👗 Send Wear Request" }}
+            </button>
+          </div>
+          <p v-else style="font-size:0.75rem;color:#444;">Log in to send a wear request.</p>
+        </template>
+
+      </div>
+    </div>
+  `
+};
+
+// ============================================================
 // AccessoryItemView  — route /@:author/:permlink (accessory posts)
 //
 // Detected by CreatureView when json_metadata.steembiota.type === "accessory".
@@ -1111,7 +1324,7 @@ const AccessoriesView = {
 const AccessoryItemView = {
   name: "AccessoryItemView",
   inject: ["username", "notify"],
-  components: { AccessoryCanvasComponent, LoadingSpinnerComponent },
+  components: { AccessoryCanvasComponent, LoadingSpinnerComponent, WearPanelComponent },
 
   data() {
     return {
@@ -1134,6 +1347,8 @@ const AccessoryItemView = {
       recipientInput:    "",
       transferPublishing: false,
       urlCopied:         false,
+      // Wear state
+      wearState: { status: "idle", creature: null, requestedBy: null, grantedAt: null },
     };
   },
 
@@ -1191,6 +1406,9 @@ const AccessoryItemView = {
         const ownership     = parseOwnershipChain(replies, author);
         this.transferState  = ownership;
         this.effectiveOwner = ownership.effectiveOwner;
+
+        // Wear state — derived from the accessory's reply tree
+        this.wearState = parseWearState(replies, author);
 
       } catch (err) {
         this.loadError = err.message || "Failed to load accessory.";
@@ -1442,6 +1660,18 @@ const AccessoryItemView = {
           </div>
         </div>
 
+        <!-- Wear panel — visible to all logged-in users -->
+        <wear-panel-component
+          :username="username"
+          :acc-author="author"
+          :acc-permlink="permlink"
+          :acc-name="accName"
+          :wear-state="wearState"
+          :is-acc-owner="isOwner"
+          @notify="(msg,type) => notify(msg,type)"
+          @wear-updated="ws => { wearState = ws; }"
+        ></wear-panel-component>
+
         <!-- Social bar -->
         <div style="max-width:480px;margin:0 auto 16px;display:flex;gap:14px;
                     align-items:center;justify-content:center;font-size:0.78rem;color:#666;">
@@ -1472,6 +1702,7 @@ const AccessoryItemView = {
     </div>
   `
 };
+
 
 // Filters raw Steem posts down to accessory posts, newest first.
 // NOTE: effectiveOwner after transfers is NOT derived here — doing a
