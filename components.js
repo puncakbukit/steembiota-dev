@@ -861,7 +861,9 @@ const CreatureCanvasComponent = {
       // on smaller lifecycle stages (baby/toddler) while torso items stay
       // proportionate.
       const templateScale = (
-        template === 'hat'   ? 1.10 :
+        // Hats need extra scale on-creature because the renderer includes
+        // full brim + crown proportions intended for a larger standalone canvas.
+        template === 'hat'   ? 1.34 :
         template === 'crown' ? 1.08 :
         template === 'wings' ? 0.85 :
         template === 'shirt' ? 0.78 :
@@ -870,7 +872,11 @@ const CreatureCanvasComponent = {
       const accScale = p.bodyScale * templateScale;
       // Headwear needs a slightly larger source canvas to preserve brim details
       // when downscaled into baby/toddler body sizes.
-      const baseCanvasScale = (template === 'hat' || template === 'crown') ? 0.52 : 0.40;
+      const baseCanvasScale = (
+        template === 'hat'   ? 0.66 :
+        template === 'crown' ? 0.54 :
+        0.40
+      );
       const accW = Math.round(W * baseCanvasScale);
       const accH = Math.round(H * baseCanvasScale);
 
@@ -917,14 +923,23 @@ const CreatureCanvasComponent = {
         drawAccessory(offCtx, template, ag, accW, accH);
       }
 
-      // Composite onto the creature canvas, centred on the anchor point
+      // Composite onto the creature canvas.
+      // For hats/crowns the visual "contact point" is not the canvas centre:
+      // the brim/base sits lower than centre in the standalone accessory renderer.
+      // Map anchor to that contact zone so the creature wears the full shape
+      // (brim + crown) instead of only a tiny top sliver.
       const dw = Math.round(accW  * accScale);
       const dh = Math.round(accH  * accScale);
+      const focalY = (
+        template === 'hat'   ? 0.68 :
+        template === 'crown' ? 0.64 :
+        0.50
+      );
       ctx.globalAlpha = 0.95;
       ctx.drawImage(
         offscreen,
         anchorX - dw * 0.5,
-        anchorY - dh * 0.5,
+        anchorY - dh * focalY,
         dw, dh
       );
       ctx.globalAlpha = 1;
