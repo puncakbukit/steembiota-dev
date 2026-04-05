@@ -832,6 +832,91 @@ const CreatureCanvasComponent = {
     },
 
     // ----------------------------------------------------------
+    // Direct "worn hat" renderer for creature heads.
+    // We intentionally draw this in creature-local coordinates so
+    // the hat reads as an actual wearable silhouette (visible brim
+    // + crown) instead of relying on downscaled accessory thumbnails.
+    // ----------------------------------------------------------
+    _drawWornHat(ctx, headX, headY, hR, ag) {
+      const hue = ag.CLR ?? 30;
+      const sat = ag.SAT ?? 65;
+      const lit = ag.LIT ?? 45;
+      const sz  = (ag.SZ ?? 70) / 100;
+
+      // Deterministic shape variation from accessory genes (no Math.random).
+      const crownLean = (((ag.VAR ?? 0) % 21) - 10) / 100;       // -0.10..0.10
+      const taper     = 0.70 + (((ag.STR ?? 0) % 18) / 100);     // 0.70..0.87
+      const bandHue   = (hue + 25 + ((ag.ACC ?? 0) % 60)) % 360;
+
+      const brimRx = hR * (0.98 + sz * 0.34);
+      const brimRy = hR * (0.22 + sz * 0.07);
+      const brimY  = headY - hR * (0.86 + sz * 0.03);
+
+      const crownH   = hR * (0.95 + sz * 0.36);
+      const crownBot = brimY - brimRy * 0.18;
+      const crownTop = crownBot - crownH;
+      const crownRxB = brimRx * 0.62;
+      const crownRxT = crownRxB * taper;
+
+      // Brim
+      const brimGr = this.linGrad(ctx, headX, brimY - brimRy, headX, brimY + brimRy, [
+        [0,   this.hsl(hue, sat, lit + 10)],
+        [0.5, this.hsl(hue, sat, lit + 1)],
+        [1,   this.hsl(hue, sat, lit - 14)],
+      ]);
+      ctx.fillStyle = brimGr;
+      ctx.strokeStyle = this.hsl(hue, sat, lit - 20);
+      ctx.lineWidth = Math.max(1, hR * 0.05);
+      ctx.beginPath();
+      ctx.ellipse(headX, brimY, brimRx, brimRy, 0, 0, Math.PI * 2);
+      ctx.fill(); ctx.stroke();
+
+      // Crown
+      const crownGr = this.linGrad(ctx, headX - crownRxB, crownTop, headX + crownRxB, crownBot, [
+        [0, this.hsl(hue, sat, lit + 6)],
+        [1, this.hsl(hue, sat, lit - 16)],
+      ]);
+      ctx.fillStyle = crownGr;
+      ctx.strokeStyle = this.hsl(hue, sat, lit - 24);
+      ctx.lineWidth = Math.max(1, hR * 0.045);
+      ctx.beginPath();
+      ctx.moveTo(headX - crownRxT + crownLean * hR, crownTop);
+      ctx.bezierCurveTo(
+        headX - crownRxB * 0.95 + crownLean * hR, crownTop + crownH * 0.28,
+        headX - crownRxB, crownBot - brimRy * 0.25,
+        headX - crownRxB, crownBot
+      );
+      ctx.lineTo(headX + crownRxB, crownBot);
+      ctx.bezierCurveTo(
+        headX + crownRxB, crownBot - brimRy * 0.25,
+        headX + crownRxB * 0.95 + crownLean * hR, crownTop + crownH * 0.28,
+        headX + crownRxT + crownLean * hR, crownTop
+      );
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+
+      // Top cap
+      ctx.fillStyle = this.hsl(hue, sat - 6, lit + 8);
+      ctx.beginPath();
+      ctx.ellipse(headX + crownLean * hR, crownTop, crownRxT, brimRy * 0.55, 0, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Band
+      const bandH = Math.max(2, hR * 0.16);
+      const bandY = crownBot - bandH;
+      ctx.fillStyle = this.hsl(bandHue, Math.min(100, sat + 12), lit - 4);
+      ctx.strokeStyle = this.hsl(bandHue, sat, lit - 24);
+      ctx.lineWidth = Math.max(0.8, hR * 0.03);
+      ctx.beginPath();
+      ctx.moveTo(headX - crownRxB, crownBot);
+      ctx.lineTo(headX - crownRxB, bandY);
+      ctx.quadraticCurveTo(headX, bandY - hR * 0.06, headX + crownRxB, bandY);
+      ctx.lineTo(headX + crownRxB, crownBot);
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    },
+
+    // ----------------------------------------------------------
     // Draw an equipped accessory on top of the creature.
     //
     // Called at the end of draw(), inside the creature's ctx.save()
@@ -855,6 +940,13 @@ const CreatureCanvasComponent = {
       const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
       const headY = oy - p.bodyH  * sc * 0.35  + pt.headDY;
       const hR    = p.headSize * sc;
+
+      // Hats are rendered directly on the head so the creature visibly
+      // wears a full hat silhouette (brim + crown) at any lifecycle scale.
+      if (template === 'hat') {
+        this._drawWornHat(ctx, headX, headY, hR, ag);
+        return;
+      }
 
       // Scale the accessory relative to the creature's current body scale.
       // Base scale is tuned per template so head accessories remain visible
