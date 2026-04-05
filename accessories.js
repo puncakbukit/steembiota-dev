@@ -1167,13 +1167,30 @@ const WearPanelComponent = {
         this.username, this.accAuthor, this.accPermlink, this.accName,
         this.creature.author, this.creature.permlink, "the creature",
         (res) => {
-          this.publishing = false;
-          if (res.success) {
-            this.$emit("notify", "✅ Wear approved!", "success");
-            this.$emit("wear-updated", { ...this.wearState, status:"worn", grantedAt:new Date() });
-          } else {
+          if (!res.success) {
+            this.publishing = false;
             this.$emit("notify", "Grant failed: " + (res.message||"Unknown error"), "error");
+            return;
           }
+
+          // Write a creature-side wear_on marker so creature-centric lookup
+          // can resolve equipped accessory without scanning all accessories.
+          publishWearOn(
+            this.username,
+            this.creature.author, this.creature.permlink, "the creature",
+            this.accAuthor, this.accPermlink, this.accName,
+            (markRes) => {
+              this.publishing = false;
+              if (markRes.success) {
+                this.$emit("notify", "✅ Wear approved!", "success");
+              } else {
+                // Grant already succeeded on accessory post; marker failure should
+                // not roll back user-visible wear state.
+                this.$emit("notify", "✅ Wear approved, but creature marker could not be posted.", "info");
+              }
+              this.$emit("wear-updated", { ...this.wearState, status:"worn", grantedAt:new Date() });
+            }
+          );
         }
       );
     },

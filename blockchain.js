@@ -2018,6 +2018,7 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
 //   wear_revoke   — either party ends the wearing relationship
 //
 // One extra reply type (posted on the CREATURE post):
+//   wear_on       — accessory owner marks the creature as equipped
 //   wear_off      — creature owner removes an equipped accessory
 //
 // State machine (per accessory):
@@ -2185,6 +2186,37 @@ function publishWearGrant(
     jsonMetadata, permlink, ['steembiota'], callback);
 }
 
+// Accessory owner records a lightweight marker on the CREATURE post
+// so creature-centric lookups don't need to scan every accessory.
+function publishWearOn(
+  username, creatureAuthor, creaturePermlink, creatureName,
+  accAuthor, accPermlink, accName,
+  callback
+) {
+  const permlink    = buildPermlink('steembiota-wear-on');
+  const creatureUrl = `${APP_URL}/#/@${creatureAuthor}/${creaturePermlink}`;
+
+  const body =
+    `🧢 **Accessory Equipped**\n\n` +
+    `@${username} marked **${creatureName}** as wearing **${accName}**.\n\n` +
+    `\`\`\`\nSTEEMBIOTA_WEAR_ON\ncreature: @${creatureAuthor}/${creaturePermlink}\naccessory: @${accAuthor}/${accPermlink}\n\`\`\`\n\n` +
+    `🔗 [View ${creatureName}](${creatureUrl})\n\n` +
+    `*Recorded via [SteemBiota — Immutable Evolution](${APP_URL})*`;
+
+  const jsonMetadata = {
+    app: 'steembiota/1.0', tags: ['steembiota'],
+    steembiota: {
+      version: '1.0', type: 'wear_on',
+      creature:  { author: creatureAuthor, permlink: creaturePermlink },
+      accessory: { author: accAuthor, permlink: accPermlink },
+      ts: new Date().toISOString()
+    }
+  };
+
+  keychainPost(username, '', body, creaturePermlink, creatureAuthor,
+    jsonMetadata, permlink, ['steembiota'], callback);
+}
+
 // Either party revokes the wear (accessory owner or creature owner).
 // Reply is posted on the ACCESSORY post.
 function publishWearRevoke(
@@ -2251,25 +2283,61 @@ function publishWearOff(
 // accessory's own wear state to confirm it's still worn.
 // Returns { template, genome, accAuthor, accPermlink, accName } or null.
 async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
-  // Step 1: scan creature replies for wear_off (creature owner took it off)
-  // and for any wear_grant references from the accessory side.
-  // The accessory's own reply tree is authoritative — check it for confirmation.
-
-  // Collect all distinct accessories that appear in creature replies
+  // Step 1: scan creature replies for wear_on / wear_off markers.
+  // wear_on gives us a direct accessory candidate without global scans.
   const sorted = [...creatureReplies].sort((a, b) =>
     new Date(a.created) - new Date(b.created)
   );
 
   // Find the last wear_off from the creature owner
   let lastWearOff = null;
+  let latestWearOn = null; // { author, permlink, ts }
   for (const r of sorted) {
     let m; try { m = JSON.parse(r.json_metadata || '{}'); } catch { continue; }
     if (m.steembiota?.type === 'wear_off' && r.author === creatureAuthor) {
       lastWearOff = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
     }
+    if (m.steembiota?.type === 'wear_on') {
+      const acc = m.steembiota?.accessory;
+      if (!acc?.author || !acc?.permlink) continue;
+      const ts = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
+      if (!latestWearOn || ts > latestWearOn.ts) {
+        latestWearOn = { author: acc.author, permlink: acc.permlink, ts };
+      }
+    }
   }
 
-  // Step 2: scan steembiota-tag posts and find any accessory that is in
+  // If we have a direct creature-side wear marker newer than last wear_off,
+  // verify against the accessory's authoritative reply tree.
+  if (latestWearOn && (!lastWearOff || latestWearOn.ts > lastWearOff)) {
+    try {
+      const accPost = await fetchPost(latestWearOn.author, latestWearOn.permlink);
+      if (accPost && accPost.author) {
+        let meta = {};
+        try { meta = JSON.parse(accPost.json_metadata || '{}'); } catch {}
+        if (meta.steembiota?.type === 'accessory') {
+          const accReplies = await fetchAllReplies(latestWearOn.author, latestWearOn.permlink);
+          const wearState  = parseWearState(accReplies, latestWearOn.author);
+          if (
+            wearState.status === 'worn' &&
+            wearState.creature?.author === creatureAuthor &&
+            wearState.creature?.permlink === creaturePermlink
+          ) {
+            const acc = meta.steembiota.accessory;
+            return {
+              template:    acc?.template || 'hat',
+              genome:      acc?.genome   || null,
+              accAuthor:   latestWearOn.author,
+              accPermlink: latestWearOn.permlink,
+              accName:     acc?.name || latestWearOn.author,
+            };
+          }
+        }
+      }
+    } catch {}
+  }
+
+  // Step 2 (fallback for legacy records): scan steembiota-tag posts and find any accessory that is in
   // "worn" state with this specific creature.
   //
   // NOTE:
