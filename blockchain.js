@@ -2269,33 +2269,60 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
     }
   }
 
-  // Step 2: fetch the steembiota tag posts and find any accessory that
-  // is in "worn" state with this specific creature.
-  // We limit to 100 tag posts to keep this fast.
+  // Step 2: scan steembiota-tag posts and find any accessory that is in
+  // "worn" state with this specific creature.
+  //
+  // NOTE:
+  // A fixed small limit (e.g. latest 100 posts) can miss older accessories
+  // that are still actively worn. We therefore paginate with a safety cap.
   try {
-    const tagPosts = await fetchPostsByTag('steembiota', 100);
-    for (const post of (Array.isArray(tagPosts) ? tagPosts : [])) {
-      let meta; try { meta = JSON.parse(post.json_metadata || '{}'); } catch { continue; }
-      if (meta.steembiota?.type !== 'accessory') continue;
+    const PAGE_LIMIT = 100;
+    const MAX_SCAN_POSTS = 1200; // safety cap against unbounded paging
+    let scanned = 0;
+    let startAuthor = null;
+    let startPermlink = null;
 
-      const accReplies = await fetchAllReplies(post.author, post.permlink);
-      const wearState  = parseWearState(accReplies, post.author);
+    while (scanned < MAX_SCAN_POSTS) {
+      const page = startAuthor && startPermlink
+        ? await fetchPostsByTagPaged('steembiota', PAGE_LIMIT, startAuthor, startPermlink)
+        : await fetchPostsByTag('steembiota', PAGE_LIMIT);
 
-      if (wearState.status !== 'worn') continue;
-      if (wearState.creature?.author !== creatureAuthor) continue;
-      if (wearState.creature?.permlink !== creaturePermlink) continue;
+      if (!Array.isArray(page) || page.length === 0) break;
 
-      // Check if creature owner took it off after the grant
-      if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) continue;
+      const posts = (startAuthor && startPermlink) ? page.slice(1) : page;
+      if (posts.length === 0) break;
 
-      const acc = meta.steembiota.accessory;
-      return {
-        template:    acc?.template || 'hat',
-        genome:      acc?.genome   || null,
-        accAuthor:   post.author,
-        accPermlink: post.permlink,
-        accName:     acc?.name || post.author,
-      };
+      for (const post of posts) {
+        scanned++;
+        if (scanned > MAX_SCAN_POSTS) break;
+
+        let meta; try { meta = JSON.parse(post.json_metadata || '{}'); } catch { continue; }
+        if (meta.steembiota?.type !== 'accessory') continue;
+
+        const accReplies = await fetchAllReplies(post.author, post.permlink);
+        const wearState  = parseWearState(accReplies, post.author);
+
+        if (wearState.status !== 'worn') continue;
+        if (wearState.creature?.author !== creatureAuthor) continue;
+        if (wearState.creature?.permlink !== creaturePermlink) continue;
+
+        // Check if creature owner took it off after the grant
+        if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) continue;
+
+        const acc = meta.steembiota.accessory;
+        return {
+          template:    acc?.template || 'hat',
+          genome:      acc?.genome   || null,
+          accAuthor:   post.author,
+          accPermlink: post.permlink,
+          accName:     acc?.name || post.author,
+        };
+      }
+
+      if (posts.length < PAGE_LIMIT) break;
+      const last = posts[posts.length - 1];
+      startAuthor = last.author;
+      startPermlink = last.permlink;
     }
   } catch {}
 

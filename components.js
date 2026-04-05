@@ -857,8 +857,17 @@ const CreatureCanvasComponent = {
       const hR    = p.headSize * sc;
 
       // Scale the accessory relative to the creature's current body scale.
-      // Base size is 40% of the canvas dimension, then scaled by bodyScale.
-      const accScale = p.bodyScale * 0.55;
+      // Base scale is tuned per template so head accessories remain visible
+      // on smaller lifecycle stages (baby/toddler) while torso items stay
+      // proportionate.
+      const templateScale = (
+        template === 'hat'   ? 0.90 :
+        template === 'crown' ? 0.95 :
+        template === 'wings' ? 0.85 :
+        template === 'shirt' ? 0.78 :
+        0.72 // necklace + fallback
+      );
+      const accScale = p.bodyScale * templateScale;
       const accW = Math.round(W * 0.40);
       const accH = Math.round(H * 0.40);
 
@@ -868,12 +877,12 @@ const CreatureCanvasComponent = {
         case 'hat':
           // Sits on top of the head, centred horizontally
           anchorX = headX;
-          anchorY = headY - hR * 1.05;
+          anchorY = headY - hR * 0.88;
           break;
         case 'crown':
           // Slightly higher than hat, more centred on the skull
           anchorX = headX;
-          anchorY = headY - hR * 1.25;
+          anchorY = headY - hR * 1.02;
           break;
         case 'necklace':
           // Base of the neck, just above the torso top
