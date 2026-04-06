@@ -2123,6 +2123,28 @@ function parseCreatureWearing(replies, creatureOwner) {
   return equipped;
 }
 
+// Returns the most recent wear_off timestamp found on a creature post,
+// or null when no valid removal marker exists.
+//
+// A wear_off is valid when posted by the creature's effective owner.
+function getLatestWearOffTimestamp(creatureReplies, creaturePostAuthor) {
+  const sorted = [...creatureReplies].sort((a, b) =>
+    new Date(a.created) - new Date(b.created)
+  );
+  const effectiveOwner = parseOwnershipChain(creatureReplies, creaturePostAuthor).effectiveOwner;
+  let latest = null;
+
+  for (const r of sorted) {
+    let m; try { m = JSON.parse(r.json_metadata || '{}'); } catch { continue; }
+    if (m.steembiota?.type !== 'wear_off') continue;
+    if (r.author !== effectiveOwner) continue;
+    const ts = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
+    latest = ts;
+  }
+
+  return latest;
+}
+
 // ── Publish functions ──────────────────────────────────────
 
 // Creature owner requests permission to equip an accessory.
@@ -2293,14 +2315,11 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
     new Date(a.created) - new Date(b.created)
   );
 
-  // Find the last wear_off from the creature owner
-  let lastWearOff = null;
+  // Find the last wear_off from the creature's effective owner
+  const lastWearOff = getLatestWearOffTimestamp(creatureReplies, creatureAuthor);
   let latestWearOn = null; // { author, permlink, ts }
   for (const r of sorted) {
     let m; try { m = JSON.parse(r.json_metadata || '{}'); } catch { continue; }
-    if (m.steembiota?.type === 'wear_off' && r.author === creatureAuthor) {
-      lastWearOff = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
-    }
     if (m.steembiota?.type === 'wear_on') {
       const acc = m.steembiota?.accessory;
       if (!acc?.author || !acc?.permlink) continue;

@@ -1424,8 +1424,26 @@ const AccessoryItemView = {
         this.transferState  = ownership;
         this.effectiveOwner = ownership.effectiveOwner;
 
-        // Wear state — derived from the accessory's reply tree
-        this.wearState = parseWearState(replies, author);
+        // Wear state — derived from the accessory's reply tree.
+        // Reconcile against creature-side wear_off markers so an accessory
+        // doesn't remain visually "worn" after the creature owner removed it.
+        let wearState = parseWearState(replies, author);
+        if (wearState.status === "worn" && wearState.creature?.author && wearState.creature?.permlink) {
+          try {
+            const creatureReplies = await fetchAllReplies(
+              wearState.creature.author,
+              wearState.creature.permlink
+            );
+            const lastWearOff = getLatestWearOffTimestamp(
+              creatureReplies,
+              wearState.creature.author
+            );
+            if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) {
+              wearState = { status: "idle", creature: null, requestedBy: null, grantedAt: null };
+            }
+          } catch {}
+        }
+        this.wearState = wearState;
 
       } catch (err) {
         this.loadError = err.message || "Failed to load accessory.";
