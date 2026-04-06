@@ -2040,10 +2040,14 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
 //     creature:    { author, permlink } | null,
 //     requestedBy: string | null,   — creature owner username
 //     grantedAt:   Date | null }
-function parseWearState(replies, accAuthor) {
+function parseWearState(replies, postAuthor) {
   const sorted = [...replies].sort((a, b) =>
     new Date(a.created) - new Date(b.created)
   );
+  // Use effective ownership (after transfers), not the original post author.
+  // This allows transferred accessories to be granted/revoked by the
+  // current owner.
+  const effectiveOwner = parseOwnershipChain(replies, postAuthor).effectiveOwner;
 
   let status      = "idle";
   let creature    = null;   // { author, permlink }
@@ -2068,15 +2072,15 @@ function parseWearState(replies, accAuthor) {
       grantedAt   = null;
 
     } else if (type === 'wear_grant') {
-      // Only the accessory owner may grant.
-      if (reply.author !== accAuthor) continue;
+      // Only the effective accessory owner may grant.
+      if (reply.author !== effectiveOwner) continue;
       if (status !== 'requested') continue;  // must follow a request
       status    = 'worn';
       grantedAt = ts;
 
     } else if (type === 'wear_revoke') {
-      // Accessory owner or the creature owner (requestedBy) may revoke.
-      if (reply.author !== accAuthor && reply.author !== requestedBy) continue;
+      // Effective accessory owner or the creature owner (requestedBy) may revoke.
+      if (reply.author !== effectiveOwner && reply.author !== requestedBy) continue;
       status      = 'idle';
       creature    = null;
       requestedBy = null;
