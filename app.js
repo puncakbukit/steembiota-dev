@@ -169,6 +169,28 @@ function markDuplicates(posts) {
 // Convert a raw Steem post array into creature card data objects.
 // Filters to valid SteemBiota posts, newest first.
 const PAGE_SIZE = 15;
+const LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+function readListCache(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.data) || typeof parsed.savedAt !== "number") return null;
+    if ((Date.now() - parsed.savedAt) > LIST_CACHE_TTL_MS) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeListCache(key, data) {
+  try {
+    if (!Array.isArray(data)) return;
+    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch {}
+}
+
 function parseSteembiotaPosts(rawPosts) {
   const results = [];
   for (const p of rawPosts) {
@@ -1064,13 +1086,22 @@ const HomeView = {
   },
   methods: {
     async loadCreatureList() {
-      this.listLoading = true;
+      const cacheKey  = "steembiota:list:creatures:v1";
+      const cachedRaw = readListCache(cacheKey);
+      if (cachedRaw) {
+        this.allCreatures = parseSteembiotaPosts(cachedRaw);
+        this.listLoading = false;
+      } else {
+        this.listLoading = true;
+      }
       this.listError   = "";
       try {
         const raw = await fetchPostsByTag("steembiota", 100);
-        this.allCreatures = parseSteembiotaPosts(Array.isArray(raw) ? raw : []);
+        const safeRaw = Array.isArray(raw) ? raw : [];
+        this.allCreatures = parseSteembiotaPosts(safeRaw);
+        writeListCache(cacheKey, safeRaw);
       } catch (e) {
-        this.listError = e.message || "Failed to load creatures.";
+        if (!cachedRaw) this.listError = e.message || "Failed to load creatures.";
       }
       this.listLoading = false;
     },
@@ -1507,10 +1538,18 @@ const ProfileView = {
 
   methods: {
     async loadCreatures(user) {
-      this.creaturesLoading = true;
+      this.creaturesError = "";
+      const cacheKey = `steembiota:owned:creatures:${String(user || "").toLowerCase()}:v1`;
+      const cached = readListCache(cacheKey);
+      if (cached) {
+        this.creatures = cached;
+        this.creaturesLoading = false;
+      } else {
+        this.creaturesLoading = true;
+      }
       try {
         const owned = await fetchCreaturesOwnedBy(user, 100);
-        this.creatures = owned.map(({ post: p, meta: sb, effectiveOwner }) => {
+        const mapped = owned.map(({ post: p, meta: sb, effectiveOwner }) => {
           const age = calculateAge(p.created);
           return {
             author: p.author, permlink: p.permlink,
@@ -1525,19 +1564,31 @@ const ProfileView = {
             created: p.created || "", effectiveOwner,
           };
         }).sort((a, b) => new Date(b.created) - new Date(a.created));
+        this.creatures = mapped;
+        writeListCache(cacheKey, mapped);
       } catch (e) {
-        this.creaturesError = e.message || "Failed to load creatures.";
+        if (!cached) this.creaturesError = e.message || "Failed to load creatures.";
       }
       this.creaturesLoading = false;
     },
 
     async loadAccessories(user) {
-      this.accessoriesLoading = true;
+      this.accessoriesError = "";
+      const cacheKey = `steembiota:owned:accessories:${String(user || "").toLowerCase()}:v1`;
+      const cached = readListCache(cacheKey);
+      if (cached) {
+        this.accessories = cached;
+        this.accessoriesLoading = false;
+      } else {
+        this.accessoriesLoading = true;
+      }
       try {
         const owned = await fetchAccessoriesOwnedBy(user, 100);
-        this.accessories = owned.sort((a, b) => new Date(b.created) - new Date(a.created));
+        const sorted = owned.sort((a, b) => new Date(b.created) - new Date(a.created));
+        this.accessories = sorted;
+        writeListCache(cacheKey, sorted);
       } catch (e) {
-        this.accessoriesError = e.message || "Failed to load accessories.";
+        if (!cached) this.accessoriesError = e.message || "Failed to load accessories.";
       }
       this.accessoriesLoading = false;
     },

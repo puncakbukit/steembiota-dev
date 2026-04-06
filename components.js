@@ -994,14 +994,14 @@ const CreatureCanvasComponent = {
           anchorY = headY + hR * 0.8;
           break;
         case 'shirt':
-          // Torso centre
+          // Slightly lower on torso so it sits farther from the head/neck
           anchorX = ox - p.bodyLen * sc * 0.12;
-          anchorY = oy;
+          anchorY = oy + p.bodyH * sc * 0.12;
           break;
         case 'wings':
-          // Behind the mid-back; shifted toward the tail side
+          // Behind the upper back; shifted toward the tail side
           anchorX = ox + p.bodyLen * sc * 0.25;
-          anchorY = oy - p.bodyH * sc * 0.15;
+          anchorY = oy - p.bodyH * sc * 0.28;
           break;
         default:
           anchorX = headX;

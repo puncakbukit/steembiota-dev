@@ -925,13 +925,23 @@ const AccessoriesView = {
 
     // ── Browse ────────────────────────────────────────────────
     async loadAccessoryList() {
-      this.listLoading = true;
+      const cacheKey = "steembiota:list:accessories:v1";
+      const canUseCache = (typeof readListCache === "function" && typeof writeListCache === "function");
+      const cachedRaw = canUseCache ? readListCache(cacheKey) : null;
+      if (cachedRaw) {
+        this.allAccessories = parseSteembiotaAccessories(cachedRaw);
+        this.listLoading = false;
+      } else {
+        this.listLoading = true;
+      }
       this.listError   = "";
       try {
         const raw = await fetchPostsByTag("steembiota", 100);
-        this.allAccessories = parseSteembiotaAccessories(Array.isArray(raw) ? raw : []);
+        const safeRaw = Array.isArray(raw) ? raw : [];
+        this.allAccessories = parseSteembiotaAccessories(safeRaw);
+        if (canUseCache) writeListCache(cacheKey, safeRaw);
       } catch (e) {
-        this.listError = e.message || "Failed to load accessories.";
+        if (!cachedRaw) this.listError = e.message || "Failed to load accessories.";
       }
       this.listLoading = false;
     },
