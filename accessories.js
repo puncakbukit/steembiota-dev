@@ -1264,7 +1264,7 @@ const WearPanelComponent = {
         <template v-if="status==='worn'">
           <p style="font-size:0.80rem;color:#a5d6a7;margin:0 0 12px;">
             ✅ Worn by
-            <a :href="'/#/@'+creature.author+'/'+creature.permlink" style="color:#a5d6a7;">
+            <a :href="'#/@'+creature.author+'/'+creature.permlink" style="color:#a5d6a7;">
               @{{ creature.author }}'s creature
             </a>.
           </p>
@@ -1284,7 +1284,7 @@ const WearPanelComponent = {
         <template v-else-if="status==='requested'">
           <p style="font-size:0.80rem;color:#ffb74d;margin:0 0 12px;">
             ⏳ @{{ requestedBy }} wants to equip
-            <a :href="'/#/@'+creature.author+'/'+creature.permlink" style="color:#ffb74d;">
+            <a :href="'#/@'+creature.author+'/'+creature.permlink" style="color:#ffb74d;">
               this creature
             </a>.
           </p>
