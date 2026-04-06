@@ -956,7 +956,10 @@ const CreatureCanvasComponent = {
         // Hats need extra scale on-creature because the renderer includes
         // full brim + crown proportions intended for a larger standalone canvas.
         template === 'hat'   ? 1.34 :
-        template === 'crown' ? 1.08 :
+        // Crown accessories were rendering too large on-creature relative
+        // to head radius (especially high-SZ genomes), so use a smaller
+        // baseline scalar than hats to keep the crown proportional.
+        template === 'crown' ? 0.46 :
         template === 'wings' ? 0.85 :
         template === 'shirt' ? 0.78 :
         0.72 // necklace + fallback
