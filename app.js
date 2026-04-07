@@ -170,6 +170,7 @@ function markDuplicates(posts) {
 // Filters to valid SteemBiota posts, newest first.
 const PAGE_SIZE = 15;
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+const OWNED_PROFILE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes (profile ownership scans are expensive)
 
 function readListCache(key) {
   try {
@@ -185,6 +186,28 @@ function readListCache(key) {
 }
 
 function writeListCache(key, data) {
+  try {
+    if (!Array.isArray(data)) return;
+    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch {}
+}
+
+// Dedicated cache for ProfileView ownership tabs.
+// Uses a longer TTL than generic lists to avoid repeatedly scanning transfer chains.
+function readOwnedProfileCache(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.data) || typeof parsed.savedAt !== "number") return null;
+    if ((Date.now() - parsed.savedAt) > OWNED_PROFILE_CACHE_TTL_MS) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeOwnedProfileCache(key, data) {
   try {
     if (!Array.isArray(data)) return;
     localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
@@ -1539,14 +1562,21 @@ const ProfileView = {
   methods: {
     async loadCreatures(user) {
       this.creaturesError = "";
-      const cacheKey = `steembiota:owned:creatures:${String(user || "").toLowerCase()}:v1`;
-      const cached = readListCache(cacheKey);
+      const cacheKey = `steembiota:owned:creatures:${String(user || "").toLowerCase()}:v2`;
+      const cached = readOwnedProfileCache(cacheKey);
       if (cached) {
         this.creatures = cached;
         this.creaturesLoading = false;
-      } else {
-        this.creaturesLoading = true;
+        // Refresh in background so cached view is instant but data can still update.
+        this.refreshCreatures(user, cacheKey);
+        return;
       }
+      this.creaturesLoading = true;
+      await this.refreshCreatures(user, cacheKey, { setLoadingFalse: true });
+    },
+
+    async refreshCreatures(user, cacheKey, opts = {}) {
+      const { setLoadingFalse = false } = opts;
       try {
         const owned = await fetchCreaturesOwnedBy(user, 100);
         const mapped = owned.map(({ post: p, meta: sb, effectiveOwner }) => {
@@ -1565,32 +1595,39 @@ const ProfileView = {
           };
         }).sort((a, b) => new Date(b.created) - new Date(a.created));
         this.creatures = mapped;
-        writeListCache(cacheKey, mapped);
+        writeOwnedProfileCache(cacheKey, mapped);
       } catch (e) {
-        if (!cached) this.creaturesError = e.message || "Failed to load creatures.";
+        if (!this.creatures.length) this.creaturesError = e.message || "Failed to load creatures.";
       }
-      this.creaturesLoading = false;
+      if (setLoadingFalse) this.creaturesLoading = false;
     },
 
     async loadAccessories(user) {
       this.accessoriesError = "";
-      const cacheKey = `steembiota:owned:accessories:${String(user || "").toLowerCase()}:v1`;
-      const cached = readListCache(cacheKey);
+      const cacheKey = `steembiota:owned:accessories:${String(user || "").toLowerCase()}:v2`;
+      const cached = readOwnedProfileCache(cacheKey);
       if (cached) {
         this.accessories = cached;
         this.accessoriesLoading = false;
-      } else {
-        this.accessoriesLoading = true;
+        // Refresh in background so cached view is instant but data can still update.
+        this.refreshAccessories(user, cacheKey);
+        return;
       }
+      this.accessoriesLoading = true;
+      await this.refreshAccessories(user, cacheKey, { setLoadingFalse: true });
+    },
+
+    async refreshAccessories(user, cacheKey, opts = {}) {
+      const { setLoadingFalse = false } = opts;
       try {
         const owned = await fetchAccessoriesOwnedBy(user, 100);
         const sorted = owned.sort((a, b) => new Date(b.created) - new Date(a.created));
         this.accessories = sorted;
-        writeListCache(cacheKey, sorted);
+        writeOwnedProfileCache(cacheKey, sorted);
       } catch (e) {
-        if (!cached) this.accessoriesError = e.message || "Failed to load accessories.";
+        if (!this.accessories.length) this.accessoriesError = e.message || "Failed to load accessories.";
       }
-      this.accessoriesLoading = false;
+      if (setLoadingFalse) this.accessoriesLoading = false;
     },
 
     prevCre() { if (this.crePage > 1) this.crePage--; },

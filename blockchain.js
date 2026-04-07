@@ -1639,6 +1639,11 @@ async function fetchAccessoriesOwnedBy(username, limit = 100) {
     }), 5, async (p) => {
       let meta = {};
       try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+      if (Number(p.children || 0) <= 0) {
+        const acc = meta.steembiota.accessory;
+        results.push({ author: p.author, permlink: p.permlink, name: acc?.name || p.author, template: acc?.template || 'hat', genome: acc?.genome, created: p.created || '', effectiveOwner: p.author });
+        return;
+      }
       let replies = [];
       try { replies = await fetchAllReplies(p.author, p.permlink); } catch {}
       const hasTransfer = replies.some(r => {
@@ -1659,6 +1664,7 @@ async function fetchAccessoriesOwnedBy(username, limit = 100) {
       if (p.author === username) return false;
       try { const m = JSON.parse(p.json_metadata || '{}'); return m.steembiota?.type === 'accessory'; } catch { return false; }
     }), 5, async (p) => {
+      if (Number(p.children || 0) <= 0) return;
       let meta = {};
       try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
       let replies = [];
@@ -1945,6 +1951,10 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
     await _throttledMap(ownCreaturePosts, 5, async (p) => {
       let meta = {};
       try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
+      if (Number(p.children || 0) <= 0) {
+        results.push({ post: p, meta: meta.steembiota, effectiveOwner: p.author });
+        return;
+      }
 
       let replies = [];
       try { replies = await fetchAllReplies(p.author, p.permlink); } catch {}
@@ -1979,6 +1989,7 @@ async function fetchCreaturesOwnedBy(username, limit = 100) {
     });
 
     await _throttledMap(foreignCreaturePosts, 5, async (p) => {
+      if (Number(p.children || 0) <= 0) return;
       let meta = {};
       try { meta = JSON.parse(p.json_metadata || '{}'); } catch { return; }
 
