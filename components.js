@@ -916,6 +916,37 @@ const CreatureCanvasComponent = {
       ctx.fill(); ctx.stroke();
     },
 
+    _redrawNeckForeground(ctx, p, sc, ox, oy, pt) {
+      const hue = p.finalHue;
+      const sat = p.finalSat;
+      const lit = p.finalLit;
+      const H1 = this.hsl;
+
+      const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
+      const headY = oy - p.bodyH  * sc * 0.35  + pt.headDY;
+      const neckCtrlY = oy - p.bodyH * sc * (0.2 - pt.neckAngle * 0.35);
+      const neckGr = this.linGrad(ctx,
+        ox - p.bodyLen * sc * 0.5, oy - p.bodyH * sc * 0.1,
+        headX, headY + p.headSize * sc * 0.4,
+        [[0, H1(hue, sat - 5, lit - 5)], [1, H1(hue, sat, lit)]]
+      );
+      ctx.fillStyle   = neckGr;
+      ctx.strokeStyle = H1(hue, sat, lit - 18);
+      ctx.lineWidth   = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(ox - p.bodyLen * sc * 0.42, oy - p.bodyH * sc * 0.5);
+      ctx.quadraticCurveTo(
+        ox - p.bodyLen * sc * 0.58, neckCtrlY,
+        headX + p.headSize * sc * 0.55, headY + p.headSize * sc * 0.5
+      );
+      ctx.quadraticCurveTo(
+        ox - p.bodyLen * sc * 0.52, oy,
+        ox - p.bodyLen * sc * 0.32, oy + p.bodyH * sc * 0.1
+      );
+      ctx.closePath();
+      ctx.fill(); ctx.stroke();
+    },
+
     // ----------------------------------------------------------
     // Draw an equipped accessory on top of the creature.
     //
@@ -1040,6 +1071,12 @@ const CreatureCanvasComponent = {
         dw, dh
       );
       ctx.globalAlpha = 1;
+
+      // Necklace should wrap around the neck: repaint neck foreground so
+      // the back/top portion of the necklace is naturally occluded.
+      if (template === 'necklace') {
+        this._redrawNeckForeground(ctx, p, sc, ox, oy, pt);
+      }
     },
 
     // ----------------------------------------------------------
