@@ -959,7 +959,7 @@ const CreatureCanvasComponent = {
         // Crown accessories were rendering too large on-creature relative
         // to head radius (especially high-SZ genomes), so use a smaller
         // baseline scalar than hats to keep the crown proportional.
-        template === 'crown' ? 0.46 :
+        template === 'crown' ? 0.40 :
         template === 'wings' ? 0.85 :
         template === 'shirt' ? 0.78 :
         0.72 // necklace + fallback
@@ -994,8 +994,8 @@ const CreatureCanvasComponent = {
           anchorY = headY + hR * 0.8;
           break;
         case 'shirt':
-          // Shifted toward the tail-side torso so it sits farther from the head/neck
-          anchorX = ox + p.bodyLen * sc * 0.08;
+          // Move a bit farther toward the tail so shirts don't read as neckwear.
+          anchorX = ox + p.bodyLen * sc * 0.14;
           anchorY = oy + p.bodyH * sc * 0.12;
           break;
         case 'wings':
