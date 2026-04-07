@@ -994,9 +994,10 @@ const CreatureCanvasComponent = {
           anchorY = headY + hR * 0.8;
           break;
         case 'shirt':
-          // Move a bit farther toward the tail so shirts don't read as neckwear.
-          anchorX = ox + p.bodyLen * sc * 0.14;
-          anchorY = oy + p.bodyH * sc * 0.12;
+          // Move farther toward the tail and slightly lower on the torso so
+          // shirts don't read as neckwear.
+          anchorX = ox + p.bodyLen * sc * 0.24;
+          anchorY = oy + p.bodyH * sc * 0.14;
           break;
         case 'wings':
           // Behind the upper back near the top of the torso, tail-side biased

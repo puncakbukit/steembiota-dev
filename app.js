@@ -1552,6 +1552,23 @@ const ProfileView = {
   },
 
   watch: {
+    '$route.params.user': {
+      immediate: false,
+      async handler(nextUser, prevUser) {
+        if (!nextUser || nextUser === prevUser) return;
+        this.crePage = 1;
+        this.accPage = 1;
+        this.filterGenus = "";
+        this.filterSex = "";
+        this.filterAgeOp = "";
+        this.filterAgeVal = "";
+        this.filterTemplate = "";
+        await Promise.all([
+          this.loadCreatures(nextUser),
+          this.loadAccessories(nextUser),
+        ]);
+      }
+    },
     filterGenus()    { this.crePage = 1; },
     filterSex()      { this.crePage = 1; },
     filterAgeOp()    { this.crePage = 1; },
@@ -1594,8 +1611,13 @@ const ProfileView = {
             created: p.created || "", effectiveOwner,
           };
         }).sort((a, b) => new Date(b.created) - new Date(a.created));
-        this.creatures = mapped;
-        writeOwnedProfileCache(cacheKey, mapped);
+        // If we already have data on-screen (usually from cache), do not let an
+        // intermittent empty refresh wipe the tab and show a false "No creatures found".
+        const keepExisting = this.creatures.length > 0 && mapped.length === 0;
+        if (!keepExisting) this.creatures = mapped;
+        if (mapped.length > 0 || this.creatures.length === 0) {
+          writeOwnedProfileCache(cacheKey, mapped);
+        }
       } catch (e) {
         if (!this.creatures.length) this.creaturesError = e.message || "Failed to load creatures.";
       }
@@ -1622,8 +1644,13 @@ const ProfileView = {
       try {
         const owned = await fetchAccessoriesOwnedBy(user, 100);
         const sorted = owned.sort((a, b) => new Date(b.created) - new Date(a.created));
-        this.accessories = sorted;
-        writeOwnedProfileCache(cacheKey, sorted);
+        // Same protection as creatures tab: avoid replacing a known-good list
+        // with a transient empty response from chain scans.
+        const keepExisting = this.accessories.length > 0 && sorted.length === 0;
+        if (!keepExisting) this.accessories = sorted;
+        if (sorted.length > 0 || this.accessories.length === 0) {
+          writeOwnedProfileCache(cacheKey, sorted);
+        }
       } catch (e) {
         if (!this.accessories.length) this.accessoriesError = e.message || "Failed to load accessories.";
       }
