@@ -12,7 +12,6 @@ const APP_URL = "https://puncakbukit.github.io/steembiota";
 
 const RPC_NODES = [
   "https://api.steemit.com",
-  "https://api.justyy.com",
   "https://steemd.steemworld.org",
   "https://api.steem.fans"
 ];
@@ -24,6 +23,11 @@ function setRPC(index) {
   steem.api.setOptions({ url: RPC_NODES[index] });
   console.log("Switched RPC to:", RPC_NODES[index]);
 }
+
+// Force a known-good CORS-enabled RPC node at startup.
+// Without this, steem-js may keep its internal default endpoint,
+// which can fail on GitHub Pages and make accessory lookups flaky.
+steem.api.setOptions({ url: RPC_NODES[currentRPCIndex] });
 
 // Safe API wrapper with automatic RPC fallback on error.
 function callWithFallback(apiCall, args, callback, attempt = 0) {
