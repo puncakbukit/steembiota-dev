@@ -331,53 +331,59 @@ function drawNecklace(ctx, g, W, H) {
   const hue = g.CLR, sat = g.SAT, lit = g.LIT;
   const aHue = (hue + 150 + rngA() * 80) % 360;
 
-  const chainW  = (70 + rng()  * 40) * sz;
-  const chainDy = (30 + rngS() * 20) * sz;   // how low the chain drapes
-  const beads   = 6 + Math.floor(rngS() * 7); // number of beads along chain
-  const chainY  = cy - 10 * sz;
+  // Ring sized/positioned to read as neckwear (encircling the neck),
+  // not a loose hanging chain.
+  const ringRx   = (56 + rng()  * 26) * sz;
+  const ringRy   = (18 + rngS() * 10) * sz;
+  const ringY    = cy - (18 + rngS() * 6) * sz;
+  const ringThk  = (3.2 + rngS() * 2.2) * sz;
+  const links    = 10 + Math.floor(rngS() * 8);
 
-  // Draw chain as a catenary arc
-  const chainStroke = _hsl(hue, sat, lit);
-  ctx.strokeStyle = chainStroke;
-  ctx.lineWidth   = (2 + rngS() * 2) * sz;
+  // Back half of the necklace (darker) to imply it wraps behind neck.
+  ctx.strokeStyle = _hsl(hue, Math.max(25, sat - 12), lit - 24, 0.72);
+  ctx.lineWidth   = ringThk * 0.9;
   ctx.lineCap     = "round";
   ctx.beginPath();
-  ctx.moveTo(cx - chainW, chainY);
-  ctx.quadraticCurveTo(cx, chainY + chainDy, cx + chainW, chainY);
+  ctx.ellipse(cx, ringY, ringRx, ringRy, 0, Math.PI, Math.PI * 2, false);
   ctx.stroke();
-  ctx.lineCap = "butt";
 
-  // Beads along the chain
-  for (let i = 0; i <= beads; i++) {
-    const t  = i / beads;
-    // Quadratic bezier position
-    const bx = (1 - t) * (1 - t) * (cx - chainW)
-              + 2 * (1 - t) * t * cx
-              + t * t * (cx + chainW);
-    const by = (1 - t) * (1 - t) * chainY
-              + 2 * (1 - t) * t * (chainY + chainDy)
-              + t * t * chainY;
-    const br = (3 + rng() * 3.5) * sz;
+  // Front lower half: brighter and thicker.
+  const frontGr = _linGrad(ctx, cx - ringRx, ringY - ringRy, cx + ringRx, ringY + ringRy,
+    [[0, _hsl(hue, sat, lit - 10)], [0.5, _hsl(hue, sat, lit + 8)], [1, _hsl(hue, sat, lit - 12)]]
+  );
+  ctx.strokeStyle = frontGr;
+  ctx.lineWidth   = ringThk;
+  ctx.beginPath();
+  ctx.ellipse(cx, ringY, ringRx, ringRy, 0, 0, Math.PI, false);
+  ctx.stroke();
+
+  // Beads/links only on visible front arc.
+  for (let i = 0; i <= links; i++) {
+    const t = i / links;
+    const ang = Math.PI - t * Math.PI; // left (π) to right (0) along front half
+    const bx = cx + Math.cos(ang) * ringRx;
+    const by = ringY + Math.sin(ang) * ringRy;
+    const br = (2.4 + rng() * 2.8) * sz;
     const beadHue = rng() > 0.5 ? hue : aHue;
-    const beadGr  = _radGrad(ctx, bx - br * 0.3, by - br * 0.3, 0, br,
-      [[0, _hsl(beadHue, sat + 10, lit + 25)], [0.6, _hsl(beadHue, sat, lit)], [1, _hsl(beadHue, sat, lit - 20)]]
+    const beadGr  = _radGrad(ctx, bx - br * 0.28, by - br * 0.28, 0, br,
+      [[0, _hsl(beadHue, sat + 10, lit + 24)], [0.6, _hsl(beadHue, sat, lit)], [1, _hsl(beadHue, sat, lit - 20)]]
     );
     ctx.fillStyle   = beadGr;
-    ctx.strokeStyle = _hsl(beadHue, sat, lit - 25, 0.7);
-    ctx.lineWidth   = 0.6;
+    ctx.strokeStyle = _hsl(beadHue, sat, lit - 26, 0.7);
+    ctx.lineWidth   = 0.55;
     ctx.beginPath(); ctx.arc(bx, by, br, 0, Math.PI * 2);
     ctx.fill(); ctx.stroke();
     if (g.SHN > 25) {
-      ctx.fillStyle = "rgba(255,255,255,0.55)";
-      ctx.beginPath(); ctx.arc(bx - br * 0.32, by - br * 0.32, br * 0.28, 0, Math.PI * 2);
+      ctx.fillStyle = "rgba(255,255,255,0.5)";
+      ctx.beginPath(); ctx.arc(bx - br * 0.3, by - br * 0.3, br * 0.25, 0, Math.PI * 2);
       ctx.fill();
     }
   }
 
-  // Central pendant
+  // Central pendant hangs only slightly below the ring so necklace still reads as a collar.
   const pendX = cx;
-  const pendY = chainY + chainDy + (14 + rngO() * 10) * sz;
-  const pendR = (10 + rngO() * 10) * sz;
+  const pendY = ringY + ringRy + (8 + rngO() * 8) * sz;
+  const pendR = (8 + rngO() * 8) * sz;
   const pendStyle = Math.floor(rngO() * 3); // 0=circle 1=diamond 2=teardrop
 
   const pendGr = _radGrad(ctx, pendX - pendR * 0.3, pendY - pendR * 0.3, 0, pendR * 1.2,
@@ -404,12 +410,14 @@ function drawNecklace(ctx, g, W, H) {
     ctx.bezierCurveTo(pendX - pendR, pendY + pendR * 0.8, pendX - pendR, pendY - pendR * 0.5, pendX, pendY - pendR * 0.5);
     ctx.closePath(); ctx.fill(); ctx.stroke();
   }
+
   // Specular on pendant
   ctx.fillStyle = "rgba(255,255,255,0.6)";
   ctx.beginPath();
   ctx.ellipse(pendX - pendR * 0.28, pendY - pendR * 0.28, pendR * 0.22, pendR * 0.14, -0.5, 0, Math.PI * 2);
   ctx.fill();
 }
+
 
 // ── SHIRT / JACKET ────────────────────────────────────────────
 function drawShirt(ctx, g, W, H) {
