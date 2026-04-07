@@ -11,11 +11,12 @@ const APP_URL = "https://puncakbukit.github.io/steembiota";
 // ---- RPC nodes & fallback ----
 
 const RPC_NODES = [
-  "https://api.steemit.com",
-  // steemd.steemworld.org intermittently blocks browser origins with CORS,
+  "https://api.steemit.com"
+  // "https://api.steem.fans",
+  // "https://api.justyy.com"
+  // steemd.steemworld.org 
+  // intermittently blocks browser origins with CORS,
   // which causes accessory wear lookups to fail/flap on GitHub Pages.
-  "https://api.steem.fans",
-  "https://api.justyy.com"
 ];
 
 let currentRPCIndex = 0;
