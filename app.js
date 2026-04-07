@@ -171,6 +171,7 @@ function markDuplicates(posts) {
 const PAGE_SIZE = 15;
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const OWNED_PROFILE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes (profile ownership scans are expensive)
+const CREATURE_PAGE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
 function readListCache(key) {
   try {
@@ -210,6 +211,26 @@ function readOwnedProfileCache(key) {
 function writeOwnedProfileCache(key, data) {
   try {
     if (!Array.isArray(data)) return;
+    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+  } catch {}
+}
+
+function readCreaturePageCache(key) {
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed.savedAt !== "number" || !parsed.data) return null;
+    if ((Date.now() - parsed.savedAt) > CREATURE_PAGE_CACHE_TTL_MS) return null;
+    return parsed.data;
+  } catch {
+    return null;
+  }
+}
+
+function writeCreaturePageCache(key, data) {
+  try {
+    if (!data || !data.genome) return;
     localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
   } catch {}
 }
@@ -1984,12 +2005,46 @@ const CreatureView = {
     }
   },
   methods: {
+    creatureCacheKey(author, permlink) {
+      return `steembiota:creature:${String(author || "").toLowerCase()}/${String(permlink || "").toLowerCase()}:v1`;
+    },
+    applyCachedCreature(cached, author, permlink) {
+      if (!cached || !cached.genome) return false;
+      this.author       = author;
+      this.permlink     = permlink;
+      this.genome       = cached.genome;
+      this.name         = cached.name || author;
+      this.creatureType = cached.creatureType || "founder";
+      this.speciated    = !!cached.speciated;
+      this.mutated      = !!cached.mutated;
+      this._postCreated = cached.postCreated || null;
+      this.postAge      = cached.postCreated ? calculateAge(cached.postCreated) : (cached.postAge ?? 0);
+      this.feedEvents   = Array.isArray(cached.feedEvents) ? cached.feedEvents : [];
+      this.feedState    = cached.feedState || computeFeedState(this.feedEvents, this.genome);
+      this.activityState   = cached.activityState || null;
+      this.transferState   = cached.transferState || null;
+      this.effectiveOwner  = cached.effectiveOwner || author;
+      this.permitState     = {
+        grantees: new Set(Array.isArray(cached.permitGrantees) ? cached.permitGrantees : [])
+      };
+      this.alreadyFedToday = !!cached.alreadyFedToday;
+      this._rawParentA     = cached.parentA || null;
+      this._rawParentB     = cached.parentB || null;
+      this.wearing         = cached.wearing || null;
+      this.isPhantom       = false;
+      this.loadError       = null;
+      this.loading         = false;
+      return true;
+    },
     async loadCreature() {
       this.loading   = true;
       this.loadError = null;
       const { author, permlink } = this.$route.params;
       this.author   = author;
       this.permlink = permlink;
+      const cacheKey = this.creatureCacheKey(author, permlink);
+      const cached   = readCreaturePageCache(cacheKey);
+      this.applyCachedCreature(cached, author, permlink);
       try {
         const post = await fetchPost(author, permlink);
         if (!post) throw new Error("Post not found.");
@@ -2054,7 +2109,47 @@ const CreatureView = {
         // Fetch equipped accessory in background (non-blocking — may take a moment)
         fetchCreatureWearing(author, permlink, replies).then(w => {
           this.wearing = w;
+          writeCreaturePageCache(cacheKey, {
+            genome: this.genome,
+            name: this.name,
+            creatureType: this.creatureType,
+            speciated: this.speciated,
+            mutated: this.mutated,
+            postCreated: this._postCreated,
+            postAge: this.postAge,
+            feedEvents: this.feedEvents,
+            feedState: this.feedState,
+            activityState: this.activityState,
+            permitGrantees: this.permitState?.grantees ? [...this.permitState.grantees] : [],
+            effectiveOwner: this.effectiveOwner,
+            transferState: this.transferState,
+            alreadyFedToday: this.alreadyFedToday,
+            parentA: this._rawParentA,
+            parentB: this._rawParentB,
+            wearing: this.wearing
+          });
         }).catch(() => { this.wearing = null; });
+
+        // Persist creature snapshot immediately so next visit can render from cache.
+        writeCreaturePageCache(cacheKey, {
+          genome: this.genome,
+          name: this.name,
+          creatureType: this.creatureType,
+          speciated: this.speciated,
+          mutated: this.mutated,
+          postCreated: this._postCreated,
+          postAge: this.postAge,
+          feedEvents: this.feedEvents,
+          feedState: this.feedState,
+          activityState: this.activityState,
+          permitGrantees: this.permitState?.grantees ? [...this.permitState.grantees] : [],
+          effectiveOwner: this.effectiveOwner,
+          transferState: this.transferState,
+          alreadyFedToday: this.alreadyFedToday,
+          parentA: this._rawParentA,
+          parentB: this._rawParentB,
+          wearing: this.wearing
+        });
 
       } catch (err) {
         this.loadError = err.message || "Failed to load creature.";

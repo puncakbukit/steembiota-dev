@@ -2320,6 +2320,10 @@ function publishWearOff(
 // accessory's own wear state to confirm it's still worn.
 // Returns { template, genome, accAuthor, accPermlink, accName } or null.
 async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
+  const norm = v => String(v || "").trim().toLowerCase();
+  const creatureAuthorN   = norm(creatureAuthor);
+  const creaturePermlinkN = norm(creaturePermlink);
+
   // Step 1: scan creature replies for wear_on / wear_off markers.
   // wear_on gives us a direct accessory candidate without global scans.
   const sorted = [...creatureReplies].sort((a, b) =>
@@ -2354,8 +2358,8 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
           const wearState  = parseWearState(accReplies, latestWearOn.author);
           if (
             wearState.status === 'worn' &&
-            wearState.creature?.author === creatureAuthor &&
-            wearState.creature?.permlink === creaturePermlink
+            norm(wearState.creature?.author) === creatureAuthorN &&
+            norm(wearState.creature?.permlink) === creaturePermlinkN
           ) {
             const acc = meta.steembiota.accessory;
             return {
@@ -2405,8 +2409,8 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
         const wearState  = parseWearState(accReplies, post.author);
 
         if (wearState.status !== 'worn') continue;
-        if (wearState.creature?.author !== creatureAuthor) continue;
-        if (wearState.creature?.permlink !== creaturePermlink) continue;
+        if (norm(wearState.creature?.author) !== creatureAuthorN) continue;
+        if (norm(wearState.creature?.permlink) !== creaturePermlinkN) continue;
 
         // Check if creature owner took it off after the grant
         if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) continue;
