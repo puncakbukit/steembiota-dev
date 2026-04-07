@@ -935,6 +935,7 @@ const CreatureCanvasComponent = {
     _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H) {
       if (!this.wearing || !this.wearing.genome) return;
       const { template, genome: ag } = this.wearing;
+      if (template === 'shirt') return;
 
       // Compute attachment point in creature-local canvas coords
       const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
@@ -2174,6 +2175,7 @@ const CreatureCardComponent = {
       copied:            false,
       votes:             [],     // fetched on mount
       rebloggers:        [],     // fetched on mount
+      resolvedWearing:   null,   // fetched on mount for mini-card canvas
       socialLoading:     true,
       votingInProgress:  false,
       resteemInProgress: false,
@@ -2190,6 +2192,7 @@ const CreatureCardComponent = {
       this.votes      = v;
       this.rebloggers = r;
     }).catch(() => {}).finally(() => { this.socialLoading = false; });
+    this.loadWearing();
   },
   computed: {
     fossil()     { return this.post.age >= this.post.genome.LIF; },
@@ -2201,6 +2204,10 @@ const CreatureCardComponent = {
     },
     routePath()  { return "/@" + this.post.author + "/" + this.post.permlink; },
     steemitUrl() { return "https://steemit.com/@" + this.post.author + "/" + this.post.permlink; },
+    cardWearing() {
+      // Prefer pre-resolved data when available, then async card-local lookup.
+      return this.post.wearing || this.resolvedWearing || null;
+    },
     hasVoted() {
       if (!this.username) return false;
       return this.votes.some(v => v.voter === this.username && v.percent > 0);
@@ -2231,6 +2238,17 @@ const CreatureCardComponent = {
     }
   },
   methods: {
+    async loadWearing() {
+      try {
+        if (typeof fetchAllReplies !== "function" || typeof fetchCreatureWearing !== "function") return;
+        const replies = await fetchAllReplies(this.post.author, this.post.permlink);
+        const wearing = await fetchCreatureWearing(this.post.author, this.post.permlink, replies || []);
+        // Shirt accessory has been removed from creature rendering.
+        this.resolvedWearing = (wearing && wearing.template !== "shirt") ? wearing : null;
+      } catch {
+        this.resolvedWearing = null;
+      }
+    },
     toggleVotePicker(e) {
       e.preventDefault(); e.stopPropagation();
       if (!this.username || !window.steem_keychain || this.hasVoted) return;
@@ -2296,6 +2314,7 @@ const CreatureCardComponent = {
           :genome="post.genome"
           :age="post.age"
           :fossil="fossil"
+          :wearing="cardWearing"
           :canvas-w="180"
           :canvas-h="144"
           style="display:block;margin:0 auto;"

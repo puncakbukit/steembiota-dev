@@ -7,7 +7,7 @@
 // the creature system:
 //
 //   accessoryGenome  → deterministic parameters (colour, shape, size)
-//   template         → one of 5 types: hat | crown | necklace | shirt | wings
+//   template         → one of 4 types: hat | crown | necklace | wings
 //   AccessoryCanvasComponent → renders the accessory on a 400×320 canvas
 //   AccessoryCardComponent   → compact card for the browse grid
 //   AccessoriesView          → /#/accessories browse page + creator tool
@@ -88,7 +88,6 @@ const ACC_NOUNS = {
   hat:      ["Cap","Brim","Topper","Slouch","Fedora","Cloche","Bonnet","Pork Pie"],
   crown:    ["Crown","Tiara","Diadem","Circlet","Wreath","Coronet","Halo","Aureole"],
   necklace: ["Pendant","Choker","Chain","Torque","Amulet","Locket","Collar","Beads"],
-  shirt:    ["Vest","Jacket","Coat","Mantle","Tunic","Surcoat","Cape","Robe"],
   wings:    ["Wings","Plumes","Vanes","Pinions","Sails","Fins","Fans","Feathers"]
 };
 
@@ -99,7 +98,7 @@ function generateAccessoryName(template, genome) {
 }
 
 // ============================================================
-// ACCESSORY TEMPLATES — 5 renderers
+// ACCESSORY TEMPLATES — 4 renderers
 //
 // Each renderer is a pure function:
 //   drawXxx(ctx, genome, W, H, opts)
@@ -641,7 +640,7 @@ function drawWings(ctx, g, W, H) {
 }
 
 // Dispatch table — maps template name → draw function
-const ACCESSORY_RENDERERS = { hat: drawHat, crown: drawCrown, necklace: drawNecklace, shirt: drawShirt, wings: drawWings };
+const ACCESSORY_RENDERERS = { hat: drawHat, crown: drawCrown, necklace: drawNecklace, wings: drawWings };
 
 // Master draw entry point — draws the accessory centred on the canvas
 // and optionally draws a soft selection ring around it.
@@ -678,7 +677,6 @@ const UNI_ACC_GLYPHS = {
   hat:      ["🎩","👒","🪖","⛑","🎓"],
   crown:    ["👑","✨","💎","⭐","🔱"],
   necklace: ["📿","💍","✦","❋","◈"],
-  shirt:    ["👕","🧥","🥼","👔","🎽"],
   wings:    ["🦋","🕊","🦅","✈","🪽"],
 };
 
@@ -702,14 +700,13 @@ function buildAccessoryUnicodeArt(template, genome) {
 
 // ============================================================
 // ACCESSORY TEMPLATES CATALOGUE
-// Static list of the 5 base templates shown in the creator UI.
+// Static list of the base templates shown in the creator UI.
 // ============================================================
 
 const ACCESSORY_TEMPLATES = [
   { id: "hat",      label: "Hat",      icon: "🎩", desc: "Classic headwear — caps, fedoras, toppers" },
   { id: "crown",    label: "Crown",    icon: "👑", desc: "Regal headpiece — crowns, tiaras, circlets" },
   { id: "necklace", label: "Necklace", icon: "📿", desc: "Neck ornament — pendants, chains, chokers"  },
-  { id: "shirt",    label: "Shirt",    icon: "👕", desc: "Body garment — vests, jackets, capes"       },
   { id: "wings",    label: "Wings",    icon: "🦋", desc: "Feathered, bat, or fairy wing pairs"        },
 ];
 
