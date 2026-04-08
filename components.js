@@ -918,8 +918,8 @@ const CreatureCanvasComponent = {
 
     _redrawNeckForeground(ctx, p, sc, ox, oy, pt) {
       const hue = p.finalHue;
-      const sat = p.finalSat;
-      const lit = p.finalLit;
+      const sat = p.colorSat;
+      const lit = p.colorLight;
       const H1 = this.hsl;
 
       const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
