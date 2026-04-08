@@ -1024,9 +1024,9 @@ const CreatureCanvasComponent = {
           // Neck base: keep high enough to intersect the neck silhouette,
           // so foreground neck repaint can occlude the back arc.
           anchorX = headX + p.headSize * sc * 0.25;
-          // Lower again so pendants/chains clearly sit on the upper chest
-          // instead of reading as a tight collar near the jawline.
-          anchorY = headY + hR * 0.70;
+          // Lower significantly so the necklace reads as chest-worn
+          // rather than tight to the throat/jaw.
+          anchorY = headY + hR * 1.00;
           break;
         case 'shirt':
           // Move farther toward the tail and slightly lower on the torso so
@@ -1070,7 +1070,9 @@ const CreatureCanvasComponent = {
       if (template === 'necklace') {
         // Hide the back/top of the necklace behind head+neck by only
         // compositing the lower/front zone of the accessory image.
-        const frontVisibleY = headY + hR * 0.70;
+        // Keep clip threshold near the neck so the rear/top arc stays hidden
+        // while the accessory itself can hang lower on the chest.
+        const frontVisibleY = headY + hR * 0.62;
         ctx.save();
         ctx.beginPath();
         ctx.rect(0, frontVisibleY, W, Math.max(1, H - frontVisibleY));
