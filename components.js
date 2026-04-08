@@ -1021,9 +1021,10 @@ const CreatureCanvasComponent = {
           anchorY = headY - hR * 0.58;
           break;
         case 'necklace':
-          // Base of the neck, just above the torso top
+          // Neck base: keep high enough to intersect the neck silhouette,
+          // so foreground neck repaint can occlude the back arc.
           anchorX = headX + p.headSize * sc * 0.25;
-          anchorY = headY + hR * 0.8;
+          anchorY = headY + hR * 0.56;
           break;
         case 'shirt':
           // Move farther toward the tail and slightly lower on the torso so
@@ -1064,12 +1065,29 @@ const CreatureCanvasComponent = {
         0.50
       );
       ctx.globalAlpha = 0.95;
-      ctx.drawImage(
-        offscreen,
-        anchorX - dw * 0.5,
-        anchorY - dh * focalY,
-        dw, dh
-      );
+      if (template === 'necklace') {
+        // Hide the back/top of the necklace behind head+neck by only
+        // compositing the lower/front zone of the accessory image.
+        const frontVisibleY = headY + hR * 0.56;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, frontVisibleY, W, Math.max(1, H - frontVisibleY));
+        ctx.clip();
+        ctx.drawImage(
+          offscreen,
+          anchorX - dw * 0.5,
+          anchorY - dh * focalY,
+          dw, dh
+        );
+        ctx.restore();
+      } else {
+        ctx.drawImage(
+          offscreen,
+          anchorX - dw * 0.5,
+          anchorY - dh * focalY,
+          dw, dh
+        );
+      }
       ctx.globalAlpha = 1;
 
       // Necklace should wrap around the neck: repaint neck foreground so
