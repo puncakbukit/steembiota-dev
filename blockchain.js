@@ -2145,17 +2145,29 @@ function parseCreatureWearing(replies, creatureOwner) {
 // or null when no valid removal marker exists.
 //
 // A wear_off is valid when posted by the creature's effective owner.
-function getLatestWearOffTimestamp(creatureReplies, creaturePostAuthor) {
+function getLatestWearOffTimestamp(creatureReplies, creaturePostAuthor, accessoryRef = null) {
   const sorted = [...creatureReplies].sort((a, b) =>
     new Date(a.created) - new Date(b.created)
   );
   const effectiveOwner = parseOwnershipChain(creatureReplies, creaturePostAuthor).effectiveOwner;
+  const norm = v => String(v || "").trim().toLowerCase();
+  const targetAuthorN   = accessoryRef ? norm(accessoryRef.author) : "";
+  const targetPermlinkN = accessoryRef ? norm(accessoryRef.permlink) : "";
   let latest = null;
 
   for (const r of sorted) {
     let m; try { m = JSON.parse(r.json_metadata || '{}'); } catch { continue; }
     if (m.steembiota?.type !== 'wear_off') continue;
     if (r.author !== effectiveOwner) continue;
+    if (accessoryRef) {
+      const acc = m.steembiota?.accessory || null;
+      const hasScopedAcc = !!(acc?.author && acc?.permlink);
+      // Legacy wear_off markers had no accessory ref and are treated as global.
+      if (hasScopedAcc) {
+        if (norm(acc.author) !== targetAuthorN) continue;
+        if (norm(acc.permlink) !== targetPermlinkN) continue;
+      }
+    }
     const ts = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
     latest = ts;
   }
@@ -2340,9 +2352,6 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
     new Date(a.created) - new Date(b.created)
   );
 
-  // Find the latest wear_off from the creature's effective owner.
-  const lastWearOff = getLatestWearOffTimestamp(creatureReplies, creatureAuthor);
-
   const addOrUpdateCandidate = (candidate) => {
     const key = `${norm(candidate.accAuthor)}/${norm(candidate.accPermlink)}`;
     const prev = candidates.get(key);
@@ -2371,7 +2380,12 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
   // Validate direct candidates (from wear_on markers) against each accessory's
   // own reply tree. Ignore any candidate that was removed later via wear_off.
   for (const c of [...candidates.values()]) {
-    if (lastWearOff && c.grantedAt && c.grantedAt <= lastWearOff) continue;
+    const lastWearOffForCandidate = getLatestWearOffTimestamp(
+      creatureReplies,
+      creatureAuthor,
+      { author: c.accAuthor, permlink: c.accPermlink }
+    );
+    if (lastWearOffForCandidate && c.grantedAt && c.grantedAt <= lastWearOffForCandidate) continue;
     try {
       const accPost = await fetchPost(c.accAuthor, c.accPermlink);
       if (accPost && accPost.author) {
@@ -2437,8 +2451,13 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
         if (norm(wearState.creature?.author) !== creatureAuthorN) continue;
         if (norm(wearState.creature?.permlink) !== creaturePermlinkN) continue;
 
-        // Check if creature owner took it off after the grant
-        if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) continue;
+        // Check if creature owner took off THIS accessory after the grant
+        const lastWearOffForAccessory = getLatestWearOffTimestamp(
+          creatureReplies,
+          creatureAuthor,
+          { author: post.author, permlink: post.permlink }
+        );
+        if (lastWearOffForAccessory && wearState.grantedAt && lastWearOffForAccessory > wearState.grantedAt) continue;
 
         const acc = meta.steembiota.accessory;
         const candidate = {
