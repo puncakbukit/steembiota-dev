@@ -2092,7 +2092,21 @@ function parseWearState(replies, postAuthor) {
     } else if (type === 'wear_grant') {
       // Only the effective accessory owner may grant.
       if (reply.author !== effectiveOwner) continue;
-      if (status !== 'requested') continue;  // must follow a request
+      // A grant is valid whether or not a formal wear_request preceded it.
+      // The most common case where no prior request exists is when the
+      // accessory owner and the creature owner are the same user — they
+      // can grant directly without going through the request step.
+      if (status !== 'requested') {
+        // No prior request: read the creature ref from the grant's own metadata.
+        const c = meta.steembiota?.creature;
+        if (c?.author && c?.permlink) {
+          creature    = { author: c.author, permlink: c.permlink };
+          requestedBy = requestedBy || reply.author;
+        } else {
+          // No creature ref anywhere — cannot determine target; skip this grant.
+          continue;
+        }
+      }
       status    = 'worn';
       grantedAt = ts;
 
