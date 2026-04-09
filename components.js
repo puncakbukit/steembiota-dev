@@ -1004,7 +1004,10 @@ const CreatureCanvasComponent = {
         // to head radius (especially high-SZ genomes), so use a smaller
         // baseline scalar than hats to keep the crown proportional.
         template === 'crown' ? 0.40 :
-        template === 'wings' ? 0.85 :
+        // Wings need a larger source canvas to avoid offscreen clipping of
+        // wide feather/bat silhouettes. Keep on-creature size comparable by
+        // pairing this with a lower template scalar (see baseCanvasScale).
+        template === 'wings' ? 0.52 :
         template === 'shirt' ? 0.78 :
         0.72 // necklace + fallback
       );
@@ -1014,6 +1017,9 @@ const CreatureCanvasComponent = {
       const baseCanvasScale = (
         template === 'hat'   ? 0.66 :
         template === 'crown' ? 0.54 :
+        // Wing renderers can extend far beyond centre; a small source canvas
+        // clips them, making equipped wings disappear or look truncated.
+        template === 'wings' ? 0.66 :
         0.40
       );
       const accW = Math.round(W * baseCanvasScale);
