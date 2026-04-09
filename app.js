@@ -2684,6 +2684,55 @@ const CreatureView = {
           🦴 This creature has fossilised. Its genome is preserved on-chain.
         </div>
 
+        <!-- ── Worn Accessories ── -->
+        <div v-if="wearings.length > 0" style="max-width:520px;margin:16px auto;">
+          <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+            <span style="font-size:0.78rem;color:#ce93d8;text-transform:uppercase;
+                         letter-spacing:0.08em;font-weight:bold;">✨ Worn Accessories</span>
+            <span style="font-size:0.72rem;color:#555;background:#1a1a1a;
+                         border:1px solid #2a2a2a;border-radius:10px;
+                         padding:1px 8px;">{{ wearings.length }}</span>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:8px;">
+            <div v-for="(w, i) in wearings" :key="w.accAuthor + '/' + w.accPermlink"
+              style="display:flex;align-items:center;gap:12px;padding:10px 12px;
+                     border-radius:8px;background:#0d0a10;border:1px solid #2a1a2e;">
+              <!-- Mini accessory canvas -->
+              <div style="flex-shrink:0;">
+                <accessory-canvas-component
+                  :template="w.template"
+                  :genome="w.genome"
+                  :canvas-w="80"
+                  :canvas-h="64"
+                  style="border-radius:6px;border:1px solid #2a1a2e;display:block;background:#111;"
+                ></accessory-canvas-component>
+              </div>
+              <!-- Info -->
+              <div style="flex:1;min-width:0;text-align:left;">
+                <div style="font-size:0.85rem;font-weight:bold;color:#ce93d8;
+                            white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                  {{ w.accName }}
+                </div>
+                <div style="font-size:0.72rem;color:#666;margin-top:2px;text-transform:capitalize;">
+                  {{ w.template }}
+                </div>
+                <div style="font-size:0.70rem;color:#444;margin-top:3px;">
+                  by
+                  <router-link :to="'/@' + w.accAuthor"
+                    style="color:#9575cd;text-decoration:none;">@{{ w.accAuthor }}</router-link>
+                </div>
+              </div>
+              <!-- Link to accessory page -->
+              <router-link
+                :to="'/acc/@' + w.accAuthor + '/' + w.accPermlink"
+                style="flex-shrink:0;font-size:0.72rem;color:#7b52a8;
+                       padding:4px 10px;border-radius:6px;border:1px solid #2a1a2e;
+                       text-decoration:none;background:#120a18;white-space:nowrap;"
+              >View ↗</router-link>
+            </div>
+          </div>
+        </div>
+
         <!-- Activity panel (Feed + Play + Walk) -->
         <activity-panel-component
           :username="username"
