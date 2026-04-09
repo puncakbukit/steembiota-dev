@@ -1799,15 +1799,6 @@ const CreatureCanvasComponent = {
         this._drawTailPosed(ctx, p, sc, ox, oy, hue, sat, lit, pt);
       }
 
-      // ---- WINGS UNDERLAY ----
-      // Draw worn wings before the torso so they read as attached to the
-      // creature's back instead of floating on top of the body.
-      if (!p.fossil) {
-        wearings
-          .filter(w => w.template === "wings")
-          .forEach(w => this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, w));
-      }
-
       // ---- TORSO ----
       const torsoGr = this.linGrad(ctx,
         ox, oy - p.bodyH * sc, ox, oy + p.bodyH * sc,
@@ -1869,6 +1860,14 @@ const CreatureCanvasComponent = {
           }
         }
         ctx.restore(); ctx.globalAlpha = 1;
+      }
+
+      // ---- WINGS LAYER ----
+      // Draw wings after torso so they remain visible.
+      if (!p.fossil) {
+        wearings
+          .filter(w => w.template === "wings")
+          .forEach(w => this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, w));
       }
 
       // ---- NECKLACE UNDERLAY ----
