@@ -1004,11 +1004,10 @@ const CreatureCanvasComponent = {
         // to head radius (especially high-SZ genomes), so use a smaller
         // baseline scalar than hats to keep the crown proportional.
         template === 'crown' ? 0.40 :
-        // Wings should read clearly behind the torso. A low scalar made many
-        // wing genomes effectively disappear into the body silhouette on the
-        // creature canvas, especially darker palettes. Keep wings larger than
-        // torso width so tips remain visible.
-        template === 'wings' ? 0.90 :
+        // Wings should read clearly behind the torso. Keep them a bit larger
+        // than torso width so the outer tips remain visible even when the
+        // torso is painted on top in the underlay pass.
+        template === 'wings' ? 1.05 :
         template === 'shirt' ? 0.78 :
         0.72 // necklace + fallback
       );
@@ -1054,9 +1053,10 @@ const CreatureCanvasComponent = {
           anchorY = oy + p.bodyH * sc * 0.14;
           break;
         case 'wings':
-          // Behind the upper back near the top of the torso, tail-side biased
-          anchorX = ox + p.bodyLen * sc * 0.25;
-          anchorY = oy - p.bodyH * sc * 0.4;
+          // Behind the upper back, shifted tail-side and slightly higher so
+          // the torso occludes the root while the wing span remains visible.
+          anchorX = ox + p.bodyLen * sc * 0.40;
+          anchorY = oy - p.bodyH * sc * 0.62;
           break;
         default:
           anchorX = headX;
@@ -1070,7 +1070,7 @@ const CreatureCanvasComponent = {
       const offCtx = offscreen.getContext('2d');
       // drawAccessory is defined in accessories.js (loaded before components.js)
       if (typeof drawAccessory === 'function') {
-        drawAccessory(offCtx, template, ag, accW, accH);
+        drawAccessory(offCtx, template, ag, accW, accH, { transparentBackground: true });
       }
 
       // Composite onto the creature canvas.
@@ -1083,6 +1083,7 @@ const CreatureCanvasComponent = {
       const focalY = (
         template === 'hat'   ? 0.68 :
         template === 'crown' ? 0.64 :
+        template === 'wings' ? 0.62 :
         0.50
       );
       ctx.globalAlpha = 0.95;
@@ -1700,6 +1701,7 @@ const CreatureCanvasComponent = {
       const hue = p.finalHue;
       const sat = p.colorSat;
       const lit = p.colorLight;
+      const wearings = this._normalizedWearings();
 
       // ---- FOSSIL ----
       if (p.fossil) {
@@ -1797,6 +1799,15 @@ const CreatureCanvasComponent = {
         this._drawTailPosed(ctx, p, sc, ox, oy, hue, sat, lit, pt);
       }
 
+      // ---- WINGS UNDERLAY ----
+      // Draw worn wings before the torso so they read as attached to the
+      // creature's back instead of floating on top of the body.
+      if (!p.fossil) {
+        wearings
+          .filter(w => w.template === "wings")
+          .forEach(w => this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, w));
+      }
+
       // ---- TORSO ----
       const torsoGr = this.linGrad(ctx,
         ox, oy - p.bodyH * sc, ox, oy + p.bodyH * sc,
@@ -1863,7 +1874,6 @@ const CreatureCanvasComponent = {
       // ---- NECKLACE UNDERLAY ----
       // Draw worn necklaces before neck/head so natural occlusion comes
       // from creature geometry instead of clipping the accessory image.
-      const wearings = this._normalizedWearings();
       if (!p.fossil) {
         wearings
           .filter(w => w.template === "necklace")
@@ -2039,7 +2049,7 @@ const CreatureCanvasComponent = {
       // Only shown for non-fossil creatures with an equipped accessory.
       if (!p.fossil) {
         wearings
-          .filter(w => w.template !== "necklace")
+          .filter(w => w.template !== "necklace" && w.template !== "wings")
           .forEach(w => this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, w));
       }
 

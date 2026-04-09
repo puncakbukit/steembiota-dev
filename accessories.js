@@ -656,11 +656,15 @@ function drawAccessory(ctx, template, genome, W, H, opts = {}) {
   const renderer = ACCESSORY_RENDERERS[template] || drawHat;
   ctx.clearRect(0, 0, W, H);
 
-  // Subtle canvas background gradient
-  const bg = _radGrad(ctx, W * 0.5, H * 0.5, 0, Math.max(W, H) * 0.6,
-    [[0, "rgba(30,30,30,0.6)"], [1, "rgba(10,10,10,0)"]]);
-  ctx.fillStyle = bg;
-  ctx.fillRect(0, 0, W, H);
+  // Subtle canvas background gradient.
+  // When compositing onto creature canvases we skip this backdrop so
+  // large accessories (especially wings) don't darken/obscure the body.
+  if (!opts.transparentBackground) {
+    const bg = _radGrad(ctx, W * 0.5, H * 0.5, 0, Math.max(W, H) * 0.6,
+      [[0, "rgba(30,30,30,0.6)"], [1, "rgba(10,10,10,0)"]]);
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, W, H);
+  }
 
   renderer(ctx, genome, W, H);
 
