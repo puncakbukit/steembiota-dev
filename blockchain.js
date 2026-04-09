@@ -2092,21 +2092,7 @@ function parseWearState(replies, postAuthor) {
     } else if (type === 'wear_grant') {
       // Only the effective accessory owner may grant.
       if (reply.author !== effectiveOwner) continue;
-      // A grant is valid whether or not a formal wear_request preceded it.
-      // The most common case where no prior request exists is when the
-      // accessory owner and the creature owner are the same user — they
-      // can grant directly without going through the request step.
-      if (status !== 'requested') {
-        // No prior request: read the creature ref from the grant's own metadata.
-        const c = meta.steembiota?.creature;
-        if (c?.author && c?.permlink) {
-          creature    = { author: c.author, permlink: c.permlink };
-          requestedBy = requestedBy || reply.author;
-        } else {
-          // No creature ref anywhere — cannot determine target; skip this grant.
-          continue;
-        }
-      }
+      if (status !== 'requested') continue;  // must follow a request
       status    = 'worn';
       grantedAt = ts;
 
@@ -2369,9 +2355,20 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
   const addOrUpdateCandidate = (candidate) => {
     const key = `${norm(candidate.accAuthor)}/${norm(candidate.accPermlink)}`;
     const prev = candidates.get(key);
+    if (!prev) { candidates.set(key, candidate); return; }
+    // A fully-resolved candidate (has genome) always beats an unresolved stub.
+    // This handles the case where the wear_grant timestamp is earlier than the
+    // wear_on timestamp: the stub was added first with the later wear_on time,
+    // so a naive timestamp comparison would wrongly keep the stub over the
+    // resolved candidate.
+    const prevResolved  = !!(prev.genome);
+    const nextResolved  = !!(candidate.genome);
+    if (nextResolved && !prevResolved) { candidates.set(key, candidate); return; }
+    if (!nextResolved && prevResolved) return;
+    // Both resolved or both unresolved — prefer the newer grantedAt.
     const prevTs = prev?.grantedAt ? prev.grantedAt.getTime() : 0;
     const nextTs = candidate?.grantedAt ? candidate.grantedAt.getTime() : 0;
-    if (!prev || nextTs >= prevTs) candidates.set(key, candidate);
+    if (nextTs >= prevTs) candidates.set(key, candidate);
   };
 
   for (const r of sorted) {
