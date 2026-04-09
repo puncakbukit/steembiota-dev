@@ -2330,6 +2330,10 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
   const norm = v => String(v || "").trim().toLowerCase();
   const creatureAuthorN   = norm(creatureAuthor);
   const creaturePermlinkN = norm(creaturePermlink);
+  // Track the best candidate by newest authoritative grant timestamp.
+  // This lets us recover when a newer wear_grant exists but the matching
+  // creature-side wear_on marker was not posted (or failed to post).
+  let best = null; // { template, genome, accAuthor, accPermlink, accName, grantedAt: Date|null }
 
   // Step 1: scan creature replies for wear_on / wear_off markers.
   // wear_on gives us a direct accessory candidate without global scans.
@@ -2369,12 +2373,13 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
             norm(wearState.creature?.permlink) === creaturePermlinkN
           ) {
             const acc = meta.steembiota.accessory;
-            return {
+            best = {
               template:    acc?.template || 'hat',
               genome:      acc?.genome   || null,
               accAuthor:   latestWearOn.author,
               accPermlink: latestWearOn.permlink,
               accName:     acc?.name || latestWearOn.author,
+              grantedAt:   wearState.grantedAt || latestWearOn.ts || null
             };
           }
         }
@@ -2423,13 +2428,22 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
         if (lastWearOff && wearState.grantedAt && lastWearOff > wearState.grantedAt) continue;
 
         const acc = meta.steembiota.accessory;
-        return {
+        const candidate = {
           template:    acc?.template || 'hat',
           genome:      acc?.genome   || null,
           accAuthor:   post.author,
           accPermlink: post.permlink,
           accName:     acc?.name || post.author,
+          grantedAt:   wearState.grantedAt || null
         };
+
+        if (!best) {
+          best = candidate;
+        } else {
+          const bestTs = best.grantedAt ? best.grantedAt.getTime() : 0;
+          const candTs = candidate.grantedAt ? candidate.grantedAt.getTime() : 0;
+          if (candTs > bestTs) best = candidate;
+        }
       }
 
       if (posts.length < PAGE_LIMIT) break;
@@ -2439,5 +2453,7 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
     }
   } catch {}
 
-  return null;
+  if (!best) return null;
+  const { grantedAt, ...resolved } = best;
+  return resolved;
 }

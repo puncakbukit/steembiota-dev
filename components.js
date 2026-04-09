@@ -963,10 +963,11 @@ const CreatureCanvasComponent = {
     // then composited onto the creature canvas at reduced scale,
     // so the full drawXxx() renderers are reused without change.
     // ----------------------------------------------------------
-    _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H) {
+    _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, opts = {}) {
       if (!this.wearing || !this.wearing.genome) return;
       const { template, genome: ag } = this.wearing;
       if (template === 'shirt') return;
+      const underlayNecklace = !!opts.underlayNecklace;
 
       // Compute attachment point in creature-local canvas coords
       const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
@@ -1067,36 +1068,17 @@ const CreatureCanvasComponent = {
         0.50
       );
       ctx.globalAlpha = 0.95;
-      if (template === 'necklace') {
-        // Hide the back/top of the necklace behind head+neck by only
-        // compositing the lower/front zone of the accessory image.
-        // Keep clip threshold near the neck so the rear/top arc stays hidden
-        // while the accessory itself can hang lower on the chest.
-        const frontVisibleY = headY + hR * 0.62;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(0, frontVisibleY, W, Math.max(1, H - frontVisibleY));
-        ctx.clip();
-        ctx.drawImage(
-          offscreen,
-          anchorX - dw * 0.5,
-          anchorY - dh * focalY,
-          dw, dh
-        );
-        ctx.restore();
-      } else {
-        ctx.drawImage(
-          offscreen,
-          anchorX - dw * 0.5,
-          anchorY - dh * focalY,
-          dw, dh
-        );
-      }
+      ctx.drawImage(
+        offscreen,
+        anchorX - dw * 0.5,
+        anchorY - dh * focalY,
+        dw, dh
+      );
       ctx.globalAlpha = 1;
 
       // Necklace should wrap around the neck: repaint neck foreground so
       // the back/top portion of the necklace is naturally occluded.
-      if (template === 'necklace') {
+      if (template === 'necklace' && !underlayNecklace) {
         this._redrawNeckForeground(ctx, p, sc, ox, oy, pt);
       }
     },
@@ -1860,6 +1842,13 @@ const CreatureCanvasComponent = {
         ctx.restore(); ctx.globalAlpha = 1;
       }
 
+      // ---- NECKLACE UNDERLAY ----
+      // Draw worn necklaces before neck/head so natural occlusion comes
+      // from creature geometry instead of clipping the accessory image.
+      if (!p.fossil && this.wearing && this.wearing.template === 'necklace') {
+        this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, { underlayNecklace: true });
+      }
+
       // ---- NECK ----
       const headX = ox - p.bodyLen * sc * 0.68 + pt.headDX;
       const headY = oy - p.bodyH  * sc * 0.35  + pt.headDY;
@@ -2027,7 +2016,7 @@ const CreatureCanvasComponent = {
       // ---- WEARING ACCESSORY ----
       // Drawn last so it appears on top of the creature.
       // Only shown for non-fossil creatures with an equipped accessory.
-      if (!p.fossil && this.wearing) {
+      if (!p.fossil && this.wearing && this.wearing.template !== 'necklace') {
         this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H);
       }
 
