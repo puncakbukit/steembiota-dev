@@ -2322,65 +2322,78 @@ function publishWearOff(
     jsonMetadata, permlink, ['steembiota'], callback);
 }
 
-// Fetch the accessory currently being worn by a creature.
-// Checks creature replies for a wear_off, then checks the
-// accessory's own wear state to confirm it's still worn.
-// Returns { template, genome, accAuthor, accPermlink, accName } or null.
-async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
+// Fetch all accessories currently being worn by a creature.
+// Checks creature replies for wear_off markers, then verifies each
+// candidate against the accessory post's authoritative wear state.
+//
+// Returns newest-first array:
+//   [{ template, genome, accAuthor, accPermlink, accName }, ...]
+async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureReplies) {
   const norm = v => String(v || "").trim().toLowerCase();
   const creatureAuthorN   = norm(creatureAuthor);
   const creaturePermlinkN = norm(creaturePermlink);
-  // Track the best candidate by newest authoritative grant timestamp.
-  // This lets us recover when a newer wear_grant exists but the matching
-  // creature-side wear_on marker was not posted (or failed to post).
-  let best = null; // { template, genome, accAuthor, accPermlink, accName, grantedAt: Date|null }
+  const candidates = new Map(); // key -> { ..., grantedAt: Date|null }
 
   // Step 1: scan creature replies for wear_on / wear_off markers.
-  // wear_on gives us a direct accessory candidate without global scans.
+  // wear_on gives us direct accessory candidates without global scans.
   const sorted = [...creatureReplies].sort((a, b) =>
     new Date(a.created) - new Date(b.created)
   );
 
-  // Find the last wear_off from the creature's effective owner
+  // Find the latest wear_off from the creature's effective owner.
   const lastWearOff = getLatestWearOffTimestamp(creatureReplies, creatureAuthor);
-  let latestWearOn = null; // { author, permlink, ts }
+
+  const addOrUpdateCandidate = (candidate) => {
+    const key = `${norm(candidate.accAuthor)}/${norm(candidate.accPermlink)}`;
+    const prev = candidates.get(key);
+    const prevTs = prev?.grantedAt ? prev.grantedAt.getTime() : 0;
+    const nextTs = candidate?.grantedAt ? candidate.grantedAt.getTime() : 0;
+    if (!prev || nextTs >= prevTs) candidates.set(key, candidate);
+  };
+
   for (const r of sorted) {
     let m; try { m = JSON.parse(r.json_metadata || '{}'); } catch { continue; }
     if (m.steembiota?.type === 'wear_on') {
       const acc = m.steembiota?.accessory;
       if (!acc?.author || !acc?.permlink) continue;
       const ts = new Date(r.created.endsWith('Z') ? r.created : r.created + 'Z');
-      if (!latestWearOn || ts > latestWearOn.ts) {
-        latestWearOn = { author: acc.author, permlink: acc.permlink, ts };
-      }
+      addOrUpdateCandidate({
+        template: "hat",
+        genome: null,
+        accAuthor: acc.author,
+        accPermlink: acc.permlink,
+        accName: acc.author,
+        grantedAt: ts
+      });
     }
   }
 
-  // If we have a direct creature-side wear marker newer than last wear_off,
-  // verify against the accessory's authoritative reply tree.
-  if (latestWearOn && (!lastWearOff || latestWearOn.ts > lastWearOff)) {
+  // Validate direct candidates (from wear_on markers) against each accessory's
+  // own reply tree. Ignore any candidate that was removed later via wear_off.
+  for (const c of [...candidates.values()]) {
+    if (lastWearOff && c.grantedAt && c.grantedAt <= lastWearOff) continue;
     try {
-      const accPost = await fetchPost(latestWearOn.author, latestWearOn.permlink);
+      const accPost = await fetchPost(c.accAuthor, c.accPermlink);
       if (accPost && accPost.author) {
         let meta = {};
         try { meta = JSON.parse(accPost.json_metadata || '{}'); } catch {}
         if (meta.steembiota?.type === 'accessory') {
-          const accReplies = await fetchAllReplies(latestWearOn.author, latestWearOn.permlink);
-          const wearState  = parseWearState(accReplies, latestWearOn.author);
+          const accReplies = await fetchAllReplies(c.accAuthor, c.accPermlink);
+          const wearState  = parseWearState(accReplies, c.accAuthor);
           if (
             wearState.status === 'worn' &&
             norm(wearState.creature?.author) === creatureAuthorN &&
             norm(wearState.creature?.permlink) === creaturePermlinkN
           ) {
             const acc = meta.steembiota.accessory;
-            best = {
+            addOrUpdateCandidate({
               template:    acc?.template || 'hat',
               genome:      acc?.genome   || null,
-              accAuthor:   latestWearOn.author,
-              accPermlink: latestWearOn.permlink,
-              accName:     acc?.name || latestWearOn.author,
-              grantedAt:   wearState.grantedAt || latestWearOn.ts || null
-            };
+              accAuthor:   c.accAuthor,
+              accPermlink: c.accPermlink,
+              accName:     acc?.name || c.accAuthor,
+              grantedAt:   wearState.grantedAt || c.grantedAt || null
+            });
           }
         }
       }
@@ -2437,13 +2450,7 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
           grantedAt:   wearState.grantedAt || null
         };
 
-        if (!best) {
-          best = candidate;
-        } else {
-          const bestTs = best.grantedAt ? best.grantedAt.getTime() : 0;
-          const candTs = candidate.grantedAt ? candidate.grantedAt.getTime() : 0;
-          if (candTs > bestTs) best = candidate;
-        }
+        addOrUpdateCandidate(candidate);
       }
 
       if (posts.length < PAGE_LIMIT) break;
@@ -2453,7 +2460,16 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
     }
   } catch {}
 
-  if (!best) return null;
-  const { grantedAt, ...resolved } = best;
+  const resolved = [...candidates.values()]
+    .filter(c => c && c.genome && c.template !== 'shirt')
+    .sort((a, b) => (b.grantedAt?.getTime() || 0) - (a.grantedAt?.getTime() || 0))
+    .map(({ grantedAt, ...rest }) => rest);
   return resolved;
+}
+
+// Backward-compatible single-accessory helper used by older views.
+// Returns the newest currently worn accessory, or null.
+async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
+  const all = await fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureReplies);
+  return all[0] || null;
 }

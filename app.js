@@ -1882,6 +1882,8 @@ const CreatureView = {
       votePct:             100,    // last chosen upvote percentage (1–100)
       // Equipped accessory — { template, genome, accAuthor, accPermlink, accName } | null
       wearing:             null,
+      // Equipped accessories — newest first
+      wearings:            [],
     };
   },
   created() {
@@ -2031,6 +2033,9 @@ const CreatureView = {
       this._rawParentA     = cached.parentA || null;
       this._rawParentB     = cached.parentB || null;
       this.wearing         = cached.wearing || null;
+      this.wearings        = Array.isArray(cached.wearings)
+        ? cached.wearings
+        : (cached.wearing ? [cached.wearing] : []);
       this.isPhantom       = false;
       this.loadError       = null;
       this.loading         = false;
@@ -2107,8 +2112,9 @@ const CreatureView = {
         this._rawParentB = sb.parentB || null;
 
         // Fetch equipped accessory in background (non-blocking — may take a moment)
-        fetchCreatureWearing(author, permlink, replies).then(w => {
-          this.wearing = w;
+        fetchCreatureWearings(author, permlink, replies).then(ws => {
+          this.wearings = Array.isArray(ws) ? ws : [];
+          this.wearing = this.wearings[0] || null;
           writeCreaturePageCache(cacheKey, {
             genome: this.genome,
             name: this.name,
@@ -2126,9 +2132,10 @@ const CreatureView = {
             alreadyFedToday: this.alreadyFedToday,
             parentA: this._rawParentA,
             parentB: this._rawParentB,
-            wearing: this.wearing
+            wearing: this.wearing,
+            wearings: this.wearings
           });
-        }).catch(() => { this.wearing = null; });
+        }).catch(() => { this.wearing = null; this.wearings = []; });
 
         // Persist creature snapshot immediately so next visit can render from cache.
         writeCreaturePageCache(cacheKey, {
@@ -2148,7 +2155,8 @@ const CreatureView = {
           alreadyFedToday: this.alreadyFedToday,
           parentA: this._rawParentA,
           parentB: this._rawParentB,
-          wearing: this.wearing
+          wearing: this.wearing,
+          wearings: this.wearings
         });
 
       } catch (err) {
@@ -2574,6 +2582,7 @@ const CreatureView = {
           :activity-state="activityState"
           :reaction-trigger="reactionTrigger"
           :wearing="wearing"
+          :wearings="wearings"
           @facing-resolved="onFacingResolved"
           @pose-resolved="onPoseResolved"
         ></creature-canvas-component>

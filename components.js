@@ -185,6 +185,8 @@ const CreatureCanvasComponent = {
     canvasH:         { type: Number,  default: 320   },
     // Accessory being worn — { template, genome } or null
     wearing:         { type: Object,  default: null  },
+    // Multiple accessories currently worn (new API).
+    wearings:        { type: Array,   default: () => [] },
   },
   emits: ["facing-resolved", "pose-resolved", "clicked"],
   data() {
@@ -247,6 +249,7 @@ const CreatureCanvasComponent = {
     feedState()        { this.$nextTick(() => this.draw()); },
     activityState()    { this.$nextTick(() => this.draw()); },
     wearing()          { this.$nextTick(() => this.draw()); },
+    wearings()         { this.$nextTick(() => this.draw()); },
     reactionTrigger(v) { if (v > 0) this._startReaction(); }
   },
   mounted() {
@@ -282,6 +285,14 @@ const CreatureCanvasComponent = {
     }
   },
   methods: {
+    _normalizedWearings() {
+      if (Array.isArray(this.wearings) && this.wearings.length) {
+        return this.wearings.filter(w => w && w.genome && w.template !== "shirt");
+      }
+      return (this.wearing && this.wearing.genome && this.wearing.template !== "shirt")
+        ? [this.wearing]
+        : [];
+    },
 
     // ----------------------------------------------------------
     // Reaction animation — triggered when the creature is fed,
@@ -963,9 +974,9 @@ const CreatureCanvasComponent = {
     // then composited onto the creature canvas at reduced scale,
     // so the full drawXxx() renderers are reused without change.
     // ----------------------------------------------------------
-    _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, opts = {}) {
-      if (!this.wearing || !this.wearing.genome) return;
-      const { template, genome: ag } = this.wearing;
+    _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, accessory, opts = {}) {
+      if (!accessory || !accessory.genome) return;
+      const { template, genome: ag } = accessory;
       if (template === 'shirt') return;
       const underlayNecklace = !!opts.underlayNecklace;
 
@@ -1845,8 +1856,11 @@ const CreatureCanvasComponent = {
       // ---- NECKLACE UNDERLAY ----
       // Draw worn necklaces before neck/head so natural occlusion comes
       // from creature geometry instead of clipping the accessory image.
-      if (!p.fossil && this.wearing && this.wearing.template === 'necklace') {
-        this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, { underlayNecklace: true });
+      const wearings = this._normalizedWearings();
+      if (!p.fossil) {
+        wearings
+          .filter(w => w.template === "necklace")
+          .forEach(w => this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, w, { underlayNecklace: true }));
       }
 
       // ---- NECK ----
@@ -2016,8 +2030,10 @@ const CreatureCanvasComponent = {
       // ---- WEARING ACCESSORY ----
       // Drawn last so it appears on top of the creature.
       // Only shown for non-fossil creatures with an equipped accessory.
-      if (!p.fossil && this.wearing && this.wearing.template !== 'necklace') {
-        this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H);
+      if (!p.fossil) {
+        wearings
+          .filter(w => w.template !== "necklace")
+          .forEach(w => this._drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, w));
       }
 
       ctx.restore();   // always restore — we always ctx.save() now
