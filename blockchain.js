@@ -2145,15 +2145,18 @@ function parseAccessoryPermissions(replies, postAuthor) {
 
 // Returns true if `username` is permitted to wear this accessory,
 // given the permission state derived from parseAccessoryPermissions.
+// UPDATED: Added owner check
 function isWearPermitted(permissions, username) {
   if (!username) return false;
   const normUser = String(username).trim().toLowerCase();
   
-  // 1. Public domain check
-  if (permissions.isPublic) return true;
+  // 1. Implicit Ownership check (The fix)
+  if (permissions.owner && normUser === permissions.owner.toLowerCase()) {
+    return true;
+  }
   
-  // 2. NEW: Implicit Ownership check
-  if (permissions.owner && normUser === permissions.owner.toLowerCase()) return true;
+  // 2. Public domain check
+  if (permissions.isPublic) return true;
   
   // 3. Explicit grant check
   return permissions.grantedUsers.has(normUser);
