@@ -4135,45 +4135,52 @@ const EquipPanelComponent = {
       if (!m) throw new Error("Cannot parse accessory URL");
       return { author: m[1].toLowerCase(), permlink: m[2].toLowerCase() };
     },
+    
+async checkAccessory() {
+  if (!this.accUrlInput.trim()) return;
+  this.previewAcc   = null;
+  this.previewError = "";
+  this.checkingUrl  = true;
+  try {
+    const { author, permlink } = this.parseAccUrl(this.accUrlInput);
+    
+    // 1. Basic Post Validation
+    const post = await fetchPost(author, permlink);
+    if (!post || !post.author) throw new Error("Accessory post not found.");
+    let meta = {};
+    try { meta = JSON.parse(post.json_metadata || "{}"); } catch {}
+    if (meta.steembiota?.type !== "accessory")
+      throw new Error("This post is not a SteemBiota accessory.");
 
-    async checkAccessory() {
-      if (!this.accUrlInput.trim()) return;
-      this.previewAcc   = null;
-      this.previewError = "";
-      this.checkingUrl  = true;
-      try {
-        const { author, permlink } = this.parseAccUrl(this.accUrlInput);
-        const post = await fetchPost(author, permlink);
-        if (!post || !post.author) throw new Error("Accessory post not found.");
-        let meta = {};
-        try { meta = JSON.parse(post.json_metadata || "{}"); } catch {}
-        if (meta.steembiota?.type !== "accessory" || !meta.steembiota?.accessory?.genome)
-          throw new Error("This post is not a SteemBiota accessory.");
+    const accData = meta.steembiota.accessory;
 
-        const accData   = meta.steembiota.accessory;
-        const accReplies = await fetchAllReplies(author, permlink);
-        const perms     = parseAccessoryPermissions(accReplies, author);
+    // 2. Check Permissions (Already updated to auto-grant to owner)
+    const accReplies = await fetchAllReplies(author, permlink);
+    const perms = parseAccessoryPermissions(accReplies, author);
 
-        if (!isWearPermitted(perms, this.username)) {
-          throw new Error(
-            perms.isPublic
-              ? "Unexpected: accessory is public but permission check failed."
-              : "You don't have permission to wear this accessory. Visit the accessory page to request it."
-          );
-        }
+    if (!isWearPermitted(perms, this.username)) {
+      throw new Error("You don't have permission to wear this. Visit the accessory page to request it.");
+    }
 
-        this.previewAcc = {
-          template:    accData.template || "hat",
-          genome:      accData.genome,
-          accName:     accData.name || author,
-          accAuthor:   author,
-          accPermlink: permlink,
-        };
-      } catch (e) {
-        this.previewError = e.message || "Failed to load accessory.";
-      }
-      this.checkingUrl = false;
-    },
+    // 3. NEW: Check Exclusivity (The Fix)
+    // Check if any of the user's OTHER creatures are wearing this right now
+    const busyCreature = await findCreatureWearingAccessory(this.username, author, permlink);
+    if (busyCreature) {
+      throw new Error(`This accessory is already being worn by ${busyCreature}. You must remove it there first.`);
+    }
+
+    this.previewAcc = {
+      template:    accData.template || "hat",
+      genome:      accData.genome,
+      accName:     accData.name || author,
+      accAuthor:   author,
+      accPermlink: permlink,
+    };
+  } catch (e) {
+    this.previewError = e.message || "Failed to load accessory.";
+  }
+  this.checkingUrl = false;
+},
 
     async equipAccessory() {
       if (!this.previewAcc || !window.steem_keychain) return;
