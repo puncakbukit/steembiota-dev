@@ -2040,7 +2040,7 @@ const CreatureView = {
       this.loadError       = null;
       this.loading         = false;
       return true;
-    },
+    },    
     async loadCreature() {
       this.loading   = true;
       this.loadError = null;
@@ -2110,54 +2110,66 @@ const CreatureView = {
         // Store parent refs from metadata (no extra fetch needed for display)
         this._rawParentA = sb.parentA || null;
         this._rawParentB = sb.parentB || null;
-
-        // Fetch equipped accessory in background (non-blocking — may take a moment)
+        
+        // Fetch equipped accessory in background
         fetchCreatureWearings(author, permlink, replies).then(ws => {
-          this.wearings = Array.isArray(ws) ? ws : [];
+          if (!ws || (ws.length === 0 && this.wearings.length > 0)) {
+             // If background fetch returns empty but we already had items 
+             // from cache, the RPC likely failed. Do NOT wipe the UI.
+             if (!ws) return; 
+          }
+          
+          // Merge results, preserving genome data for items that had network errors
+          this.wearings = ws.map(newItem => {
+             if (newItem.networkError) {
+                const existing = this.wearings.find(ex => ex.accPermlink === newItem.accPermlink);
+                return existing || newItem;
+             }
+             return newItem;
+          });
+          
           this.wearing = this.wearings[0] || null;
+          
+          // ONLY write to cache once we have a high-confidence state
           writeCreaturePageCache(cacheKey, {
             genome: this.genome,
             name: this.name,
             creatureType: this.creatureType,
-            speciated: this.speciated,
-            mutated: this.mutated,
             postCreated: this._postCreated,
             postAge: this.postAge,
             feedEvents: this.feedEvents,
             feedState: this.feedState,
-            activityState: this.activityState,
-            permitGrantees: this.permitState?.grantees ? [...this.permitState.grantees] : [],
             effectiveOwner: this.effectiveOwner,
             transferState: this.transferState,
-            alreadyFedToday: this.alreadyFedToday,
             parentA: this._rawParentA,
             parentB: this._rawParentB,
-            wearing: this.wearing,
             wearings: this.wearings
           });
-        }).catch(() => { this.wearing = null; this.wearings = []; });
+        }).catch(err => {
+          console.error("Accessory sync failed:", err);
+          // Do NOT reset this.wearings to [] here; keep the cached version visible.
+        });
 
-        // Persist creature snapshot immediately so next visit can render from cache.
-        writeCreaturePageCache(cacheKey, {
+        // FIX: The "Immediate Write" should NOT include the wearings array 
+        // if the background fetch is still pending, to avoid wiping it.
+        const snapshot = {
           genome: this.genome,
           name: this.name,
           creatureType: this.creatureType,
-          speciated: this.speciated,
-          mutated: this.mutated,
           postCreated: this._postCreated,
           postAge: this.postAge,
           feedEvents: this.feedEvents,
           feedState: this.feedState,
-          activityState: this.activityState,
-          permitGrantees: this.permitState?.grantees ? [...this.permitState.grantees] : [],
           effectiveOwner: this.effectiveOwner,
           transferState: this.transferState,
-          alreadyFedToday: this.alreadyFedToday,
           parentA: this._rawParentA,
-          parentB: this._rawParentB,
-          wearing: this.wearing,
-          wearings: this.wearings
-        });
+          parentB: this._rawParentB
+        };
+        // Only include wearings in the immediate write if we already have them from applyCachedCreature
+        if (this.wearings && this.wearings.length > 0) {
+           snapshot.wearings = this.wearings;
+        }
+        writeCreaturePageCache(cacheKey, snapshot);
 
       } catch (err) {
         this.loadError = err.message || "Failed to load creature.";
