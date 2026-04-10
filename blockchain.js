@@ -2423,14 +2423,17 @@ function publishWearOff(
 //   permissionLapsed = true when the permission was revoked after equipping
 //   (the creature owner should be notified to remove it)
 async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureReplies) {
-  const norm              = v => String(v || '').trim().toLowerCase();
-  const creatureOwnerN    = norm(creatureAuthor);
+  const norm = v => String(v || '').trim().toLowerCase();
+  
+  // FIX: Determine effective owner first. Permission to wear depends on 
+  // who holds the creature NOW, not who first posted it.
+  const ownership = parseOwnershipChain(creatureReplies, creatureAuthor);
+  const creatureOwnerN = norm(ownership.effectiveOwner);
 
-  // Step 1: derive equipped set from creature replies — O(replies), no extra fetches.
+  // Step 1: derive equipped set from creature replies
   const equipped = parseEquippedAccessories(creatureReplies, creatureAuthor);
   if (equipped.size === 0) return [];
 
-  // Step 2: for each equipped accessory, fetch its post + permission state.
   const results = [];
   for (const [, { accAuthor, accPermlink, wornAt }] of equipped) {
     try {
@@ -2444,29 +2447,33 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
       const accData = meta.steembiota.accessory;
       if (!accData?.genome) continue;
 
-      // Check permission is still active for the creature owner.
-      const accReplies    = await fetchAllReplies(accAuthor, accPermlink);
-      const permissions   = parseAccessoryPermissions(accReplies, accAuthor);
-      const permitted     = isWearPermitted(permissions, creatureOwnerN);
+      // Check permission
+      const accReplies = await fetchAllReplies(accAuthor, accPermlink);
+      const permissions = parseAccessoryPermissions(accReplies, accAuthor);
+      const permitted = isWearPermitted(permissions, creatureOwnerN);
 
-      // Skip shirt template (removed from UI but may exist on-chain).
+      // Filter out shirt template (obsolete)
       if ((accData.template || 'hat') === 'shirt') continue;
 
       results.push({
-        template:         accData.template || 'hat',
-        genome:           accData.genome,
+        template: accData.template || 'hat',
+        genome: accData.genome,
         accAuthor,
         accPermlink,
-        accName:          accData.name || accAuthor,
+        accName: accData.name || accAuthor,
         permissionLapsed: !permitted,
         wornAt,
       });
-    } catch { /* non-fatal — skip this accessory */ }
+    } catch (err) {
+      console.warn(`Failed to verify accessory @${accAuthor}/${accPermlink}:`, err);
+      // FIX: If the network fails, don't just disappear the item. 
+      // Keep it in the list but mark it as unverified so it doesn't get wiped from cache.
+      results.push({ accAuthor, accPermlink, wornAt, networkError: true });
+    }
   }
 
-  // Sort newest-equipped first, strip internal wornAt before returning.
   results.sort((a, b) => (b.wornAt?.getTime() || 0) - (a.wornAt?.getTime() || 0));
-  return results.map(({ wornAt, ...rest }) => rest);
+  return results;
 }
 
 // Backward-compatible single-accessory helper.
