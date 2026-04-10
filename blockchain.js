@@ -2484,3 +2484,23 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
   const all = await fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureReplies);
   return all[0] || null;
 }
+
+/**
+ * Checks if ANY creature owned by the user is already wearing this specific accessory.
+ * Returns the name of the creature if found, otherwise null.
+ */
+async function findCreatureWearingAccessory(username, accAuthor, accPermlink) {
+  const ownedCreatures = await fetchCreaturesOwnedBy(username);
+  const targetKey = `${accAuthor.toLowerCase()}/${accPermlink.toLowerCase()}`;
+
+  for (const c of ownedCreatures) {
+    // We need to fetch the replies for each creature to see the current wear state
+    const replies = await fetchAllReplies(c.post.author, c.post.permlink);
+    const equipped = parseEquippedAccessories(replies, c.post.author);
+    
+    if (equipped.has(targetKey)) {
+      return c.meta.name || c.post.author;
+    }
+  }
+  return null;
+}
