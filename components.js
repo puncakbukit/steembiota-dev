@@ -4071,3 +4071,297 @@ const SocialPanelComponent = {
     </div>
   `
 };
+
+// ============================================================
+// EquipPanelComponent
+//
+// Shown on the CreatureView. Lets the creature owner equip and
+// remove accessories that they have permission to wear.
+//
+// Lists currently worn accessories with a "Remove" button on each.
+// Provides an "Equip Accessory" form where the owner pastes an
+// accessory URL — the system fetches the accessory, verifies the
+// owner has permission (public domain or per-user grant), checks
+// it isn't already worn by another creature, then posts wear_on.
+//
+// Props:
+//   username        — logged-in user (or "")
+//   creatureAuthor  — creature post author
+//   creaturePermlink— creature post permlink
+//   creatureName    — display name
+//   wearings        — Array from fetchCreatureWearings()
+//                     [{ template, genome, accAuthor, accPermlink, accName, permissionLapsed }]
+//   isOwner         — true when username is the creature's effective owner
+//
+// Emits:
+//   notify(msg, type)
+//   wearings-updated(newWearings)
+// ============================================================
+const EquipPanelComponent = {
+  name: "EquipPanelComponent",
+  props: {
+    username:         { type: String, default: "" },
+    creatureAuthor:   { type: String, required: true },
+    creaturePermlink: { type: String, required: true },
+    creatureName:     { type: String, default: "" },
+    wearings:         { type: Array,  default: () => [] },
+    isOwner:          { type: Boolean, default: false },
+  },
+  emits: ["notify", "wearings-updated"],
+  data() {
+    return {
+      expanded:      false,
+      accUrlInput:   "",
+      publishing:    false,
+      checkingUrl:   false,
+      previewAcc:    null,   // { template, genome, accName, accAuthor, accPermlink } | null
+      previewError:  "",
+    };
+  },
+  computed: {
+    hasWearings() { return this.wearings.length > 0; },
+    lapsingWearings() { return this.wearings.filter(w => w.permissionLapsed); },
+  },
+  watch: {
+    accUrlInput(val) {
+      // Clear preview when input changes
+      this.previewAcc   = null;
+      this.previewError = "";
+    }
+  },
+  methods: {
+    parseAccUrl(raw) {
+      const m = raw.trim().match(/@([a-z0-9.-]+)\/([a-z0-9-]+)\s*$/i);
+      if (!m) throw new Error("Cannot parse accessory URL");
+      return { author: m[1].toLowerCase(), permlink: m[2].toLowerCase() };
+    },
+
+    async checkAccessory() {
+      if (!this.accUrlInput.trim()) return;
+      this.previewAcc   = null;
+      this.previewError = "";
+      this.checkingUrl  = true;
+      try {
+        const { author, permlink } = this.parseAccUrl(this.accUrlInput);
+        const post = await fetchPost(author, permlink);
+        if (!post || !post.author) throw new Error("Accessory post not found.");
+        let meta = {};
+        try { meta = JSON.parse(post.json_metadata || "{}"); } catch {}
+        if (meta.steembiota?.type !== "accessory" || !meta.steembiota?.accessory?.genome)
+          throw new Error("This post is not a SteemBiota accessory.");
+
+        const accData   = meta.steembiota.accessory;
+        const accReplies = await fetchAllReplies(author, permlink);
+        const perms     = parseAccessoryPermissions(accReplies, author);
+
+        if (!isWearPermitted(perms, this.username)) {
+          throw new Error(
+            perms.isPublic
+              ? "Unexpected: accessory is public but permission check failed."
+              : "You don't have permission to wear this accessory. Visit the accessory page to request it."
+          );
+        }
+
+        this.previewAcc = {
+          template:    accData.template || "hat",
+          genome:      accData.genome,
+          accName:     accData.name || author,
+          accAuthor:   author,
+          accPermlink: permlink,
+        };
+      } catch (e) {
+        this.previewError = e.message || "Failed to load accessory.";
+      }
+      this.checkingUrl = false;
+    },
+
+    async equipAccessory() {
+      if (!this.previewAcc || !window.steem_keychain) return;
+      this.publishing = true;
+      const { accAuthor, accPermlink, accName } = this.previewAcc;
+      publishWearOn(
+        this.username,
+        this.creatureAuthor, this.creaturePermlink, this.creatureName,
+        accAuthor, accPermlink, accName,
+        (res) => {
+          this.publishing = false;
+          if (res.success) {
+            this.$emit("notify", `🧢 ${accName} equipped!`, "success");
+            // Optimistically add to wearings
+            const newWearing = { ...this.previewAcc, permissionLapsed: false };
+            this.$emit("wearings-updated", [newWearing, ...this.wearings]);
+            this.accUrlInput  = "";
+            this.previewAcc   = null;
+            this.previewError = "";
+          } else {
+            this.$emit("notify", "Equip failed: " + (res.message || "Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    async removeAccessory(w) {
+      if (!window.steem_keychain) return;
+      this.publishing = true;
+      publishWearOff(
+        this.username,
+        this.creatureAuthor, this.creaturePermlink, this.creatureName,
+        w.accAuthor, w.accPermlink, w.accName,
+        (res) => {
+          this.publishing = false;
+          if (res.success) {
+            this.$emit("notify", `👚 ${w.accName} removed.`, "success");
+            this.$emit("wearings-updated",
+              this.wearings.filter(x => x.accPermlink !== w.accPermlink || x.accAuthor !== w.accAuthor)
+            );
+          } else {
+            this.$emit("notify", "Remove failed: " + (res.message || "Unknown error"), "error");
+          }
+        }
+      );
+    },
+  },
+
+  template: `
+    <div style="max-width:520px;margin:16px auto;">
+
+      <!-- ── Currently Worn ── -->
+      <div v-if="hasWearings" style="margin-bottom:12px;">
+        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
+          <span style="font-size:0.78rem;color:#ce93d8;text-transform:uppercase;
+                       letter-spacing:0.08em;font-weight:bold;">✨ Worn Accessories</span>
+          <span style="font-size:0.72rem;color:#555;background:#1a1a1a;
+                       border:1px solid #2a2a2a;border-radius:10px;padding:1px 8px;">
+            {{ wearings.length }}
+          </span>
+        </div>
+        <div style="display:flex;flex-direction:column;gap:8px;">
+          <div v-for="w in wearings" :key="w.accAuthor+'/'+w.accPermlink"
+            style="display:flex;align-items:center;gap:12px;padding:10px 12px;
+                   border-radius:8px;background:#0d0a10;border:1px solid #2a1a2e;">
+            <!-- Mini canvas -->
+            <div style="flex-shrink:0;">
+              <accessory-canvas-component
+                :template="w.template"
+                :genome="w.genome"
+                :canvas-w="80"
+                :canvas-h="64"
+                style="border-radius:6px;border:1px solid #2a1a2e;display:block;background:#111;"
+              ></accessory-canvas-component>
+            </div>
+            <!-- Info -->
+            <div style="flex:1;min-width:0;text-align:left;">
+              <div style="font-size:0.85rem;font-weight:bold;color:#ce93d8;
+                          white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                {{ w.accName }}
+              </div>
+              <div style="font-size:0.72rem;color:#666;margin-top:2px;text-transform:capitalize;">
+                {{ w.template }}
+              </div>
+              <div v-if="w.permissionLapsed"
+                style="font-size:0.68rem;color:#ff8a80;margin-top:3px;">
+                ⚠ Permission revoked — please remove
+              </div>
+              <div style="font-size:0.70rem;color:#444;margin-top:3px;">
+                by
+                <router-link :to="'/acc/@'+w.accAuthor+'/'+w.accPermlink"
+                  style="color:#9575cd;text-decoration:none;">
+                  @{{ w.accAuthor }}
+                </router-link>
+              </div>
+            </div>
+            <!-- Actions -->
+            <div style="flex-shrink:0;display:flex;flex-direction:column;gap:6px;">
+              <router-link
+                :to="'/acc/@'+w.accAuthor+'/'+w.accPermlink"
+                style="font-size:0.72rem;color:#7b52a8;padding:3px 10px;border-radius:6px;
+                       border:1px solid #2a1a2e;text-decoration:none;background:#120a18;
+                       text-align:center;">View ↗</router-link>
+              <button v-if="isOwner" @click="removeAccessory(w)" :disabled="publishing"
+                style="font-size:0.72rem;background:#1a0a0a;color:#ff8a80;
+                       border:1px solid #3b0000;padding:3px 10px;">
+                {{ publishing ? "…" : "👚 Remove" }}
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ── Equip Panel (owner only) ── -->
+      <template v-if="isOwner && username">
+        <div @click="expanded=!expanded"
+          style="display:flex;align-items:center;justify-content:space-between;
+                 cursor:pointer;padding:9px 14px;border-radius:8px;
+                 background:#0a0a12;border:1px solid #1a1a2e;user-select:none;">
+          <span style="font-size:0.85rem;color:#ce93d8;font-weight:bold;">
+            🧢 Equip an Accessory
+          </span>
+          <span style="font-size:0.72rem;color:#444;">{{ expanded ? "▲" : "▼" }}</span>
+        </div>
+
+        <div v-if="expanded"
+          style="border:1px solid #1a1a2e;border-top:none;border-radius:0 0 8px 8px;
+                 background:#08080f;padding:14px;">
+          <p style="font-size:0.75rem;color:#555;margin:0 0 10px;line-height:1.5;">
+            Paste the URL of an accessory you have permission to wear.
+            You can request permission from the accessory's page.
+          </p>
+          <div style="display:flex;gap:8px;margin-bottom:10px;">
+            <input v-model="accUrlInput" type="text"
+              placeholder="https://steemit.com/@owner/accessory-permlink"
+              style="flex:1;font-size:12px;background:#0f0f0f;color:#ccc;
+                     border:1px solid #2a2a2a;border-radius:6px;padding:7px 10px;
+                     box-sizing:border-box;font-family:inherit;"
+              @keydown.enter="checkAccessory"
+            />
+            <button @click="checkAccessory" :disabled="checkingUrl || !accUrlInput.trim()"
+              style="background:#1a0a2e;color:#ce93d8;border:1px solid #7b1fa2;
+                     font-size:0.78rem;white-space:nowrap;">
+              {{ checkingUrl ? "Checking…" : "Check" }}
+            </button>
+          </div>
+
+          <!-- Error -->
+          <div v-if="previewError"
+            style="font-size:0.75rem;color:#ff8a80;margin-bottom:10px;
+                   padding:8px 10px;background:#1a0000;border-radius:6px;
+                   border:1px solid #3b0000;">
+            ⚠ {{ previewError }}
+          </div>
+
+          <!-- Preview -->
+          <div v-if="previewAcc"
+            style="display:flex;align-items:center;gap:12px;padding:10px 12px;
+                   border-radius:8px;background:#0d0a10;border:1px solid #2a1a2e;
+                   margin-bottom:10px;">
+            <accessory-canvas-component
+              :template="previewAcc.template"
+              :genome="previewAcc.genome"
+              :canvas-w="80"
+              :canvas-h="64"
+              style="border-radius:6px;border:1px solid #2a1a2e;display:block;background:#111;flex-shrink:0;"
+            ></accessory-canvas-component>
+            <div style="flex:1;text-align:left;">
+              <div style="font-size:0.85rem;color:#ce93d8;font-weight:bold;">
+                {{ previewAcc.accName }}
+              </div>
+              <div style="font-size:0.72rem;color:#666;margin-top:2px;text-transform:capitalize;">
+                {{ previewAcc.template }}
+              </div>
+              <div style="font-size:0.70rem;color:#a5d6a7;margin-top:3px;">
+                ✅ Permission confirmed
+              </div>
+            </div>
+            <button @click="equipAccessory" :disabled="publishing"
+              style="background:#0d1a0d;color:#a5d6a7;border:1px solid #2e7d32;
+                     font-size:0.78rem;white-space:nowrap;flex-shrink:0;">
+              {{ publishing ? "Publishing…" : "🧢 Equip" }}
+            </button>
+          </div>
+
+        </div>
+      </template>
+
+    </div>
+  `
+};
