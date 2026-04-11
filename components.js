@@ -3202,6 +3202,8 @@ const BreedingPanelComponent = {
           this.publishing = false;
           if (response.success) {
             const childPermlink = response.permlink;
+            if (typeof invalidateGlobalListCaches === "function") invalidateGlobalListCaches();
+            if (typeof invalidateOwnedCachesForUser === "function") invalidateOwnedCachesForUser(this.username);
 
             // Fire birth-announcement replies to both parents (best-effort, non-blocking)
             const art = this.childArt || "";

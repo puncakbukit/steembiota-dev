@@ -820,6 +820,8 @@ const AccessoriesView = {
         (response) => {
           this.publishing = false;
           if (response.success) {
+            if (typeof invalidateGlobalListCaches === "function") invalidateGlobalListCaches();
+            if (typeof invalidateOwnedCachesForUser === "function") invalidateOwnedCachesForUser(this.username);
             this.notify(`✨ ${this.accessoryName} published!`, "success");
             this.$router.push("/acc/@" + this.username + "/" + response.permlink);
           } else {
@@ -1433,12 +1435,39 @@ const AccessoryItemView = {
   },
 
   methods: {
+    accessoryCacheKey(author, permlink) {
+      return `steembiota:accessory:${String(author || "").toLowerCase()}/${String(permlink || "").toLowerCase()}:v1`;
+    },
+    applyCachedAccessory(cached, author, permlink) {
+      if (!cached || !cached.genome) return false;
+      this.author         = author;
+      this.permlink       = permlink;
+      this.genome         = cached.genome;
+      this.accTemplate    = cached.accTemplate || "hat";
+      this.accName        = cached.accName || author;
+      this.created        = cached.created || null;
+      this.effectiveOwner = cached.effectiveOwner || author;
+      this.transferState  = cached.transferState || null;
+      this.permissions    = {
+        isPublic: !!cached.permissions?.isPublic,
+        grantedUsers: new Set(Array.isArray(cached.permissions?.grantedUsers) ? cached.permissions.grantedUsers : []),
+        pendingRequests: new Map(Array.isArray(cached.permissions?.pendingRequests) ? cached.permissions.pendingRequests : [])
+      };
+      this.loadError      = null;
+      this.loading        = false;
+      return true;
+    },
     async loadAccessory() {
       this.loading   = true;
       this.loadError = null;
       const { author, permlink } = this.$route.params;
       this.author   = author;
       this.permlink = permlink;
+      const cacheKey = this.accessoryCacheKey(author, permlink);
+      const cached   = (typeof readObjectCache === "function")
+        ? readObjectCache(cacheKey, ACCESSORY_PAGE_CACHE_TTL_MS)
+        : null;
+      this.applyCachedAccessory(cached, author, permlink);
       try {
         const post = await fetchPost(author, permlink);
         if (!post || !post.author) throw new Error("Post not found.");
@@ -1461,6 +1490,21 @@ const AccessoryItemView = {
 
         // Permission state — who is allowed to wear this accessory.
         this.permissions = parseAccessoryPermissions(replies, author);
+        if (typeof writeObjectCache === "function") {
+          writeObjectCache(cacheKey, {
+            genome: this.genome,
+            accTemplate: this.accTemplate,
+            accName: this.accName,
+            created: this.created,
+            effectiveOwner: this.effectiveOwner,
+            transferState: this.transferState,
+            permissions: {
+              isPublic: this.permissions.isPublic,
+              grantedUsers: [...this.permissions.grantedUsers],
+              pendingRequests: [...this.permissions.pendingRequests.entries()]
+            }
+          });
+        }
 
       } catch (err) {
         this.loadError = err.message || "Failed to load accessory.";
@@ -1549,6 +1593,9 @@ const AccessoryItemView = {
         (res) => {
           this.transferPublishing = false;
           if (res.success) {
+            if (typeof invalidateGlobalListCaches === "function") invalidateGlobalListCaches();
+            if (typeof invalidateOwnedCachesForUser === "function") invalidateOwnedCachesForUser(this.username);
+            if (typeof invalidateAccessoryCache === "function") invalidateAccessoryCache(this.author, this.permlink);
             this.notify("✅ Ownership accepted! This accessory is now yours.", "success");
             this.effectiveOwner = this.username;
             this.transferState = {
