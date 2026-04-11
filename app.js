@@ -172,7 +172,7 @@ const PAGE_SIZE = 15;
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const OWNED_PROFILE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes (profile ownership scans are expensive)
 const CREATURE_PAGE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const LEADERBOARD_CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes
+const LEADERBOARD_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes (fetch is expensive: 2N RPC calls per author)
 const NOTIFICATIONS_CACHE_TTL_MS = 60 * 1000; // 60 seconds
 const ACCESSORY_PAGE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -189,11 +189,53 @@ function readListCache(key) {
   }
 }
 
-function writeListCache(key, data) {
+// Evict the oldest steembiota:* localStorage entries until at least `bytesNeeded`
+// bytes have been freed, then retry the write. Called only on QuotaExceededError.
+function _evictOldestAndRetry(key, serialized) {
   try {
-    if (!Array.isArray(data)) return;
-    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
-  } catch {}
+    // Collect every steembiota key with its savedAt timestamp.
+    const entries = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i);
+      if (!k || !k.startsWith("steembiota:")) continue;
+      try {
+        const parsed = JSON.parse(localStorage.getItem(k));
+        entries.push({ k, savedAt: (parsed && parsed.savedAt) ? parsed.savedAt : 0 });
+      } catch {
+        entries.push({ k, savedAt: 0 });
+      }
+    }
+    // Remove oldest first until the write succeeds or we run out of entries.
+    entries.sort((a, b) => a.savedAt - b.savedAt);
+    for (const { k } of entries) {
+      localStorage.removeItem(k);
+      try {
+        localStorage.setItem(key, serialized);
+        return; // write succeeded after eviction
+      } catch {}
+    }
+    console.warn("SteemBiota cache: localStorage still full after eviction — skipping write for", key);
+  } catch (err) {
+    console.warn("SteemBiota cache: eviction failed:", err);
+  }
+}
+
+function _safeSet(key, serialized) {
+  try {
+    localStorage.setItem(key, serialized);
+  } catch (err) {
+    if (err && (err.name === "QuotaExceededError" || err.name === "NS_ERROR_DOM_QUOTA_REACHED" || err.code === 22)) {
+      console.warn("SteemBiota cache: localStorage quota exceeded — evicting old entries and retrying.");
+      _evictOldestAndRetry(key, serialized);
+    } else {
+      console.warn("SteemBiota cache: localStorage write error:", err);
+    }
+  }
+}
+
+function writeListCache(key, data) {
+  if (!Array.isArray(data)) return;
+  _safeSet(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
 // Dedicated cache for ProfileView ownership tabs.
@@ -212,10 +254,8 @@ function readOwnedProfileCache(key) {
 }
 
 function writeOwnedProfileCache(key, data) {
-  try {
-    if (!Array.isArray(data)) return;
-    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
-  } catch {}
+  if (!Array.isArray(data)) return;
+  _safeSet(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
 function readCreaturePageCache(key) {
@@ -232,10 +272,8 @@ function readCreaturePageCache(key) {
 }
 
 function writeCreaturePageCache(key, data) {
-  try {
-    if (!data || !data.genome) return;
-    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
-  } catch {}
+  if (!data || !data.genome) return;
+  _safeSet(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
 function readObjectCache(key, ttlMs) {
@@ -252,18 +290,20 @@ function readObjectCache(key, ttlMs) {
 }
 
 function writeObjectCache(key, data) {
-  try {
-    if (!data) return;
-    localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
-  } catch {}
+  if (!data) return;
+  _safeSet(key, JSON.stringify({ savedAt: Date.now(), data }));
 }
 
 function removeCacheByPrefix(prefix) {
   try {
-    for (let i = localStorage.length - 1; i >= 0; i--) {
+    // Snapshot all matching keys first — removing items during live iteration
+    // can shift indices in some browsers and cause keys to be skipped.
+    const keys = [];
+    for (let i = 0; i < localStorage.length; i++) {
       const k = localStorage.key(i);
-      if (k && k.startsWith(prefix)) localStorage.removeItem(k);
+      if (k && k.startsWith(prefix)) keys.push(k);
     }
+    for (const k of keys) localStorage.removeItem(k);
   } catch {}
 }
 

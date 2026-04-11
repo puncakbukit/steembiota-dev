@@ -2787,6 +2787,7 @@ const ActivityPanelComponent = {
               : 100;
             this.feedState = computeFeedState(this.feedEvents, { LIF: genomeLIF });
             this.alreadyFedToday = true;
+            if (typeof invalidateCreatureCache === "function") invalidateCreatureCache(this.creatureAuthor, this.creaturePermlink);
             this.$emit("feed-state-updated", this.feedState);
             const foodLabel = { nectar: "Nectar", fruit: "Fruit", crystal: "Crystal" }[this.foodType] || this.foodType;
             this.$emit("notify", "🍃 Fed " + this.creatureName + " with " + foodLabel + "!", "success");
@@ -2855,6 +2856,7 @@ const ActivityPanelComponent = {
           this.publishingPlay = false;
           if (response.success) {
             this.alreadyPlayedToday = true;
+            if (typeof invalidateCreatureCache === "function") invalidateCreatureCache(this.creatureAuthor, this.creaturePermlink);
             this._optimisticUpdate("play");
             this.$emit("notify", "🎮 Played with " + this.creatureName + "! Mood improved.", "success");
           } else {
