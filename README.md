@@ -144,6 +144,18 @@ Play activity adds up to +25% to the effective health score before picking the e
 
 Whenever a creature is successfully fed, played with, or walked, the canvas plays a short reaction sequence. The creature cycles through four pose+expression pairs (Standing→Alert→Playful→Sitting, paired with Alert→Alert→Excited→Happy), repeated 2–3 times at random, each step lasting 2–3 seconds. After the sequence finishes the creature returns to its resting pose and normal game-state expression. Any in-progress animation is cancelled and restarted if another interaction completes while it is running.
 
+### Autonomous Behaviour (Latest)
+
+Beyond static posing, the creature canvas now runs an autonomous movement loop (for non-fossil creatures):
+
+- idle drift
+- walking / running bursts
+- occasional jump arcs
+- temporary sleep state
+- click-to-redirect movement ("walk to" interaction)
+
+Movement state is simulated client-side with requestAnimationFrame and restored from session storage so position can persist between route changes within the same browsing session.
+
 ---
 
 ## Visual Rendering — Unicode
@@ -177,12 +189,11 @@ SteemBiota supports procedurally generated, on-chain **accessories** in addition
 
 ### Accessory templates
 
-Five templates are currently implemented:
+Four templates are currently implemented:
 
 - 🎩 Hat
 - 👑 Crown
 - 📿 Necklace
-- 👕 Shirt
 - 🪽 Wings
 
 ### Accessory genome (10 parameters)
@@ -201,6 +212,42 @@ Five templates are currently implemented:
 | `SYM` | Symmetry bias | 0–1 |
 
 Accessory names are generated deterministically from template + genome (material adjective + type-specific noun).
+
+### Wearing Accessories on Creatures
+
+Accessories are not just collectible posts — they can be equipped on creature canvases and rendered directly on the creature body.
+
+#### Permission model (on accessory post replies)
+
+Accessory owners control wear access with on-chain replies:
+
+- `wear_request` — user asks permission to wear
+- `wear_grant` — owner grants a specific username
+- `wear_revoke` — owner revokes a specific username
+- `wear_public` — owner opens the accessory to everyone
+- `wear_private` — owner returns to private mode (grants required)
+
+Rules:
+
+- Permissions are user-based (not creature-based).
+- Accessory owner is always implicitly permitted.
+- Public mode allows anyone to equip without explicit grant.
+
+#### Equip state model (on creature post replies)
+
+Creature owners control what is currently worn by publishing:
+
+- `wear_on` — equip accessory
+- `wear_off` — remove accessory
+
+The creature post is the source of truth for current equip state. For each accessory, the latest `wear_on`/`wear_off` event by the creature's effective owner determines whether it is equipped.
+
+#### UI behaviour
+
+- Creature page shows a **Wear / Equip panel** for owners.
+- Owners can paste an accessory URL or pick from a "closet" (owned accessories) to equip.
+- The app checks permission before equipping, and prevents equipping if that accessory is already worn by another creature.
+- If permission is revoked after equipping, the accessory remains visible as **permission lapsed** until removed.
 
 ---
 
@@ -507,8 +554,8 @@ Filters can be combined and are cleared individually. Pagination resets automati
 | `/#/leaderboard` | Global XP leaderboard |
 | `/#/notifications` | Notifications — activity feed and pending transfer offer accepts (login required) |
 | `/#/@user` | Profile — tabbed inventory of all items **currently owned** by the user (Creatures + Accessories), including received transfers; creature/accessory filters, level/XP badge, Steem profile header |
-| `/#/@author/permlink` | Creature — canvas + reaction animation, unified activities panel (feed/play/walk), breed permit manager (owner only), breed panel (fertile window + permitted users only), ownership transfer panel (owner and pending recipient), unicode render, genome table, family/kinship panel, provenance badges and banners |
-| `/#/acc/@author/permlink` | Accessory — deterministic accessory canvas, parameter table, unicode render, social panel, ownership transfer panel (owner and pending recipient) |
+| `/#/@author/permlink` | Creature — canvas + reaction animation, unified activities panel (feed/play/walk), **accessory wear/equip panel** (owner only), breed permit manager (owner only), breed panel (fertile window + permitted users only), ownership transfer panel (owner and pending recipient), unicode render, genome table, family/kinship panel, provenance badges and banners |
+| `/#/acc/@author/permlink` | Accessory — deterministic accessory canvas, parameter table, unicode render, **wear-permission manager** (request/grant/revoke/public/private), social panel, ownership transfer panel (owner and pending recipient) |
 
 ---
 
@@ -603,6 +650,23 @@ Use `"type": "breed_revoke"` to cancel a permit. Set `expires_days` to `0` for a
 { "version": "1.0", "type": "transfer_offer",  "creature": { "author": "alice", "permlink": "..." }, "to": "bob",   "ts": "2026-03-01T12:00:00Z" }
 { "version": "1.0", "type": "transfer_accept", "creature": { "author": "alice", "permlink": "..." }, "offer_permlink": "steembiota-transfer-offer-bob-...", "ts": "..." }
 { "version": "1.0", "type": "transfer_cancel", "creature": { "author": "alice", "permlink": "..." }, "ts": "2026-03-02T08:00:00Z" }
+```
+
+### Wear permission replies (accessory post)
+
+```json
+{ "version": "1.0", "type": "wear_request", "accessory": { "author": "alice", "permlink": "..." }, "requester": "carol", "ts": "..." }
+{ "version": "1.0", "type": "wear_grant",   "accessory": { "author": "alice", "permlink": "..." }, "grantee": "carol",  "ts": "..." }
+{ "version": "1.0", "type": "wear_revoke",  "accessory": { "author": "alice", "permlink": "..." }, "grantee": "carol",  "ts": "..." }
+{ "version": "1.0", "type": "wear_public",  "accessory": { "author": "alice", "permlink": "..." }, "ts": "..." }
+{ "version": "1.0", "type": "wear_private", "accessory": { "author": "alice", "permlink": "..." }, "ts": "..." }
+```
+
+### Wear equip replies (creature post)
+
+```json
+{ "version": "1.0", "type": "wear_on",  "creature": { "author": "bob", "permlink": "..." }, "accessory": { "author": "alice", "permlink": "..." }, "ts": "..." }
+{ "version": "1.0", "type": "wear_off", "creature": { "author": "bob", "permlink": "..." }, "accessory": { "author": "alice", "permlink": "..." }, "ts": "..." }
 ```
 
 ### Post titles
