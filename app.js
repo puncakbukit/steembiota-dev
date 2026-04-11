@@ -1818,135 +1818,174 @@ const ProfileView = {
   },
 
   template: `
-    <div style="margin-top:20px;padding:0 16px;">
+  <div style="margin-top:20px;padding:0 16px;">
 
-      <h2 style="color:#a5d6a7;margin:0 0 4px;">@{{ profileUser }}</h2>
-      <p style="color:#555;font-size:13px;margin:0 0 16px;">
-        Items owned by this user <span style="color:#3a3a3a;">(includes transfers)</span>
-      </p>
+    <!-- Header with Force Refresh Button -->
+    <div style="display:flex; align-items:center; gap:12px; margin-bottom:4px; flex-wrap:wrap;">
+      <h2 style="color:#a5d6a7;margin:0;">@{{ profileUser }}</h2>
 
-      <!-- Tab bar -->
-      <div style="display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid #222;">
-        <button
-          @click="activeTab='creatures'"
-          :style="{
-            padding:'8px 20px', fontSize:'13px', borderRadius:'6px 6px 0 0',
-            background: activeTab==='creatures' ? '#1a2e1a' : '#111',
-            color:      activeTab==='creatures' ? '#a5d6a7' : '#555',
-            border:     '1px solid ' + (activeTab==='creatures' ? '#2e7d32' : '#222'),
-            borderBottom: activeTab==='creatures' ? '1px solid #1a2e1a' : '1px solid #222',
-            marginBottom: '-1px'
-          }"
-        >🧬 Creatures ({{ creatures.length }})</button>
-        <button
-          @click="activeTab='accessories'"
-          :style="{
-            padding:'8px 20px', fontSize:'13px', borderRadius:'6px 6px 0 0',
-            background: activeTab==='accessories' ? '#1a0a2e' : '#111',
-            color:      activeTab==='accessories' ? '#ce93d8' : '#555',
-            border:     '1px solid ' + (activeTab==='accessories' ? '#7b1fa2' : '#222'),
-            borderBottom: activeTab==='accessories' ? '1px solid #1a0a2e' : '1px solid #222',
-            marginBottom: '-1px'
-          }"
-        >✨ Accessories ({{ accessories.length }})</button>
-      </div>
-
-      <!-- ═══ CREATURES TAB ═══ -->
-      <div v-if="activeTab==='creatures'">
-        <loading-spinner-component v-if="creaturesLoading"></loading-spinner-component>
-        <div v-else-if="creaturesError" style="color:#ff8a80;font-size:13px;">⚠ {{ creaturesError }}</div>
-        <div v-else-if="creatures.length===0" style="color:#555;font-size:13px;">
-          No creatures found for @{{ profileUser }}.
-        </div>
-        <template v-else>
-          <p style="font-size:12px;color:#444;margin:0 0 12px;">
-            {{ filteredCreatures.length }}{{ filteredCreatures.length !== creatures.length ? ' of ' + creatures.length : '' }}
-            creature{{ filteredCreatures.length === 1 ? '' : 's' }}
-          </p>
-
-          <!-- Creature filters -->
-          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;margin-bottom:14px;">
-            <select v-model="filterGenus"
-              style="padding:5px 8px;font-size:13px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;">
-              <option value="">All genera</option>
-              <option v-for="g in availableGenera" :key="g.id" :value="String(g.id)">{{ g.name }} ({{ g.id }})</option>
-            </select>
-            <div style="display:flex;gap:4px;">
-              <button @click="filterSex=''"
-                :style="{padding:'4px 10px',fontSize:'12px',background:filterSex===''?'#2e7d32':'#1a1a1a',color:filterSex===''?'#fff':'#888',border:'1px solid #333',borderRadius:'6px'}">All</button>
-              <button @click="filterSex='0'"
-                :style="{padding:'4px 10px',fontSize:'12px',background:filterSex==='0'?'#1565c0':'#1a1a1a',color:filterSex==='0'?'#90caf9':'#888',border:'1px solid #333',borderRadius:'6px'}">♂ Male</button>
-              <button @click="filterSex='1'"
-                :style="{padding:'4px 10px',fontSize:'12px',background:filterSex==='1'?'#880e4f':'#1a1a1a',color:filterSex==='1'?'#f48fb1':'#888',border:'1px solid #333',borderRadius:'6px'}">♀ Female</button>
-            </div>
-            <div style="display:flex;gap:4px;align-items:center;">
-              <span style="font-size:12px;color:#555;">Age</span>
-              <button v-for="op in ['<','=','>']" :key="op"
-                @click="filterAgeOp=(filterAgeOp===op?'':op)"
-                :style="{padding:'4px 8px',fontSize:'12px',fontFamily:'monospace',background:filterAgeOp===op?'#4a3000':'#1a1a1a',color:filterAgeOp===op?'#ffb74d':'#888',border:'1px solid #333',borderRadius:'6px'}">{{ op }}</button>
-              <input v-model="filterAgeVal" type="number" min="0" placeholder="days"
-                style="width:64px;padding:4px 6px;font-size:12px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;"/>
-              <button v-if="filterAgeOp||filterAgeVal" @click="filterAgeOp='';filterAgeVal=''"
-                style="padding:4px 7px;font-size:11px;background:#1a1a1a;color:#555;border:1px solid #333;border-radius:6px;" title="Clear">✕</button>
-            </div>
-          </div>
-
-          <div v-if="filteredCreatures.length===0" style="color:#555;font-size:13px;margin:12px 0;">No creatures match the filter.</div>
-          <template v-else>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
-              <creature-card-component v-for="c in pagedCreatures" :key="c.author+'/'+c.permlink"
-                :post="c" :username="profileUser"></creature-card-component>
-            </div>
-            <div v-if="crePageCount>1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
-              <button @click="prevCre" :disabled="crePage===1" style="padding:5px 14px;background:#1a2a1a;">◀ Prev</button>
-              <span style="font-size:13px;color:#555;">{{ crePage }} / {{ crePageCount }}</span>
-              <button @click="nextCre" :disabled="crePage===crePageCount" style="padding:5px 14px;background:#1a2a1a;">Next ▶</button>
-            </div>
-          </template>
-        </template>
-      </div>
-
-      <!-- ═══ ACCESSORIES TAB ═══ -->
-      <div v-if="activeTab==='accessories'">
-        <loading-spinner-component v-if="accessoriesLoading"></loading-spinner-component>
-        <div v-else-if="accessoriesError" style="color:#ff8a80;font-size:13px;">⚠ {{ accessoriesError }}</div>
-        <div v-else-if="accessories.length===0" style="color:#555;font-size:13px;">
-          No accessories found for @{{ profileUser }}.
-        </div>
-        <template v-else>
-          <p style="font-size:12px;color:#444;margin:0 0 12px;">
-            {{ filteredAccessories.length }}{{ filteredAccessories.length !== accessories.length ? ' of ' + accessories.length : '' }}
-            accessor{{ filteredAccessories.length === 1 ? 'y' : 'ies' }}
-          </p>
-
-          <!-- Accessory template filter -->
-          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">
-            <button @click="filterTemplate=''"
-              :style="{padding:'4px 10px',fontSize:'12px',background:filterTemplate===''?'#4a148c':'#1a1a1a',color:filterTemplate===''?'#ce93d8':'#888',border:'1px solid '+(filterTemplate===''?'#7b1fa2':'#333'),borderRadius:'6px'}">All</button>
-            <button v-for="t in accTemplates" :key="t.id"
-              @click="filterTemplate=(filterTemplate===t.id?'':t.id)"
-              :style="{padding:'4px 10px',fontSize:'12px',background:filterTemplate===t.id?'#4a148c':'#1a1a1a',color:filterTemplate===t.id?'#ce93d8':'#888',border:'1px solid '+(filterTemplate===t.id?'#7b1fa2':'#333'),borderRadius:'6px'}">
-              {{ t.icon }} {{ t.label }}
-            </button>
-          </div>
-
-          <div v-if="filteredAccessories.length===0" style="color:#555;font-size:13px;margin:12px 0;">No accessories match the filter.</div>
-          <template v-else>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
-              <accessory-card-component v-for="a in pagedAccessories" :key="a.author+'/'+a.permlink"
-                :post="a" :username="profileUser"></accessory-card-component>
-            </div>
-            <div v-if="accPageCount>1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
-              <button @click="prevAcc" :disabled="accPage===1" style="padding:5px 14px;background:#1a0a2e;">◀ Prev</button>
-              <span style="font-size:13px;color:#555;">{{ accPage }} / {{ accPageCount }}</span>
-              <button @click="nextAcc" :disabled="accPage===accPageCount" style="padding:5px 14px;background:#1a0a2e;">Next ▶</button>
-            </div>
-          </template>
-        </template>
-      </div>
-
+      <button 
+        @click="forceRefresh" 
+        :disabled="isForceRefreshing"
+        style="background:#111; border:1px solid #333; padding:4px 10px; font-size:11px; color:#888; border-radius:4px; display:inline-flex; align-items:center; gap:5px;"
+      >
+        <span v-if="isForceRefreshing">🔄 Refreshing...</span>
+        <span v-else>🔄 Force Refresh</span>
+      </button>
     </div>
-  `
+
+    <p style="color:#555;font-size:13px;margin:0 0 16px;">
+      Items owned by this user <span style="color:#3a3a3a;">(includes transfers)</span>
+    </p>
+
+    <!-- Tab bar -->
+    <div style="display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid #222;">
+      <button
+        @click="activeTab='creatures'"
+        :style="{
+          padding:'8px 20px', fontSize:'13px', borderRadius:'6px 6px 0 0',
+          background: activeTab==='creatures' ? '#1a2e1a' : '#111',
+          color:      activeTab==='creatures' ? '#a5d6a7' : '#555',
+          border:     '1px solid ' + (activeTab==='creatures' ? '#2e7d32' : '#222'),
+          borderBottom: activeTab==='creatures' ? '1px solid #1a2e1a' : '1px solid #222',
+          marginBottom: '-1px'
+        }"
+      >🧬 Creatures ({{ creatures.length }})</button>
+
+      <button
+        @click="activeTab='accessories'"
+        :style="{
+          padding:'8px 20px', fontSize:'13px', borderRadius:'6px 6px 0 0',
+          background: activeTab==='accessories' ? '#1a0a2e' : '#111',
+          color:      activeTab==='accessories' ? '#ce93d8' : '#555',
+          border:     '1px solid ' + (activeTab==='accessories' ? '#7b1fa2' : '#222'),
+          borderBottom: activeTab==='accessories' ? '1px solid '#1a0a2e' : '1px solid #222',
+          marginBottom: '-1px'
+        }"
+      >✨ Accessories ({{ accessories.length }})</button>
+    </div>
+
+    <!-- ═══ CREATURES TAB ═══ -->
+    <div v-if="activeTab==='creatures'">
+      <loading-spinner-component v-if="creaturesLoading"></loading-spinner-component>
+      <div v-else-if="creaturesError" style="color:#ff8a80;font-size:13px;">⚠ {{ creaturesError }}</div>
+      <div v-else-if="creatures.length===0" style="color:#555;font-size:13px;">
+        No creatures found for @{{ profileUser }}.
+      </div>
+
+      <template v-else>
+        <p style="font-size:12px;color:#444;margin:0 0 12px;">
+          {{ filteredCreatures.length }}{{ filteredCreatures.length !== creatures.length ? ' of ' + creatures.length : '' }}
+          creature{{ filteredCreatures.length === 1 ? '' : 's' }}
+        </p>
+
+        <!-- Creature filters -->
+        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;margin-bottom:14px;">
+          <select v-model="filterGenus"
+            style="padding:5px 8px;font-size:13px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;">
+            <option value="">All genera</option>
+            <option v-for="g in availableGenera" :key="g.id" :value="String(g.id)">
+              {{ g.name }} ({{ g.id }})
+            </option>
+          </select>
+
+          <div style="display:flex;gap:4px;">
+            <button @click="filterSex=''"
+              :style="{padding:'4px 10px',fontSize:'12px',background:filterSex===''?'#2e7d32':'#1a1a1a',color:filterSex===''?'#fff':'#888',border:'1px solid #333',borderRadius:'6px'}">All</button>
+            <button @click="filterSex='0'"
+              :style="{padding:'4px 10px',fontSize:'12px',background:filterSex==='0'?'#1565c0':'#1a1a1a',color:filterSex==='0'?'#90caf9':'#888',border:'1px solid #333',borderRadius:'6px'}">♂ Male</button>
+            <button @click="filterSex='1'"
+              :style="{padding:'4px 10px',fontSize:'12px',background:filterSex==='1'?'#880e4f':'#1a1a1a',color:filterSex==='1'?'#f48fb1':'#888',border:'1px solid #333',borderRadius:'6px'}">♀ Female</button>
+          </div>
+
+          <div style="display:flex;gap:4px;align-items:center;">
+            <span style="font-size:12px;color:#555;">Age</span>
+            <button v-for="op in ['<','=','>']" :key="op"
+              @click="filterAgeOp=(filterAgeOp===op?'':op)"
+              :style="{padding:'4px 8px',fontSize:'12px',fontFamily:'monospace',background:filterAgeOp===op?'#4a3000':'#1a1a1a',color:filterAgeOp===op?'#ffb74d':'#888',border:'1px solid #333',borderRadius:'6px'}">{{ op }}</button>
+
+            <input v-model="filterAgeVal" type="number" min="0" placeholder="days"
+              style="width:64px;padding:4px 6px;font-size:12px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;"/>
+
+            <button v-if="filterAgeOp||filterAgeVal" @click="filterAgeOp='';filterAgeVal=''"
+              style="padding:4px 7px;font-size:11px;background:#1a1a1a;color:#555;border:1px solid #333;border-radius:6px;"
+              title="Clear">✕</button>
+          </div>
+        </div>
+
+        <div v-if="filteredCreatures.length===0" style="color:#555;font-size:13px;margin:12px 0;">
+          No creatures match the filter.
+        </div>
+
+        <template v-else>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
+            <creature-card-component
+              v-for="c in pagedCreatures"
+              :key="c.author+'/'+c.permlink"
+              :post="c"
+              :username="profileUser"
+            />
+          </div>
+
+          <div v-if="crePageCount>1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
+            <button @click="prevCre" :disabled="crePage===1" style="padding:5px 14px;background:#1a2a1a;">◀ Prev</button>
+            <span style="font-size:13px;color:#555;">{{ crePage }} / {{ crePageCount }}</span>
+            <button @click="nextCre" :disabled="crePage===crePageCount" style="padding:5px 14px;background:#1a2a1a;">Next ▶</button>
+          </div>
+        </template>
+      </template>
+    </div>
+
+    <!-- ═══ ACCESSORIES TAB ═══ -->
+    <div v-if="activeTab==='accessories'">
+      <loading-spinner-component v-if="accessoriesLoading"></loading-spinner-component>
+      <div v-else-if="accessoriesError" style="color:#ff8a80;font-size:13px;">⚠ {{ accessoriesError }}</div>
+      <div v-else-if="accessories.length===0" style="color:#555;font-size:13px;">
+        No accessories found for @{{ profileUser }}.
+      </div>
+
+      <template v-else>
+        <p style="font-size:12px;color:#444;margin:0 0 12px;">
+          {{ filteredAccessories.length }}{{ filteredAccessories.length !== accessories.length ? ' of ' + accessories.length : '' }}
+          accessor{{ filteredAccessories.length === 1 ? 'y' : 'ies' }}
+        </p>
+
+        <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">
+          <button @click="filterTemplate=''"
+            :style="{padding:'4px 10px',fontSize:'12px',background:filterTemplate===''?'#4a148c':'#1a1a1a',color:filterTemplate===''?'#ce93d8':'#888',border:'1px solid '+(filterTemplate===''?'#7b1fa2':'#333'),borderRadius:'6px'}">All</button>
+
+          <button v-for="t in accTemplates" :key="t.id"
+            @click="filterTemplate=(filterTemplate===t.id?'':t.id)"
+            :style="{padding:'4px 10px',fontSize:'12px',background:filterTemplate===t.id?'#4a148c':'#1a1a1a',color:filterTemplate===t.id?'#ce93d8':'#888',border:'1px solid '+(filterTemplate===t.id?'#7b1fa2':'#333'),borderRadius:'6px'}">
+            {{ t.icon }} {{ t.label }}
+          </button>
+        </div>
+
+        <div v-if="filteredAccessories.length===0" style="color:#555;font-size:13px;margin:12px 0;">
+          No accessories match the filter.
+        </div>
+
+        <template v-else>
+          <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
+            <accessory-card-component
+              v-for="a in pagedAccessories"
+              :key="a.author+'/'+a.permlink"
+              :post="a"
+              :username="profileUser"
+            />
+          </div>
+
+          <div v-if="accPageCount>1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
+            <button @click="prevAcc" :disabled="accPage===1" style="padding:5px 14px;background:#1a0a2e;">◀ Prev</button>
+            <span style="font-size:13px;color:#555;">{{ accPage }} / {{ accPageCount }}</span>
+            <button @click="nextAcc" :disabled="accPage===accPageCount" style="padding:5px 14px;background:#1a0a2e;">Next ▶</button>
+          </div>
+        </template>
+      </template>
+    </div>
+
+  </div>
+`
 };
 
 // ---- CreatureView ----
