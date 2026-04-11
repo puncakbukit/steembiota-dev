@@ -2485,8 +2485,28 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
 
 // Backward-compatible single-accessory helper.
 async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
-  const all = await fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureReplies);
+  const all = await fetchCreatureWearingsCached(creatureAuthor, creaturePermlink, creatureReplies);
   return all[0] || null;
+}
+
+async function fetchCreatureWearingsCached(author, permlink, replies) {
+  const cacheKey = `sb_wearing_${author}_${permlink}`;
+  
+  // 1. Try local cache for immediate render
+  const cached = localStorage.getItem(cacheKey);
+  if (cached) {
+    // Return cached immediately, then update in background
+    setTimeout(() => updateWearingCache(author, permlink, replies), 100);
+    return JSON.parse(cached);
+  }
+
+  return updateWearingCache(author, permlink, replies);
+}
+
+async function updateWearingCache(author, permlink, replies) {
+  const result = await fetchCreatureWearings(author, permlink, replies);
+  localStorage.setItem(`sb_wearing_${author}_${permlink}`, JSON.stringify(result));
+  return result;
 }
 
 /**
