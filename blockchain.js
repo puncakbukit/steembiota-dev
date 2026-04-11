@@ -2351,6 +2351,7 @@ function publishWearPrivate(username, accAuthor, accPermlink, accName, callback)
 // Creature owner equips an accessory on their creature.
 // Reply is posted on the CREATURE post.
 // Caller must verify permission is active before calling.
+// UPDATE publishWearOn to include metadata for easier indexing
 function publishWearOn(
   username, creatureAuthor, creaturePermlink, creatureName,
   accAuthor, accPermlink, accName,
@@ -2373,6 +2374,9 @@ function publishWearOn(
       version: '1.0', type: 'wear_on',
       creature:  { author: creatureAuthor, permlink: creaturePermlink },
       accessory: { author: accAuthor, permlink: accPermlink },
+      // NEW: snapshots for easier UI rendering/searching
+      creature_name_snapshot: creatureName,
+      accessory_name_snapshot: accName,
       ts: new Date().toISOString()
     }
   };
