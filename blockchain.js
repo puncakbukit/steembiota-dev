@@ -2351,7 +2351,6 @@ function publishWearPrivate(username, accAuthor, accPermlink, accName, callback)
 // Creature owner equips an accessory on their creature.
 // Reply is posted on the CREATURE post.
 // Caller must verify permission is active before calling.
-// UPDATE publishWearOn to include metadata for easier indexing
 function publishWearOn(
   username, creatureAuthor, creaturePermlink, creatureName,
   accAuthor, accPermlink, accName,
@@ -2374,9 +2373,6 @@ function publishWearOn(
       version: '1.0', type: 'wear_on',
       creature:  { author: creatureAuthor, permlink: creaturePermlink },
       accessory: { author: accAuthor, permlink: accPermlink },
-      // NEW: snapshots for easier UI rendering/searching
-      creature_name_snapshot: creatureName,
-      accessory_name_snapshot: accName,
       ts: new Date().toISOString()
     }
   };
@@ -2485,76 +2481,26 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
 
 // Backward-compatible single-accessory helper.
 async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureReplies) {
-  const all = await fetchCreatureWearingsCached(creatureAuthor, creaturePermlink, creatureReplies);
+  const all = await fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureReplies);
   return all[0] || null;
-}
-
-async function fetchCreatureWearingsCached(author, permlink, replies) {
-  const cacheKey = `sb_wearing_${author}_${permlink}`;
-  
-  // 1. Try local cache for immediate render
-  const cached = localStorage.getItem(cacheKey);
-  if (cached) {
-    // Return cached immediately, then update in background
-    setTimeout(() => updateWearingCache(author, permlink, replies), 100);
-    return JSON.parse(cached);
-  }
-
-  return updateWearingCache(author, permlink, replies);
-}
-
-async function updateWearingCache(author, permlink, replies) {
-  const result = await fetchCreatureWearings(author, permlink, replies);
-  localStorage.setItem(`sb_wearing_${author}_${permlink}`, JSON.stringify(result));
-  return result;
 }
 
 /**
  * Checks if ANY creature owned by the user is already wearing this specific accessory.
  * Returns the name of the creature if found, otherwise null.
  */
-/**
- * OPTIMIZED: Finds if an accessory is worn by scanning the USER'S history,
- * not the creatures' histories.
- */
 async function findCreatureWearingAccessory(username, accAuthor, accPermlink) {
-  try {
-    // 1. Fetch recent activity by this user (comments/replies)
-    const history = await callWithFallbackAsync(
-      steem.api.getDiscussionsByComments,
-      [{ start_author: username, limit: 100 }]
-    );
+  const ownedCreatures = await fetchCreaturesOwnedBy(username);
+  const targetKey = `${accAuthor.toLowerCase()}/${accPermlink.toLowerCase()}`;
 
-    const targetKey = `${accAuthor.toLowerCase()}/${accPermlink.toLowerCase()}`;
+  for (const c of ownedCreatures) {
+    // We need to fetch the replies for each creature to see the current wear state
+    const replies = await fetchAllReplies(c.post.author, c.post.permlink);
+    const equipped = parseEquippedAccessories(replies, c.post.author);
     
-    // 2. Track latest state for each accessory found in the stream
-    const recentEquips = new Map(); // accKey -> { type, creatureName, ts }
-
-    for (const post of history) {
-      let meta = {};
-      try { meta = JSON.parse(post.json_metadata || "{}"); } catch { continue; }
-      const sb = meta.steembiota;
-      if (!sb || !['wear_on', 'wear_off'].includes(sb.type)) continue;
-
-      const accKey = `${sb.accessory.author.toLowerCase()}/${sb.accessory.permlink.toLowerCase()}`;
-      const ts = new Date(post.created + "Z").getTime();
-
-      // Only care about the most recent event for each accessory
-      if (!recentEquips.has(accKey) || ts > recentEquips.get(accKey).ts) {
-        recentEquips.set(accKey, {
-          type: sb.type,
-          creatureName: sb.creature_name_snapshot || "a creature",
-          ts: ts
-        });
-      }
+    if (equipped.has(targetKey)) {
+      return c.meta.name || c.post.author;
     }
-
-    const state = recentEquips.get(targetKey);
-    if (state && state.type === 'wear_on') {
-      return state.creatureName;
-    }
-  } catch (e) {
-    console.warn("Optimized worn-check failed", e);
   }
   return null;
 }
