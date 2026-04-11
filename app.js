@@ -1699,6 +1699,38 @@ const ProfileView = {
   },
 
   methods: {
+    async forceRefresh() {
+    if (this.isForceRefreshing) return;
+    this.isForceRefreshing = true;
+    
+    const user = this.profileUser;
+
+    // 1. Invalidate the specific cache keys for this profile
+    // This helper is defined in the "Genome Helpers" section of app.js
+    invalidateOwnedCachesForUser(user);
+
+    // 2. Set loading states to true to show the spinners
+    this.creaturesLoading = true;
+    this.accessoriesLoading = true;
+
+    try {
+      // 3. Re-run the loaders. Since the cache is now empty, 
+      // they will perform full blockchain RPC scans.
+      await Promise.all([
+        this.loadCreatures(user),
+        this.loadAccessories(user)
+      ]);
+      
+      this.notify(`Profile for @${user} updated from blockchain.`, "success");
+    } catch (e) {
+      this.notify("Refresh failed: " + e.message, "error");
+    } finally {
+      this.isForceRefreshing = false;
+      this.creaturesLoading = false;
+      this.accessoriesLoading = false;
+    }
+  },
+    
     async loadCreatures(user) {
       this.creaturesError = "";
       const cacheKey = `steembiota:owned:creatures:${String(user || "").toLowerCase()}:v2`;
