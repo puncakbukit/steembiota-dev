@@ -3800,6 +3800,9 @@ const TransferPanelComponent = {
             All breed permits are voided on transfer — the new owner starts fresh.
             The original <code style="color:#444;">post.author</code> never changes on-chain;
             SteemBiota derives the effective owner from the signed reply history.
+    <br/>
+  <strong style="color:#ff8a80;">⚠ Note: Worn accessories do not travel with the creature.</strong> 
+  They will be automatically unequipped and remain in your inventory.          
           </p>
 
           <!-- Pending offer status -->
