@@ -1603,6 +1603,7 @@ const ProfileView = {
   data() {
     return {
       activeTab:    "creatures",   // "creatures" | "accessories"
+      isForceRefreshing: false, // Track the manual refresh state
       // Creatures tab
       creatures:    [],
       creaturesLoading: true,
