@@ -2404,6 +2404,7 @@ const CreatureCardComponent = {
         <div style="font-size:0.82rem;font-weight:bold;color:#a5d6a7;
                     white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:5px;">
           🧬 {{ post.name }}
+          <span v-if="cardWearing" title="Wearing an accessory" style="font-size:0.7rem;margin-left:4px;">🎩</span>
         </div>
 
         <!-- Row 1: sex · age · lifecycle  ·  ❤️ count  [↑] -->
