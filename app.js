@@ -3749,6 +3749,7 @@ const App = {
     <nav>
       <router-link to="/"            exact-active-class="nav-active">Home</router-link>
       <router-link to="/accessories" exact-active-class="nav-active">✨ Accessories</router-link>
+      <router-link v-if="username" to="/upload" exact-active-class="nav-active">📸 Upload</router-link>
       <router-link
         v-if="username"
         :to="'/@' + username"
