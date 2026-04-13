@@ -3539,7 +3539,6 @@ const NotificationsView = {
   `
 };
 
-
 const routes = [
   { path: "/",                                      component: HomeView          },
   { path: "/accessories",                           component: AccessoriesView   },
@@ -3549,6 +3548,7 @@ const routes = [
   { path: "/@:author/:permlink",  name: "CreatureView",     component: CreatureView      },
   { path: "/acc/@:author/:permlink", name: "AccessoryItemView", component: AccessoryItemView },
   { path: "/@:user",              component: ProfileView       },
+  { path: "/upload", component: UploadView },
 ];
 
 const router = createRouter({
