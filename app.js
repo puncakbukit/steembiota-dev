@@ -3846,6 +3846,7 @@ vueApp.component("GlobalProfileBannerComponent", GlobalProfileBannerComponent);
 vueApp.component("ActivityPanelComponent",      ActivityPanelComponent);
 vueApp.component("CreatureView",                CreatureView);
 vueApp.component("LeaderboardView",             LeaderboardView);
+vueApp.component("UploadView", UploadView);
 
 vueApp.use(router);
 vueApp.mount("#app");
