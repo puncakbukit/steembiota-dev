@@ -1,0 +1,818 @@
+// ============================================================
+// upload.js
+// SteemBiota — Image-Inspired Creature Upload
+//
+// Approach A: extract visual traits from a user-uploaded image,
+// fit genome values that produce a creature sharing the image's
+// colour family and rough proportions, then publish as a standard
+// "founder" creature via the existing publishCreature() call.
+//
+// Pipeline:
+//   FileReader → <img> → 64×64 analysis canvas → pixel stats
+//   → hue fit (best GEN+CLR pair) → MOR search (aspect ratio)
+//   → APP/ORN from texture entropy → LIF/FRT randomised → genome
+//
+// Dependencies (must be loaded before this file):
+//   blockchain.js  — publishCreature, buildPermlink
+//   app.js         — generateFullName, buildUnicodeArt, generateGenusName,
+//                    buildDefaultTitle, getLifecycleStage
+//   components.js  — CreatureCanvasComponent (registered globally)
+// ============================================================
+
+"use strict";
+
+// ============================================================
+// IMAGE ANALYSIS — pure functions, no DOM side-effects
+// ============================================================
+
+/**
+ * Load a File/Blob into an HTMLImageElement.
+ * Resolves with the element; rejects on decode failure.
+ */
+function loadImageFile(file) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload  = () => { URL.revokeObjectURL(url); resolve(img); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("Could not decode image.")); };
+    img.src = url;
+  });
+}
+
+/**
+ * Sample a pixel grid from an image.
+ * Downsamples to SAMPLE_SIZE × SAMPLE_SIZE for speed.
+ * Returns a Uint8ClampedArray (RGBA).
+ */
+const SAMPLE_SIZE = 64;
+function samplePixels(img) {
+  const canvas = document.createElement("canvas");
+  canvas.width  = SAMPLE_SIZE;
+  canvas.height = SAMPLE_SIZE;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
+  return ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data;
+}
+
+/**
+ * Convert sRGB [0,255] to HSL.
+ * Returns { h: 0–360, s: 0–100, l: 0–100 }.
+ */
+function rgbToHsl(r, g, b) {
+  r /= 255; g /= 255; b /= 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l   = (max + min) / 2;
+  if (max === min) return { h: 0, s: 0, l: Math.round(l * 100) };
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  let h;
+  if      (max === r) h = (g - b) / d + (g < b ? 6 : 0);
+  else if (max === g) h = (b - r) / d + 2;
+  else                h = (r - g) / d + 4;
+  return { h: Math.round(h * 60), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+/**
+ * Derive aggregate colour statistics from the pixel sample.
+ *
+ * Returns:
+ *   dominantHue      — circular-mean hue of non-grey pixels (0–360)
+ *   meanSat          — mean saturation of non-grey pixels (0–100)
+ *   meanLit          — mean lightness of all pixels (0–100)
+ *   litVariance      — variance of lightness (proxy for contrast/texture)
+ *   aspectRatio      — silhouette bounding-box aspect ratio W/H (1.0 = square)
+ *   edgeDensity      — fraction of high-gradient pixels (0–1, proxy for detail)
+ *   colourfulness    — fraction of pixels with sat > 20 (0–1)
+ */
+function analysePixels(data, imgW, imgH) {
+  const n = SAMPLE_SIZE * SAMPLE_SIZE;
+
+  // --- Colour stats ---
+  let sinSum = 0, cosSum = 0, satSum = 0, litSum = 0;
+  let colourCount = 0;
+  const lits = [];
+
+  for (let i = 0; i < n; i++) {
+    const r = data[i * 4];
+    const g = data[i * 4 + 1];
+    const b = data[i * 4 + 2];
+    const a = data[i * 4 + 3];
+    if (a < 32) continue; // skip transparent
+
+    const { h, s, l } = rgbToHsl(r, g, b);
+    lits.push(l);
+    litSum += l;
+
+    if (s > 12) { // non-grey
+      const rad = h * Math.PI / 180;
+      sinSum += Math.sin(rad);
+      cosSum += Math.cos(rad);
+      satSum += s;
+      colourCount++;
+    }
+  }
+
+  const meanLit = litSum / lits.length;
+  const litVariance = lits.reduce((acc, l) => acc + (l - meanLit) ** 2, 0) / lits.length;
+
+  // Circular mean hue
+  const dominantHue = colourCount === 0
+    ? 0
+    : Math.round((Math.atan2(sinSum / colourCount, cosSum / colourCount) * 180 / Math.PI + 360) % 360);
+
+  const meanSat     = colourCount === 0 ? 0 : Math.round(satSum / colourCount);
+  const colourfulness = colourCount / lits.length;
+
+  // --- Silhouette aspect ratio ---
+  // Estimate from the non-near-white pixel bounding box on the analysis canvas.
+  let minX = SAMPLE_SIZE, maxX = 0, minY = SAMPLE_SIZE, maxY = 0;
+  for (let y = 0; y < SAMPLE_SIZE; y++) {
+    for (let x = 0; x < SAMPLE_SIZE; x++) {
+      const idx = (y * SAMPLE_SIZE + x) * 4;
+      const a = data[idx + 3];
+      if (a < 32) continue;
+      const { l } = rgbToHsl(data[idx], data[idx + 1], data[idx + 2]);
+      if (l < 90) { // exclude near-white background
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
+  const silW = Math.max(1, maxX - minX);
+  const silH = Math.max(1, maxY - minY);
+  // Use original image aspect ratio as fallback if silhouette detection fails
+  const aspectRatio = (minX < maxX && minY < maxY)
+    ? silW / silH
+    : imgW / imgH;
+
+  // --- Edge density (Sobel, lightness channel) ---
+  // Build a greyscale matrix from lits
+  const grey = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    grey[i] = (data[i * 4] * 0.299 + data[i * 4 + 1] * 0.587 + data[i * 4 + 2] * 0.114) / 255;
+  }
+  let edgeCount = 0;
+  const S = SAMPLE_SIZE;
+  for (let y = 1; y < S - 1; y++) {
+    for (let x = 1; x < S - 1; x++) {
+      const gx =
+        -grey[(y-1)*S+(x-1)] + grey[(y-1)*S+(x+1)]
+        -2*grey[y*S+(x-1)]   + 2*grey[y*S+(x+1)]
+        -grey[(y+1)*S+(x-1)] + grey[(y+1)*S+(x+1)];
+      const gy =
+        -grey[(y-1)*S+(x-1)] - 2*grey[(y-1)*S+x] - grey[(y-1)*S+(x+1)]
+        +grey[(y+1)*S+(x-1)] + 2*grey[(y+1)*S+x] + grey[(y+1)*S+(x+1)];
+      if (Math.sqrt(gx*gx + gy*gy) > 0.18) edgeCount++;
+    }
+  }
+  const edgeDensity = edgeCount / ((S - 2) * (S - 2));
+
+  return { dominantHue, meanSat, meanLit, litVariance, aspectRatio, edgeDensity, colourfulness };
+}
+
+// ============================================================
+// GENOME FITTING — map image stats → genome integers
+// ============================================================
+
+/**
+ * The same 8-palette table used by buildPhenotype() in components.js.
+ * Reproduced here so this file is self-contained.
+ */
+const PALETTES = [
+  { base: 160 }, { base: 200 }, { base: 280 }, { base:  30 },
+  { base: 340 }, { base: 100 }, { base: 240 }, { base:  55 },
+];
+
+/**
+ * Circular distance between two hue values (0–360).
+ */
+function hueDist(a, b) {
+  const d = Math.abs(a - b) % 360;
+  return d > 180 ? 360 - d : d;
+}
+
+/**
+ * Find the (GEN, CLR) pair whose rendered finalHue is closest to targetHue.
+ *
+ * For each of the 8 palette bases, CLR must satisfy:
+ *   (base + CLR) % 360 ≈ targetHue
+ *   CLR = (targetHue - base + 360) % 360
+ *
+ * GEN is then chosen as any value in [0, 999] that maps to this palette index:
+ *   GEN % 8 === paletteIndex
+ * We pick a GEN that also incorporates some randomness for variety.
+ *
+ * Returns { GEN, CLR }.
+ */
+function fitHue(targetHue) {
+  let bestGen = 0, bestClr = 0, bestDist = Infinity;
+
+  for (let pi = 0; pi < PALETTES.length; pi++) {
+    const base = PALETTES[pi].base;
+    const clr  = (targetHue - base + 360) % 360;
+    const final = (base + clr) % 360;
+    const dist  = hueDist(final, targetHue);
+
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestClr  = clr;
+      // Pick a random GEN in [0,999] that maps to this palette index
+      const base_gen = pi + Math.floor(Math.random() * 125) * 8;
+      bestGen = Math.min(999, base_gen);
+    }
+  }
+
+  return { GEN: bestGen, CLR: bestClr };
+}
+
+/**
+ * Seeded mulberry32 PRNG — matches the creature renderer exactly,
+ * so we can simulate what buildPhenotype() will produce for a given MOR seed.
+ */
+function makePrngFit(seed) {
+  let s = (seed >>> 0) || 1;
+  return () => {
+    s += 0x6D2B79F5;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t ^= t + Math.imul(t ^ (t >>> 7), 61 | t);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Compute the rendered body aspect ratio for a given MOR seed.
+ * Mirrors the MOR block in buildPhenotype():
+ *   bodyLen = 80 + rng() * 30
+ *   bodyH   = 42 + rng() * 18
+ *   ratio   = bodyLen / bodyH
+ */
+function morAspectRatio(mor) {
+  const rng     = makePrngFit(mor);
+  const bodyLen = 80 + rng() * 30;
+  const bodyH   = 42 + rng() * 18;
+  return bodyLen / bodyH;
+}
+
+/**
+ * Search the MOR space [0, 9999] for the value whose rendered body
+ * aspect ratio is closest to targetRatio.
+ *
+ * Uses a coarse scan (every 37 steps ≈ 270 probes) then refines
+ * around the best candidate. Runs in < 1ms in all modern browsers.
+ *
+ * Returns MOR integer.
+ */
+function fitMor(targetRatio) {
+  // Clamp to the achievable range: min=80/60=1.33, max=110/42=2.62
+  const clamped = Math.max(1.33, Math.min(2.62, targetRatio));
+
+  let bestMor = 0, bestDist = Infinity;
+
+  // Coarse scan
+  for (let m = 0; m < 10000; m += 37) {
+    const dist = Math.abs(morAspectRatio(m) - clamped);
+    if (dist < bestDist) { bestDist = dist; bestMor = m; }
+  }
+
+  // Fine scan ±200 around the coarse winner
+  const lo = Math.max(0, bestMor - 200);
+  const hi = Math.min(9999, bestMor + 200);
+  for (let m = lo; m <= hi; m++) {
+    const dist = Math.abs(morAspectRatio(m) - clamped);
+    if (dist < bestDist) { bestDist = dist; bestMor = m; }
+  }
+
+  return bestMor;
+}
+
+/**
+ * Map edge density (0–1) to APP seed.
+ * High edge density → higher APP (more varied appendages, potentially wings).
+ * APP is in [0, 9999].
+ */
+function fitApp(edgeDensity) {
+  // Linear map: 0 edge → APP near 0; max edge → APP near 9999
+  // Add random jitter (±1500) so two images with the same density
+  // don't always produce identical appendages.
+  const base  = Math.round(edgeDensity * 9999);
+  const jitter = Math.floor(Math.random() * 3000) - 1500;
+  return Math.max(0, Math.min(9999, base + jitter));
+}
+
+/**
+ * Map colourfulness + litVariance to ORN seed.
+ * Colourful, high-contrast images → more ornamental creatures.
+ */
+function fitOrn(colourfulness, litVariance) {
+  // litVariance peaks around ~800 for high-contrast, ~0 for flat
+  const normLit = Math.min(litVariance / 800, 1.0);
+  const base    = Math.round((colourfulness * 0.6 + normLit * 0.4) * 9999);
+  const jitter  = Math.floor(Math.random() * 2000) - 1000;
+  return Math.max(0, Math.min(9999, base + jitter));
+}
+
+/**
+ * Full image-to-genome conversion.
+ *
+ * @param {HTMLImageElement} img  — decoded image element
+ * @returns {object} genome       — valid SteemBiota genome object
+ */
+function imageToGenome(img) {
+  const data  = samplePixels(img);
+  const stats = analysePixels(data, img.naturalWidth, img.naturalHeight);
+
+  const { GEN, CLR } = fitHue(stats.dominantHue);
+  const MOR           = fitMor(stats.aspectRatio);
+  const APP           = fitApp(stats.edgeDensity);
+  const ORN           = fitOrn(stats.colourfulness, stats.litVariance);
+
+  // Randomise lifespan and fertility (these have no image correspondence)
+  const LIF       = 80 + Math.floor(Math.random() * 80);
+  const FRT_START = Math.min(20 + Math.floor(Math.random() * 20), LIF - 10);
+  const FRT_END   = Math.min(60 + Math.floor(Math.random() * 20), LIF - 1);
+
+  return {
+    GEN,
+    SX:  Math.floor(Math.random() * 2),
+    MOR,
+    APP,
+    ORN,
+    CLR,
+    LIF,
+    FRT_START,
+    FRT_END,
+    MUT: Math.floor(Math.random() * 3),
+    // Provenance tag — not used by renderer but visible in genome table
+    _source: "image-upload"
+  };
+}
+
+// ============================================================
+// UploadView — Vue 3 component
+// Route: /upload
+// ============================================================
+
+const UploadView = {
+  name: "UploadView",
+  inject: ["username", "hasKeychain", "notify"],
+  components: { CreatureCanvasComponent },
+
+  data() {
+    return {
+      // Step management: "pick" | "analyse" | "preview" | "published"
+      step:          "pick",
+
+      // Image state
+      imageFile:     null,
+      imageDataUrl:  null,    // for <img> preview
+      imageEl:       null,    // decoded HTMLImageElement
+      analysisError: "",
+
+      // Derived genome + render inputs
+      genome:        null,
+      imageStats:    null,    // raw stats from analysePixels()
+      facingRight:   false,
+      unicodeArt:    "",
+      customTitle:   "",
+      genusInput:    "",      // optional genus override (0–999)
+
+      // Publishing
+      publishing:    false,
+
+      // Drag state
+      isDragging:    false,
+    };
+  },
+
+  computed: {
+    creatureName()  { return this.genome ? generateFullName(this.genome) : ""; },
+    genusName()     { return this.genome ? generateGenusName(this.genome.GEN) : ""; },
+    sexLabel()      { return this.genome ? (this.genome.SX === 0 ? "♂ Male" : "♀ Female") : ""; },
+    lifecycleStage(){ return this.genome ? getLifecycleStage(0, this.genome) : null; },
+    canPublish()    { return !!this.username && !!this.genome && !!window.steem_keychain && !this.publishing; },
+    genusInputValid() {
+      if (this.genusInput === "") return true;
+      const n = Number(this.genusInput);
+      return Number.isInteger(n) && n >= 0 && n <= 999;
+    },
+    statRows() {
+      if (!this.imageStats) return [];
+      const s = this.imageStats;
+      return [
+        { label: "Dominant hue",   value: s.dominantHue + "°",           desc: "→ CLR / GEN palette" },
+        { label: "Mean saturation",value: s.meanSat + "%",                desc: "→ colour richness" },
+        { label: "Mean lightness", value: s.meanLit.toFixed(1) + "%",     desc: "→ shade" },
+        { label: "Contrast",       value: s.litVariance.toFixed(0),        desc: "→ ORN ornament seed" },
+        { label: "Edge density",   value: (s.edgeDensity * 100).toFixed(1) + "%", desc: "→ APP appendage seed" },
+        { label: "Colourfulness",  value: (s.colourfulness * 100).toFixed(1) + "%", desc: "→ ORN ornament seed" },
+        { label: "Aspect ratio",   value: s.aspectRatio.toFixed(2),        desc: "→ MOR body shape" },
+      ];
+    }
+  },
+
+  methods: {
+    // ----------------------------------------------------------
+    // File input handling
+    // ----------------------------------------------------------
+    onFileInputChange(e) {
+      const file = e.target.files && e.target.files[0];
+      if (file) this.startAnalysis(file);
+    },
+
+    onDrop(e) {
+      e.preventDefault();
+      this.isDragging = false;
+      const file = e.dataTransfer.files && e.dataTransfer.files[0];
+      if (file && file.type.startsWith("image/")) this.startAnalysis(file);
+    },
+
+    onDragOver(e) { e.preventDefault(); this.isDragging = true; },
+    onDragLeave()  { this.isDragging = false; },
+
+    triggerFileInput() { this.$refs.fileInput.click(); },
+
+    // ----------------------------------------------------------
+    // Core analysis pipeline
+    // ----------------------------------------------------------
+    async startAnalysis(file) {
+      this.imageFile    = file;
+      this.analysisError = "";
+      this.genome       = null;
+      this.imageStats   = null;
+      this.step         = "analyse";
+
+      // Show image preview immediately
+      const reader = new FileReader();
+      reader.onload = e => { this.imageDataUrl = e.target.result; };
+      reader.readAsDataURL(file);
+
+      try {
+        const img      = await loadImageFile(file);
+        this.imageEl   = img;
+
+        // Run analysis on next tick so the UI shows "analysing…" first
+        await new Promise(r => setTimeout(r, 40));
+
+        const data   = samplePixels(img);
+        const stats  = analysePixels(data, img.naturalWidth, img.naturalHeight);
+        this.imageStats = stats;
+
+        const genome = imageToGenome(img);
+
+        // Apply genus override if provided
+        if (this.genusInput !== "" && this.genusInputValid) {
+          genome.GEN = Number(this.genusInput);
+        }
+
+        this.genome      = genome;
+        this.facingRight = Math.random() < 0.5;
+        this.unicodeArt  = buildUnicodeArt(genome, 0, null, this.facingRight, "standing");
+        this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
+        this.step        = "preview";
+      } catch (err) {
+        this.analysisError = err.message || "Failed to analyse image.";
+        this.step = "pick";
+      }
+    },
+
+    // ----------------------------------------------------------
+    // Reroll — regenerate genome keeping the same image
+    // ----------------------------------------------------------
+    reroll() {
+      if (!this.imageEl) return;
+      const genome = imageToGenome(this.imageEl);
+      if (this.genusInput !== "" && this.genusInputValid) {
+        genome.GEN = Number(this.genusInput);
+      }
+      this.genome      = genome;
+      this.unicodeArt  = buildUnicodeArt(genome, 0, null, this.facingRight, "standing");
+      this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
+    },
+
+    // ----------------------------------------------------------
+    // Publish
+    // ----------------------------------------------------------
+    async publish() {
+      if (!this.canPublish) return;
+      if (!this.genusInputValid) {
+        this.notify("Genus must be a whole number from 0 to 999.", "error");
+        return;
+      }
+      this.publishing = true;
+      publishCreature(
+        this.username,
+        this.genome,
+        this.unicodeArt,
+        this.creatureName,
+        0,
+        this.lifecycleStage.name,
+        this.customTitle,
+        this.genusName,
+        (response) => {
+          this.publishing = false;
+          if (response.success) {
+            invalidateGlobalListCaches();
+            invalidateOwnedCachesForUser(this.username);
+            this.notify("🌿 " + this.creatureName + " published to the blockchain!", "success");
+            this.$router.push("/@" + this.username + "/" + response.permlink);
+          } else {
+            this.notify("Publish failed: " + (response.message || "Unknown error"), "error");
+          }
+        }
+      );
+    },
+
+    // ----------------------------------------------------------
+    // Reset back to image picker
+    // ----------------------------------------------------------
+    reset() {
+      this.step          = "pick";
+      this.imageFile     = null;
+      this.imageDataUrl  = null;
+      this.imageEl       = null;
+      this.genome        = null;
+      this.imageStats    = null;
+      this.analysisError = "";
+      this.genusInput    = "";
+      if (this.$refs.fileInput) this.$refs.fileInput.value = "";
+    },
+
+    onFacingResolved(dir) {
+      this.facingRight = dir;
+      if (this.genome) {
+        this.unicodeArt = buildUnicodeArt(this.genome, 0, null, dir, "standing");
+      }
+    },
+
+    hueSwatchStyle(hue) {
+      return `background: hsl(${hue}, 60%, 55%); width:16px; height:16px; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:6px; flex-shrink:0;`;
+    },
+  },
+
+  template: `
+    <div style="margin-top:20px;padding:0 16px 60px;max-width:700px;margin-left:auto;margin-right:auto;">
+
+      <!-- Page header -->
+      <h2 style="color:#a5d6a7;margin:0 0 4px;font-size:1.05rem;letter-spacing:0.04em;">
+        📸 Upload-Inspired Creature
+      </h2>
+      <p style="font-size:13px;color:#555;margin:0 0 20px;line-height:1.6;">
+        Upload any image — a photo, illustration, or sketch — and SteemBiota will extract its
+        colour, texture, and proportions to inspire a new creature genome. The result is a real,
+        valid founder that lives permanently on the Steem blockchain.
+      </p>
+
+      <!-- Login gate -->
+      <div v-if="!username" style="padding:20px;border:1px solid #333;border-radius:10px;background:#111;text-align:center;color:#888;font-size:14px;">
+        Please log in to upload an image and publish a creature.
+      </div>
+
+      <template v-else>
+
+        <!-- ══════════════════════════════════════════════════════
+             STEP 1: IMAGE PICKER
+        ══════════════════════════════════════════════════════ -->
+        <div v-if="step === 'pick'">
+
+          <!-- Error banner from a prior failed analysis -->
+          <div v-if="analysisError"
+            style="margin-bottom:14px;padding:10px 14px;border-radius:8px;
+                   background:#3b0000;border:1px solid #b71c1c;color:#ff8a80;font-size:13px;">
+            ⚠ {{ analysisError }}
+          </div>
+
+          <!-- Drop zone -->
+          <div
+            @click="triggerFileInput"
+            @drop="onDrop"
+            @dragover="onDragOver"
+            @dragleave="onDragLeave"
+            :style="{
+              border: '2px dashed ' + (isDragging ? '#66bb6a' : '#333'),
+              borderRadius: '12px',
+              padding: '48px 24px',
+              textAlign: 'center',
+              cursor: 'pointer',
+              background: isDragging ? '#0d1a0d' : '#0a0a0a',
+              transition: 'all 0.18s',
+              userSelect: 'none'
+            }"
+          >
+            <div style="font-size:2.6rem;margin-bottom:12px;line-height:1;">📸</div>
+            <div style="font-size:15px;color:#a5d6a7;font-weight:bold;margin-bottom:6px;">
+              Drop an image here
+            </div>
+            <div style="font-size:12px;color:#555;">
+              or click to browse — JPG, PNG, GIF, WebP
+            </div>
+          </div>
+
+          <input
+            ref="fileInput"
+            type="file"
+            accept="image/*"
+            style="display:none;"
+            @change="onFileInputChange"
+          />
+
+          <!-- Optional genus override -->
+          <div style="margin-top:20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">
+            <label style="font-size:13px;color:#888;">Genus override (0–999, blank = auto):</label>
+            <input
+              v-model="genusInput"
+              type="number"
+              min="0" max="999" step="1"
+              placeholder="auto"
+              style="width:90px;font-size:13px;padding:5px 8px;"
+            />
+            <span v-if="genusInput !== '' && !genusInputValid" style="font-size:12px;color:#ff8a80;">
+              Must be 0–999
+            </span>
+          </div>
+
+          <!-- What to expect callout -->
+          <div style="margin-top:24px;padding:14px 16px;border-radius:10px;
+                      background:#0d1a0d;border:1px solid #1a3a1a;font-size:12px;
+                      color:#666;line-height:1.7;text-align:left;">
+            <strong style="color:#a5d6a7;">How it works</strong><br/>
+            The dApp analyses your image's dominant colour, contrast, texture complexity,
+            and silhouette proportions. It then searches the genome parameter space for
+            values that produce a creature sharing those traits — same colour family, similar
+            body shape, matching ornament complexity. The creature is algorithmically inspired
+            by your image, not a direct conversion of it.
+          </div>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════════
+             STEP 2: ANALYSING
+        ══════════════════════════════════════════════════════ -->
+        <div v-else-if="step === 'analyse'" style="text-align:center;padding:40px 0;">
+          <div v-if="imageDataUrl" style="margin-bottom:20px;">
+            <img :src="imageDataUrl"
+              style="max-width:200px;max-height:180px;border-radius:10px;
+                     border:1px solid #333;object-fit:contain;background:#111;" />
+          </div>
+          <div style="display:inline-block;width:32px;height:32px;
+            border:3px solid #333;border-top-color:#66bb6a;
+            border-radius:50%;animation:spin 0.8s linear infinite;margin-bottom:12px;"></div>
+          <p style="color:#888;font-size:14px;margin:0;">Analysing image traits…</p>
+          <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+        </div>
+
+        <!-- ══════════════════════════════════════════════════════
+             STEP 3: PREVIEW & PUBLISH
+        ══════════════════════════════════════════════════════ -->
+        <div v-else-if="step === 'preview' && genome">
+
+          <!-- Two-column layout: image | creature canvas -->
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;align-items:start;">
+
+            <!-- Source image -->
+            <div style="text-align:center;">
+              <div style="font-size:11px;color:#444;letter-spacing:0.06em;margin-bottom:6px;text-transform:uppercase;">
+                Source image
+              </div>
+              <img :src="imageDataUrl"
+                style="max-width:100%;max-height:220px;border-radius:8px;
+                       border:1px solid #222;object-fit:contain;background:#0a0a0a;" />
+            </div>
+
+            <!-- Creature canvas -->
+            <div style="text-align:center;">
+              <div style="font-size:11px;color:#444;letter-spacing:0.06em;margin-bottom:6px;text-transform:uppercase;">
+                Inspired creature
+              </div>
+              <creature-canvas-component
+                :genome="genome"
+                :age="0"
+                :fossil="false"
+                :canvas-w="200"
+                :canvas-h="180"
+                @facing-resolved="onFacingResolved"
+                style="margin:0 auto;display:block;border-radius:8px;border:1px solid #222;"
+              ></creature-canvas-component>
+            </div>
+          </div>
+
+          <!-- Creature identity -->
+          <div style="margin-bottom:16px;padding:12px 16px;border-radius:10px;
+                      background:#0d1a0d;border:1px solid #1a3a1a;text-align:center;">
+            <div style="font-size:1.15rem;font-weight:bold;color:#a5d6a7;letter-spacing:0.03em;">
+              🧬 {{ creatureName }}
+            </div>
+            <div style="font-size:13px;color:#888;margin-top:4px;">
+              {{ sexLabel }}
+              <span style="color:#333;margin:0 8px;">·</span>
+              <span :style="{ color: lifecycleStage && lifecycleStage.color }">
+                {{ lifecycleStage && lifecycleStage.icon }} {{ lifecycleStage && lifecycleStage.name }}
+              </span>
+              <span style="color:#333;margin:0 8px;">·</span>
+              Lifespan {{ genome.LIF }} days
+            </div>
+          </div>
+
+          <!-- Image analysis stats -->
+          <div style="margin-bottom:16px;">
+            <div style="font-size:11px;color:#444;letter-spacing:0.06em;margin-bottom:8px;text-transform:uppercase;">
+              Image traits detected
+            </div>
+            <div style="background:#0a0a0a;border:1px solid #1a1a1a;border-radius:8px;overflow:hidden;">
+              <div v-for="row in statRows" :key="row.label"
+                style="display:flex;justify-content:space-between;align-items:center;
+                       padding:6px 12px;border-bottom:1px solid #111;font-size:12px;">
+                <span style="color:#555;display:flex;align-items:center;">
+                  <span v-if="row.label === 'Dominant hue'"
+                    :style="hueSwatchStyle(imageStats.dominantHue)"></span>
+                  {{ row.label }}
+                </span>
+                <span style="color:#aaa;font-family:monospace;">
+                  {{ row.value }}
+                  <span style="color:#333;font-size:11px;margin-left:6px;">{{ row.desc }}</span>
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Post title edit -->
+          <div style="margin-bottom:16px;">
+            <label style="font-size:12px;color:#555;display:block;margin-bottom:4px;text-align:left;">
+              Post title
+            </label>
+            <input
+              v-model="customTitle"
+              type="text"
+              maxlength="120"
+              style="width:100%;font-size:13px;padding:7px 10px;box-sizing:border-box;"
+            />
+          </div>
+
+          <!-- Genus override (editable in preview too) -->
+          <div style="margin-bottom:20px;display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+            <label style="font-size:12px;color:#555;">Genus override (0–999):</label>
+            <input
+              v-model="genusInput"
+              type="number"
+              min="0" max="999" step="1"
+              placeholder="auto"
+              style="width:80px;font-size:13px;padding:5px 8px;"
+              @change="reroll"
+            />
+            <span v-if="genusInput !== '' && !genusInputValid" style="font-size:12px;color:#ff8a80;">
+              Must be 0–999
+            </span>
+          </div>
+
+          <!-- Action buttons -->
+          <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:20px;">
+
+            <!-- Reroll -->
+            <button
+              @click="reroll"
+              style="background:#1a2a1a;border:1px solid #2e7d32;color:#a5d6a7;"
+              title="Regenerate a different creature from the same image"
+            >🎲 Reroll</button>
+
+            <!-- Publish -->
+            <button
+              @click="publish"
+              :disabled="!canPublish"
+              :style="{
+                background: canPublish ? '#2e7d32' : '#1a1a1a',
+                color: canPublish ? '#fff' : '#444',
+                fontWeight: 'bold',
+                minWidth: '140px'
+              }"
+            >
+              {{ publishing ? "Publishing…" : "🌿 Publish Creature" }}
+            </button>
+
+            <!-- Start over -->
+            <button @click="reset" style="background:#1a1a1a;color:#555;border:1px solid #2a2a2a;">
+              ✕ Start over
+            </button>
+          </div>
+
+          <!-- No keychain notice -->
+          <div v-if="!hasKeychain"
+            style="font-size:12px;color:#ff8a80;text-align:center;margin-top:-8px;margin-bottom:16px;">
+            ⚠ Steem Keychain extension is not installed — publishing unavailable.
+          </div>
+
+          <!-- Honesty notice -->
+          <div style="padding:12px 14px;border-radius:8px;background:#0d0a00;
+                      border:1px solid #2a2000;font-size:12px;color:#666;line-height:1.7;">
+            <strong style="color:#ffb74d;">Note:</strong>
+            The creature is <em>inspired</em> by your image, not a direct conversion.
+            It shares your image's colour palette and approximate body proportions,
+            but remains a procedural SteemBiota creature — generated by genome, not pixels.
+            The source image is not stored on-chain; only the genome is published.
+          </div>
+        </div>
+
+      </template>
+    </div>
+  `
+};
