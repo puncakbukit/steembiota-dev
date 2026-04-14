@@ -338,7 +338,8 @@ function imageToGenome(img) {
   const { GEN, CLR } = fitHue(stats.dominantHue);
   const MOR           = fitMor(stats.aspectRatio);
   const APP           = fitApp(stats.edgeDensity);
-  const ORN           = fitOrn(stats.colourfulness, stats.litVariance);
+  // Pass edgeDensity here to help determine fur/texture
+  const ORN           = fitOrn(stats.colourfulness, stats.litVariance, stats.edgeDensity);
 
   // Randomise lifespan and fertility (these have no image correspondence)
   const LIF       = 80 + Math.floor(Math.random() * 80);
@@ -347,7 +348,7 @@ function imageToGenome(img) {
 
   return {
     GEN,
-    SX:  Math.floor(Math.random() * 2),
+    SX: Math.floor(Math.random() * 2),
     MOR,
     APP,
     ORN,
