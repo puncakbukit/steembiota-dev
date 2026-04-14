@@ -290,27 +290,38 @@ function fitMor(targetRatio) {
 
 /**
  * Map edge density (0–1) to APP seed.
- * High edge density → higher APP (more varied appendages, potentially wings).
+ * High edge density → higher APP (more varied appendages, e.g., complex ears/wings).
  * APP is in [0, 9999].
  */
 function fitApp(edgeDensity) {
-  // Linear map: 0 edge → APP near 0; max edge → APP near 9999
-  // Add random jitter (±1500) so two images with the same density
-  // don't always produce identical appendages.
-  const base  = Math.round(edgeDensity * 9999);
-  const jitter = Math.floor(Math.random() * 3000) - 1500;
+  // Linear mapping to full range
+  const base = Math.round(edgeDensity * 9999);
+
+  // Slightly reduced jitter for more stability while still allowing variation
+  const jitter = Math.floor(Math.random() * 2000) - 1000;
+
   return Math.max(0, Math.min(9999, base + jitter));
 }
 
 /**
- * Map colourfulness + litVariance to ORN seed.
- * Colourful, high-contrast images → more ornamental creatures.
+ * Map colourfulness + litVariance + edgeDensity to ORN seed.
+ * High colourfulness + contrast + detail → richer ornamentation / fur texture.
  */
-function fitOrn(colourfulness, litVariance) {
-  // litVariance peaks around ~800 for high-contrast, ~0 for flat
+function fitOrn(colourfulness, litVariance, edgeDensity) {
+  // Normalize lighting variance (~0–800 → 0–1)
   const normLit = Math.min(litVariance / 800, 1.0);
-  const base    = Math.round((colourfulness * 0.6 + normLit * 0.4) * 9999);
-  const jitter  = Math.floor(Math.random() * 2000) - 1000;
+
+  // Blend edge detail + contrast into a texture driver
+  const textureScore = (edgeDensity * 0.7) + (normLit * 0.3);
+
+  // Final weighted combination
+  const base = Math.round(
+    (colourfulness * 0.4 + textureScore * 0.6) * 9999
+  );
+
+  // Moderate jitter for natural variation
+  const jitter = Math.floor(Math.random() * 1000) - 500;
+
   return Math.max(0, Math.min(9999, base + jitter));
 }
 
