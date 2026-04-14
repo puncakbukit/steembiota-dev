@@ -39,22 +39,49 @@ Files: `index.html`, `blockchain.js`, `components.js`, `accessories.js`, `upload
 
 ## Creature Genome
 
-Each creature is defined by ten integer genes:
+Each creature is defined by ten integer genes, plus an optional provenance tag:
 
 | Gene | Description | Range |
 |---|---|---|
-| `GEN` | Genus ID — species barrier | 0–999 |
+| `GEN` | Genus ID — species barrier; also determines colour palette family (GEN % 8) and eye style (GEN % 4) | 0–999 |
 | `SX` | Sex (0 = Male, 1 = Female) | 0–1 |
-| `MOR` | Morphology seed — body shape and tail style | 0–9999 |
-| `APP` | Appendage seed — ear shape, paw shape, wing presence | 0–9999 |
-| `ORN` | Ornamentation seed — glow orbs, mane, pattern accent | 0–9999 |
-| `CLR` | Colour hue offset | 0–359 degrees |
+| `MOR` | Morphology seed — drives body length (80–110 px), body height (42–60 px), head size (26–38 px), tail curve (0.4–0.9), and tail style (Tapered / Tufted / Plumed) | 0–9999 |
+| `APP` | Appendage seed — drives leg length (44–64 px), leg thickness (7–12 px), ear height (22–36 px), ear width (10–16 px), ear style (Pointed / Rounded / Floppy), wing presence (>0.72 threshold), and wing span (24–44 px) | 0–9999 |
+| `ORN` | Ornamentation seed — drives glow orb count (2–5), energy ribbon count (1–3), body pattern type (none / spots / dapple), orb hue offset, chest marking presence, mane wisp presence, and fur length (Smooth / Short / Fuzzy / Shaggy) | 0–9999 |
+| `CLR` | Hue offset applied on top of the palette base: `finalHue = (paletteBase + CLR) % 360` | 0–359 |
 | `LIF` | Lifespan in real days | 80–159 |
-| `FRT_START` | Fertility window start (days) | varies |
-| `FRT_END` | Fertility window end (days) | varies |
-| `MUT` | Mutation tendency — affects offspring variation | 0–2 (founders); 0–5 (bred offspring) |
+| `FRT_START` | Fertility window start (days from birth) | varies |
+| `FRT_END` | Fertility window end (days from birth) | varies |
+| `MUT` | Mutation tendency — scales per-gene mutation probability for offspring | 0–2 (founders); 0–5 (bred offspring) |
+| `_source` | Optional provenance tag — `"image-upload"` for creatures created via the Upload page; absent for random founders and offspring | string or absent |
 
-The genome is stored inside every creature post in a fenced code block and in `json_metadata`, so any client can reconstruct the creature directly from the blockchain.
+All ten numeric genes are stored verbatim inside every creature post (in a fenced code block and in `json_metadata.steembiota.genome`), so any client can reconstruct and render the creature entirely from the blockchain.
+
+### Colour Palette System
+
+GEN selects one of eight fixed palette bases, and CLR offsets the hue within that palette:
+
+| Palette index (GEN % 8) | Base hue |
+|---|---|
+| 0 | 160° (cyan-green) |
+| 1 | 200° (blue-green) |
+| 2 | 280° (violet) |
+| 3 | 30° (orange) |
+| 4 | 340° (pink-red) |
+| 5 | 100° (yellow-green) |
+| 6 | 240° (blue) |
+| 7 | 55° (yellow) |
+
+### Derived Visual Traits
+
+Four visual traits are derived directly from genome integers (not from the seeded PRNG):
+
+| Trait | Source | Values |
+|---|---|---|
+| Eye style | `GEN % 4` | 0: Round, 1: Slit (reptilian), 2: Almond, 3: Large iris (anime) |
+| Tail style | First `MOR` PRNG draw (post body/height) — `floor(rng() * 3)` | 0: Tapered, 1: Tufted, 2: Plumed |
+| Ear style | Continuation of `APP` PRNG stream — `floor(rng() * 3)` | 0: Pointed, 1: Rounded, 2: Floppy |
+| Fur length | Continuation of `ORN` PRNG stream — `floor(rng() * 4)` | 0: Smooth, 1: Short, 2: Fuzzy, 3: Shaggy |
 
 ### Genus Names
 
@@ -87,74 +114,140 @@ If a post is deleted on Steem (`delete_comment` op), the API returns the post wi
 
 ## Visual Rendering — Canvas
 
-Every creature is rendered procedurally from its genome on a 400×320 HTML5 Canvas. The same genome always produces the same base visual. Three sources of per-load variation are layered on top: random facing direction, random pose, and live expression driven by game state.
+Every creature is rendered procedurally from its genome on a 400×320 HTML5 Canvas (configurable via `canvasW`/`canvasH` props — the Upload preview uses 200×180). The same genome always produces the same base visual. Three sources of per-load variation are layered on top: random facing direction, random pose, and live expression driven by game state.
 
-### Anatomy (painter's algorithm, back to front)
+### Phenotype Derivation (`buildPhenotype`)
 
-Ground shadow → energy ribbons → back legs (dimmed for depth) → tail → torso with gradient → chest marking → body pattern → front legs → neck → mane wisps → head with snout and nose → ears → eye → **face expression overlay** → dorsal wing/fin → glowing orb nodes → fertility aura
+All renderable traits are derived in a single `buildPhenotype(genome, age, feedState)` call before any drawing occurs. Three seeded mulberry32 PRNGs are instantiated — one per seed gene — and consumed in a fixed order so the mapping from genome integer to visual output is always identical:
 
-### Genome → Visual Mapping
-
-| Gene | Visual effect |
+| PRNG seed | Traits derived (in draw order) |
 |---|---|
-| `GEN` | Colour palette family (8 palette groups) |
-| `MOR` | Body length, body height, head size, tail curl |
-| `APP` | Leg length, leg thickness, ear height/width, wing presence |
-| `ORN` | Glow orb count and hue, chest marking, mane wisps, body pattern type |
-| `CLR` | Hue offset applied on top of palette base |
-| `LIF` / age | Body scale (45% at birth → 100% at Young Adult → 75% at Fossil) |
-| Feed health | Colour saturation and lightness boost |
+| `MOR` | `bodyLen` (80–110 px), `bodyH` (42–60 px), `headSize` (26–38 px), `tailCurve` (0.4–0.9), `tailStyle` (0–2) |
+| `APP` | `legLen` (44–64 px), `legThick` (7–12 px), `earH` (22–36 px), `earW` (10–16 px), `hasWings` (>0.72), `wingSpan` (24–44 px), `earStyle` (0–2) |
+| `ORN` | `glowOrbs` (2–5), `ribbons` (1–3), `patternType` (0–2), `orbHue`, `hasChestMark`, `hasMane`, `furLength` (0–3) |
+
+Non-PRNG traits derived directly from gene integers: `finalHue = (paletteBase[GEN%8] + CLR) % 360`, `eyeStyle = GEN % 4`, `eyeRadius` (9 px at Baby, 7 px at all later stages).
+
+### Lifecycle Scalars
+
+Body scale and ornament visibility evolve continuously through the lifecycle:
+
+| Stage | Age % | `bodyScale` | `ornamentScale` | `patternOpacity` |
+|---|---|---|---|---|
+| Baby | 0–4% | 0.45 | 0.00 | 0.10 |
+| Toddler | 5–11% | 0.60 | 0.15 | 0.30 |
+| Child | 12–24% | 0.78 | 0.40 | 0.60 |
+| Teenager | 25–39% | 0.90 | 0.75 | 0.90 |
+| Young Adult | 40–59% | 1.00 | 1.00 | 1.00 |
+| Middle-Aged | 60–79% | 0.98 | 0.88 | 0.90 |
+| Elder | 80–99% | 0.92 | 0.70 | 0.75 |
+| Fossil | 100%+ | 0.75 | 0.00 | 0.00 |
+
+### Painter's Algorithm (draw order, back to front)
+
+1. **Fossil shortcut** — if the creature is fossilised, a single grey ellipse with procedural crack lines (`MOR+11` seed) is drawn instead and the function returns early.
+2. **Ground shadow** — radial gradient ellipse scaled per pose (`shadowScale`).
+3. **Energy ribbons** — bezier curves trailing from the torso tail-side; drawn only when `ornamentScale > 0.3`; colour derived from `orbHue`.
+4. **Back legs (depth)** — drawn at 62% alpha for perceived depth; two back legs in standing pose, or pose/gait override.
+5. **Front legs** — full alpha; two front legs in standing pose, or pose/gait override.
+6. **Tail** — `_drawTailPosed` (curved bezier, gradient tip) or `_drawTailWrap` (curled under body) depending on pose.
+7. **Torso** — three-stop vertical linear gradient ellipse, rotated by `torsoAngle` (pose-dependent).
+8. **Chest marking** — radial gradient spot clipped to the torso ellipse; present when `hasChestMark` and `ornamentScale > 0.2`.
+9. **Body pattern** — spots (10 circles) or dapple (5 ellipses) clipped to torso; present when `patternType > 0` and `patternOpacity > 0.1`.
+10. **Worn wings accessory** — composited from an off-screen canvas before neck so the torso occludes wing roots.
+11. **Necklace underlay** — composited before neck/head so creature geometry naturally occludes the top arc.
+12. **Neck** — bezier quad fill connecting torso to head, angle driven by `neckAngle` pose transform.
+13. **Mane wisps** — 7 short angled strokes along the neck/back ridge; drawn when `hasMane` and `ornamentScale > 0.2`.
+14. **Head** — radial gradient circle.
+15. **Snout** — lighter ellipse offset left from head centre; nose dot on snout.
+16. **Ears** — two ears (front and behind), style driven by `earStyle` (Pointed / Rounded / Floppy).
+17. **Eye** — iris shape driven by `eyeStyle` (Round / Slit / Almond / Large iris), with radial iris gradient, pupil, dual highlight dots. Sleeping pose substitutes a curved arc.
+18. **Face expression overlay** — brow line, mouth arc, extras (sparkles, teardrop, rosy cheeks); only rendered at Toddler stage and beyond (`pct >= 0.05`).
+19. **Dorsal wing/fin** — rendered when `hasWings` and `ornamentScale > 0.35`.
+20. **Glowing orb nodes** — rendered when `ornamentScale > 0.4`.
+21. **Fertility aura** — full-body radial glow when the creature is within its effective fertility window.
+22. **Worn hat / crown / shirt accessories** — composited on top of everything.
+
+### Genome → Visual Summary
+
+| Gene | Visual effects |
+|---|---|
+| `GEN` | Colour palette family (8 groups); eye style (Round / Slit / Almond / Large iris) |
+| `MOR` | Body length and height (body aspect ratio); head size; tail curl depth; tail style (Tapered / Tufted / Plumed) |
+| `APP` | Leg length and thickness; ear height, width, and style (Pointed / Rounded / Floppy); wing presence and span |
+| `ORN` | Glow orb count and hue; energy ribbon count; chest marking; mane wisps; body pattern (none / spots / dapple); fur length (Smooth / Short / Fuzzy / Shaggy) |
+| `CLR` | Hue offset applied on top of palette base: `finalHue = (base + CLR) % 360` |
+| `LIF` / age | Body scale (45% Baby → 100% Young Adult → 75% Fossil); ornament visibility |
+| Feed health | Colour saturation boost (up to ±15) and lightness boost (up to ±8) applied to the whole body |
 
 ### Facing Direction
 
-On each page load the creature is mirrored left or right at random via a canvas transform. The direction is stable for the lifetime of that component instance.
+On each page load the creature is mirrored left or right at random via a canvas `scale(-1, 1)` transform. The direction is stable for the lifetime of that component instance and is also updated dynamically by the autonomous movement loop (the creature flips to face its direction of travel).
 
 ### Poses
 
 On each page load the creature is assigned one of five poses at random. The pose is stable for the lifetime of that component instance.
 
-| Pose | Description |
-|---|---|
-| 🐾 Standing | Default upright side profile |
-| 👀 Alert | Torso raised, head lifted high, tail swept straight up |
-| 🎉 Playful | Play-bow: front legs stretched forward and low, rear elevated, tail up |
-| 🪑 Sitting | Torso tilted rear-down (~17°), folded haunches resting on the ground, front legs straight, tail wrapped under body |
-| 💤 Sleeping | Body flat and low, head resting on ground, all legs tucked as flat pads, tail curled under, eye closed |
+| Pose | Description | Key transform values |
+|---|---|---|
+| 🐾 Standing | Default upright side profile | `torsoAngle = -0.08`, no overrides |
+| 👀 Alert | Torso raised, head lifted high, tail swept up | Head +10 px up, `neckAngle = 0.4`, `tailCurlMul = 0.3`, `shadowScale = 0.9` |
+| 🎉 Playful | Play-bow: front legs stretched forward and low, rear elevated | Head +12 px down, `neckAngle = -0.5`, `tailUp = 1.0`, custom `legOverride` |
+| 🪑 Sitting | Torso tilted rear-down ~22°, folded haunches on ground | `torsoAngle = 0.30`, rear haunches at dropped Y, tail wrapped (`tailCurlMul = 1.6`) |
+| 💤 Sleeping | Body flat and low, head resting on ground, legs tucked | `oyDelta = +28*sc`, head +18 px down, eye closed arc, `tailCurlMul = 2.0` |
 
-The torso ellipse rotation, haunch/leg positions, head and neck angle, tail shape, and shadow scale are all adjusted per pose. Fossil creatures always render in a flat fossilised form regardless of pose. A small italic label below the canvas shows the active pose.
+Fossil creatures always render with the flat fossilised ellipse+cracks form regardless of pose.
+
+### Eye Styles
+
+The eye iris shape, pupil shape, and scaling all vary by `eyeStyle`:
+
+| Style | `GEN % 4` | Iris shape | Pupil shape |
+|---|---|---|---|
+| Round | 0 | Circle | Standard oval offset |
+| Slit | 1 | Tall ellipse (0.7× wide) | Vertical reptilian slit |
+| Almond | 2 | Wide ellipse (1.2× wide, 0.7× tall, 0.2 rad tilt) | Standard oval |
+| Large iris | 3 | Circle | Large oval (0.7×0.75 of `eyeR`) |
+
+Alert expression scales `eyeR × 1.15` regardless of style. Sad and hungry expressions shift the pupil 0.14 `eyeR` downward.
 
 ### Face Expressions
 
-Expressions are derived from live game state (feedState + activityState) and re-evaluated whenever data reloads. Pose overrides take highest priority.
+Expressions are derived from live game state (`feedState` + `activityState`) and re-evaluated whenever data reloads. Pose overrides take highest priority.
 
 | Expression | Trigger | Visual |
 |---|---|---|
-| 😴 Sleepy | Sleeping pose | Closed-eye arc, drooped heavy brow, tiny neutral mouth |
-| 👀 Alert | Alert pose | Enlarged eye (×1.15), raised straight brow, neutral mouth |
-| 🎉 Excited | Playful pose | Wide open smile + tongue dot, arched brow, star glints beside eye |
-| ✨ Thriving | Health ≥ 80% (or play-boosted) | Big smile + tongue, raised brow, rosy cheek blush, star glints |
-| 😊 Happy | Health ≥ 55% | Gentle smile, relaxed raised brow |
-| 😐 Content | Health ≥ 30% or no data yet | Neutral straight mouth, flat brow |
-| 😟 Hungry | Health > 0% but < 30% | Slight frown, one-sided worried brow, pupil shifted down |
-| 😢 Sad | Completely unfed (health = 0%) | Pronounced frown, inward V-brow, teardrop below eye, pupil down |
+| 😴 Sleepy | Sleeping pose | Closed-eye arc (no iris drawn), drooped brow at 60% alpha, tiny neutral mouth at 45% alpha |
+| 👀 Alert | Alert pose | Eye scaled ×1.15, straight raised brow, neutral mouth |
+| 🎉 Excited | Playful pose | Wide open smile + tongue dot, arched brow, two star glints beside eye |
+| ✨ Thriving | Boosted health ≥ 80% | Big open smile + tongue, arched brow, rosy cheek blush, two star glints |
+| 😊 Happy | Boosted health ≥ 55% | Gentle curved smile, relaxed raised brow |
+| 😐 Content | Boosted health ≥ 30% or no data | Neutral straight-line mouth, flat brow |
+| 😟 Hungry | Health > 0% but boosted < 30% | Downward-corner frown, one-sided worried brow, pupil shifted down |
+| 😢 Sad | Health = 0% (completely unfed) | Pronounced frown, inward V-brow, teardrop ellipse below eye, pupil down |
 
-Play activity adds up to +25% to the effective health score before picking the expression, so a well-played but underfed creature can still appear happier. Expressions only appear from Toddler stage onward.
+Play mood adds up to +25% to the effective health score before expression selection (`boosted = min(health + moodPct * 0.25, 1.0)`). Expressions only appear from Toddler stage onward (`pct >= 0.05`).
 
 ### Reaction Animation
 
-Whenever a creature is successfully fed, played with, or walked, the canvas plays a short reaction sequence. The creature cycles through four pose+expression pairs (Standing→Alert→Playful→Sitting, paired with Alert→Alert→Excited→Happy), repeated 2–3 times at random, each step lasting 2–3 seconds. After the sequence finishes the creature returns to its resting pose and normal game-state expression. Any in-progress animation is cancelled and restarted if another interaction completes while it is running.
+Whenever a creature is successfully fed, played with, or walked, the canvas plays a short reaction sequence. The creature cycles through four fixed pose+expression pairs — Standing/Alert → Alert/Alert → Playful/Excited → Sitting/Happy — repeated 2 or 3 times at random (chosen per trigger), with each step lasting 2000–3000 ms at random. The autonomous behaviour loop is paused for the duration (velocities zeroed, position preserved). After the sequence finishes, both `animPose` and `animExpression` are cleared and autonomous behaviour resumes. Any in-progress animation is cancelled and restarted cleanly if another interaction fires while it is running.
+
+### Click Interaction
+
+Clicking the canvas triggers a hit test against the body ellipse using the standard ellipse equation `(dx/a)² + (dy/b)² ≤ 1`. A hit on the body fires a **poke reaction** — a short 1.2–1.5 s flash through three moods cycling in order: Surprised (alert/alert), Happy (playful/happy), Grumpy (sitting/hungry). A click on empty canvas space triggers **walk-to**: the creature walks directly toward the clicked point at 40 px/s using a delta-time loop, arriving within 6 px before returning to idle.
 
 ### Autonomous Behaviour
 
-Beyond static posing, the creature canvas runs an autonomous movement loop (for non-fossil creatures):
+Beyond static posing, the creature canvas runs a continuous movement loop (`requestAnimationFrame`) for all non-fossil creatures:
 
-- idle drift
-- walking / running bursts
-- occasional jump arcs
-- temporary sleep state
-- click-to-redirect movement ("walk to" interaction)
+- **Idle** — creature stands still; transitions to walk/run/jump/sleep after a random delay (staggered 0–3 s on mount to avoid lockstep on multi-creature pages).
+- **Walk** — horizontal + vertical velocity; leg cycle at 2.5 Hz; body bob at 1.1 Hz amplitude 5 px.
+- **Run** — faster leg cycle (4.5 Hz); body bob at 1.8 Hz amplitude 3 px; wider stride (0.52 rad vs 0.32 rad); more leg air-time.
+- **Jump** — upward impulse decaying under 520 px/s² gravity; alert pose on landing, then idle.
+- **Sleep** — autonomous sleep state; creature enters sleeping pose.
+- **Walk-to** — directed walk toward a canvas-offset target (from canvas click); arrives within 6 px then idles.
 
-Movement state is simulated client-side with requestAnimationFrame and restored from session storage so position persists between route changes within the same browsing session.
+Edge bounce: the creature flips facing direction and reverses velocity when it reaches ±38% of canvas width or height. Position is persisted in `sessionStorage` keyed on `sb_pos_{GEN}_{MOR}` so the creature remembers where it was between route changes within the same browsing session.
 
 ---
 
@@ -368,50 +461,55 @@ The **📸 Upload** page (`/#/upload`, login required) lets users derive a new f
 
 ### How it works
 
-The app does not convert pixels directly into creature art. Instead it extracts visual traits from the image and fits genome values that produce a creature sharing those traits. The creature is algorithmically *inspired by* the image; it remains a fully procedural SteemBiota creature rendered from its genome, not from the source pixels. The source image is never stored on-chain — only the genome is published.
+The app does not convert pixels directly into creature art. Instead it extracts seven visual statistics from the image and fits genome values that produce a creature sharing those traits. The creature is algorithmically *inspired by* the image; it remains a fully procedural SteemBiota creature rendered entirely from its genome, not from the source pixels. The source image is never stored on-chain — only the genome is published.
 
 ### Analysis pipeline (client-side, no server)
 
-1. The uploaded file is drawn into a 64×64 analysis canvas in the browser.
-2. Pixel statistics are extracted from the downsampled image:
+**Step 1 — Downsample.** The uploaded file is decoded into an `HTMLImageElement` then drawn into a 64×64 analysis canvas (`samplePixels`). All subsequent statistics operate on this 4096-pixel RGBA array, making analysis sub-millisecond in all modern browsers.
 
-| Stat | How computed |
-|---|---|
-| Dominant hue | Circular mean of HSL hue across all non-grey pixels |
-| Mean saturation | Average saturation of non-grey pixels |
-| Mean lightness | Average lightness of all pixels |
-| Contrast | Lightness variance across all pixels |
-| Edge density | Fraction of high-gradient pixels via a Sobel filter |
-| Colourfulness | Fraction of pixels with saturation > 12% |
-| Aspect ratio | Width ÷ height of the non-background silhouette bounding box |
+**Step 2 — Pixel statistics (`analysePixels`).** Each pixel is converted to HSL. Seven statistics are extracted:
 
-3. Each stat is mapped to a genome field:
-
-| Image stat | Gene | Mapping |
+| Statistic | Computation | Maps to |
 |---|---|---|
-| Dominant hue | `GEN` + `CLR` | Finds the palette + hue-offset pair whose rendered colour exactly matches the image hue (zero rounding error) |
-| Aspect ratio | `MOR` | Searches all 10,000 MOR seeds via coarse + fine scan to find the body shape whose rendered width/height ratio is closest to the image silhouette |
-| Edge density | `APP` | Linear map with jitter — detailed images get more varied appendages |
-| Colourfulness + contrast | `ORN` | Weighted blend — vibrant high-contrast images produce more ornamental creatures |
-| `LIF`, `FRT_*`, `SX`, `MUT` | — | Randomised; no image correspondence |
+| `dominantHue` | Circular mean of HSL hue across all non-grey pixels (saturation > 12%) using `atan2(Σsin, Σcos)` | `GEN` + `CLR` |
+| `meanSat` | Arithmetic mean saturation of non-grey pixels | Display only |
+| `meanLit` | Arithmetic mean lightness of all opaque pixels (alpha ≥ 32) | Display only |
+| `litVariance` | Variance of per-pixel lightness values — proxy for contrast and fur texture | `ORN` (30% weight) |
+| `edgeDensity` | Fraction of pixels with Sobel gradient magnitude > 0.18 (computed on a greyscale luminance matrix) | `APP` (linear map); `ORN` (70% weight) |
+| `colourfulness` | Fraction of opaque pixels with saturation > 12% | `ORN` (40% weight) |
+| `aspectRatio` | Width ÷ height of the non-near-white silhouette bounding box (pixels with lightness < 90%); falls back to original image W/H if detection fails | `MOR` |
+
+**Step 3 — Genome fitting.** Each statistic is mapped to one or more genome genes:
+
+| Gene | Fitting function | Detail |
+|---|---|---|
+| `GEN` + `CLR` | `fitHue(dominantHue)` | Iterates all 8 palette bases. For each, computes `CLR = (targetHue − base + 360) % 360` and measures `hueDist(finalHue, targetHue)`. Picks the best pair. `GEN` is drawn randomly from integers 0–999 that map to the winning palette index (`GEN % 8 === paletteIndex`). |
+| `MOR` | `fitMor(aspectRatio)` | Target ratio is clamped to the achievable range (1.33–2.62). Runs a coarse scan every 37 steps across all 10,000 MOR values using the same mulberry32 PRNG as the renderer (`morAspectRatio(mor)`), then refines ±200 steps around the best candidate. |
+| `APP` | `fitApp(edgeDensity)` | Linear map: `base = round(edgeDensity × 9999)`, plus ±1000 random jitter. |
+| `ORN` | `fitOrn(colourfulness, litVariance, edgeDensity)` | Weighted blend: `textureScore = edgeDensity × 0.7 + normLitVariance × 0.3`; `base = round((colourfulness × 0.4 + textureScore × 0.6) × 9999)`, plus ±500 random jitter. |
+| `LIF` | Random | 80 + `floor(random() × 80)` — no image correspondence. |
+| `FRT_START` | Random | `min(20 + floor(random() × 20), LIF − 10)`. |
+| `FRT_END` | Random | `min(60 + floor(random() × 20), LIF − 1)`. |
+| `SX` | Random | `floor(random() × 2)`. |
+| `MUT` | Random | `floor(random() × 3)`. |
 
 ### Reroll
 
-Because `APP` and `ORN` include random jitter in their fitting, clicking **Reroll** re-runs the analysis on the cached image element and produces a different valid creature that still shares the same colour family and body proportions as the original image.
+Because `APP` and `ORN` include random jitter, and `GEN` is drawn randomly among valid palette-matching integers, clicking **🎲 Reroll** re-runs `imageToGenome()` on the cached `HTMLImageElement` and produces a different creature that still shares the same colour family and body proportions as the source image.
 
 ### Genus override
 
-As with the standard founder creator on the Home page, users can optionally specify a genus number (0–999) before or after analysis. If set, the fitted `GEN` is overridden while `CLR` is recalculated to preserve the correct colour for that palette.
+Users can optionally type a genus number (0–999) before or after analysis. If provided, the fitted `GEN` value is replaced directly. `CLR` is **not** recalculated when overriding the genus — only `GEN` changes, which shifts the palette base and therefore the rendered hue.
 
 ### Published genome
 
-The resulting genome is published as a standard `type: "founder"` creature post via `publishCreature()` — identical in every way to a manually generated founder. It earns the same 100 XP and appears in all the same lists, filters, and profile tabs. A `_source: "image-upload"` field is attached to the genome object and is visible in the genome table on the creature page.
+The resulting genome is published as a standard `type: "founder"` creature post via `publishCreature()`. A `_source: "image-upload"` field is attached to the genome and is visible in the on-chain post body and in the genome table on the creature page. Image-inspired founders earn the same 100 XP, participate in the same breeding system, and appear in all the same grids and filters as random founders. The 🌱 Origin Creature provenance badge applies equally to both.
 
 ### UI flow
 
-1. **Pick** — drag-and-drop or browse to select an image file (JPG, PNG, GIF, WebP)
-2. **Analyse** — brief loading state while the browser extracts pixel stats
-3. **Preview** — side-by-side comparison of the source image and the generated creature canvas, with a stats table showing each detected trait and its gene mapping, an editable post title, optional genus override, and Reroll / Publish / Start over actions
+1. **Pick** — drag-and-drop zone or file browser (JPG, PNG, GIF, WebP); optional genus pre-override
+2. **Analyse** — brief spinner while the browser downsamples and runs pixel stats + genome fitting
+3. **Preview** — side-by-side: source image left, generated creature canvas (200×180) right; stats table showing each detected trait and its genome mapping; editable post title; genus override; **🎲 Reroll**, **🌿 Publish Creature**, and **✕ Start over** buttons
 4. **Published** — on success, navigates directly to the new creature's page
 
 ---
