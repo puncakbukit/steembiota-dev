@@ -2119,48 +2119,78 @@ if (pt.eyeClosed) {
     // ----------------------------------------------------------
     // Tail variants
     // ----------------------------------------------------------
-    _drawTailPosed(ctx, p, sc, ox, oy, hue, sat, lit, pt) {
-      const tX0 = ox + p.bodyLen * sc * 0.82;
-      const tY0 = oy - p.bodyH * sc * 0.08;
-      const curl = p.tailCurve * pt.tailCurlMul;
-      const upShift = pt.tailUp * p.bodyH * sc * 1.5;
+_drawTailPosed(ctx, p, sc, ox, oy, hue, sat, lit, pt) {
+  const tX0 = ox + p.bodyLen * sc * 0.82;
+  const tY0 = oy - p.bodyH * sc * 0.08;
+  const curl = p.tailCurve * pt.tailCurlMul;
+  const upShift = pt.tailUp * p.bodyH * sc * 1.5;
 
-      const cp1x = tX0 + 32 * sc;
-      const cp1y = tY0 - 30 * sc * curl - upShift * 0.4;
-      const cp2x = tX0 + 65 * sc;
-      const cp2y = tY0 - 55 * sc * curl - upShift * 0.8;
-      const endX = tX0 + 55 * sc;
-      const endY = tY0 - 78 * sc * curl - upShift;
+  const cp1x = tX0 + 32 * sc;
+  const cp1y = tY0 - 30 * sc * curl - upShift * 0.4;
+  const cp2x = tX0 + 65 * sc;
+  const cp2y = tY0 - 55 * sc * curl - upShift * 0.8;
+  const endX = tX0 + 55 * sc;
+  const endY = tY0 - 78 * sc * curl - upShift;
 
-      const tailGr = this.linGrad(ctx, tX0, tY0, endX, endY,
-        [
-          [0,   this.hsl(hue, sat - 5, lit - 8)],
-          [0.5, this.hsl(hue, sat, lit + 4)],
-          [1,   this.hsl((hue + 30) % 360, sat + 15, lit + 18)],
-        ]
+  const tailGr = this.linGrad(ctx, tX0, tY0, endX, endY, [
+    [0,   this.hsl(hue, sat - 5, lit - 8)],
+    [0.5, this.hsl(hue, sat, lit + 4)],
+    [1,   this.hsl((hue + 30) % 360, sat + 15, lit + 18)],
+  ]);
+
+  ctx.fillStyle   = tailGr;
+  ctx.strokeStyle = this.hsl(hue, sat, lit - 14);
+
+  // === STYLE MODIFIER (Plumed Tail) ===
+  if (p.tailStyle === 2) {
+    ctx.lineWidth = 15 * sc;
+    ctx.lineCap = "round";
+    // (Optional fluff strokes can be added here later)
+  } else {
+    ctx.lineWidth = 1.5;
+  }
+
+  ctx.beginPath();
+  ctx.moveTo(tX0, tY0 + 10 * sc);
+  ctx.bezierCurveTo(cp1x, cp1y + 12 * sc, cp2x + 4 * sc, cp2y + 10 * sc, endX + 8 * sc, endY);
+  ctx.bezierCurveTo(cp2x - 6 * sc, cp2y - 14 * sc, cp1x - 10 * sc, cp1y - 12 * sc, tX0, tY0 - 10 * sc);
+  ctx.closePath();
+
+  // Draw core tail
+  ctx.fill();
+  ctx.stroke();
+
+  // === STYLE MODIFIER (Tufted Tail Tip) ===
+  if (p.tailStyle === 1) {
+    ctx.fillStyle = this.hsl((hue + 30) % 360, sat, lit + 20);
+    ctx.beginPath();
+    for (let i = 0; i < 8; i++) {
+      const a = (i / 8) * Math.PI * 2;
+      ctx.arc(
+        endX + Math.cos(a) * 5 * sc,
+        endY + Math.sin(a) * 5 * sc,
+        8 * sc,
+        0,
+        Math.PI * 2
       );
-      ctx.fillStyle   = tailGr;
-      ctx.strokeStyle = this.hsl(hue, sat, lit - 14);
-      ctx.lineWidth   = 1.5;
-      ctx.beginPath();
-      ctx.moveTo(tX0, tY0 + 10 * sc);
-      ctx.bezierCurveTo(cp1x, cp1y + 12 * sc, cp2x + 4 * sc, cp2y + 10 * sc, endX + 8 * sc, endY);
-      ctx.bezierCurveTo(cp2x - 6 * sc, cp2y - 14 * sc, cp1x - 10 * sc, cp1y - 12 * sc, tX0, tY0 - 10 * sc);
-      ctx.closePath();
-      ctx.fill(); ctx.stroke();
+    }
+    ctx.fill();
+  }
 
-      const tipGr = this.radGrad(ctx, endX, endY, 0, 20 * sc,
-        [
-          [0,   this.hsl((hue + 40) % 360, sat + 20, lit + 32, 0.9)],
-          [0.6, this.hsl((hue + 20) % 360, sat + 10, lit + 18, 0.5)],
-          [1,   this.hsl(hue, sat, lit, 0)],
-        ]
-      );
-      ctx.fillStyle = tipGr;
-      ctx.globalAlpha = 0.85;
-      ctx.beginPath(); ctx.arc(endX, endY, 20 * sc, 0, Math.PI * 2); ctx.fill();
-      ctx.globalAlpha = 1;
-    },
+  // === EXISTING TIP GLOW ===
+  const tipGr = this.radGrad(ctx, endX, endY, 0, 20 * sc, [
+    [0,   this.hsl((hue + 40) % 360, sat + 20, lit + 32, 0.9)],
+    [0.6, this.hsl((hue + 20) % 360, sat + 10, lit + 18, 0.5)],
+    [1,   this.hsl(hue, sat, lit, 0)],
+  ]);
+
+  ctx.fillStyle = tipGr;
+  ctx.globalAlpha = 0.85;
+  ctx.beginPath();
+  ctx.arc(endX, endY, 20 * sc, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.globalAlpha = 1;
+},
 
     _drawTailWrap(ctx, p, sc, ox, oy, hue, sat, lit, pt) {
       // Tail curls around and wraps under/beside the body (sitting/sleeping)
