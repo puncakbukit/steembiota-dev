@@ -400,30 +400,30 @@ const UploadView = {
   },
 
   computed: {
-    creatureName()  { return this.genome ? generateFullName(this.genome) : ""; },
-    genusName()     { return this.genome ? generateGenusName(this.genome.GEN) : ""; },
-    sexLabel()      { return this.genome ? (this.genome.SX === 0 ? "♂ Male" : "♀ Female") : ""; },
-    lifecycleStage(){ return this.genome ? getLifecycleStage(0, this.genome) : null; },
-    canPublish()    { return !!this.username && !!this.genome && !!window.steem_keychain && !this.publishing; },
-    genusInputValid() {
-      if (this.genusInput === "") return true;
-      const n = Number(this.genusInput);
-      return Number.isInteger(n) && n >= 0 && n <= 999;
-    },
-    statRows() {
-      if (!this.imageStats) return [];
-      const s = this.imageStats;
-      return [
-        { label: "Dominant hue",   value: s.dominantHue + "°",           desc: "→ CLR / GEN palette" },
-        { label: "Mean saturation",value: s.meanSat + "%",                desc: "→ colour richness" },
-        { label: "Mean lightness", value: s.meanLit.toFixed(1) + "%",     desc: "→ shade" },
-        { label: "Contrast",       value: s.litVariance.toFixed(0),        desc: "→ ORN ornament seed" },
-        { label: "Edge density",   value: (s.edgeDensity * 100).toFixed(1) + "%", desc: "→ APP appendage seed" },
-        { label: "Colourfulness",  value: (s.colourfulness * 100).toFixed(1) + "%", desc: "→ ORN ornament seed" },
-        { label: "Aspect ratio",   value: s.aspectRatio.toFixed(2),        desc: "→ MOR body shape" },
-      ];
-    }
+  creatureName()  { return this.genome ? generateFullName(this.genome) : ""; },
+  genusName()     { return this.genome ? generateGenusName(this.genome.GEN) : ""; },
+  sexLabel()      { return this.genome ? (this.genome.SX === 0 ? "♂ Male" : "♀ Female") : ""; },
+  lifecycleStage(){ return this.genome ? getLifecycleStage(0, this.genome) : null; },
+  canPublish()    { return !!this.username && !!this.genome && !!window.steem_keychain && !this.publishing; },
+  genusInputValid() {
+    if (this.genusInput === "") return true;
+    const n = Number(this.genusInput);
+    return Number.isInteger(n) && n >= 0 && n <= 999;
   },
+  statRows() {
+    if (!this.imageStats) return [];
+    const s = this.imageStats;
+    return [
+      { label: "Dominant hue",   value: s.dominantHue + "°",                 desc: "→ CLR / GEN palette" },
+      { label: "Mean saturation",value: s.meanSat + "%",                      desc: "→ colour richness" },
+      { label: "Mean lightness", value: s.meanLit.toFixed(1) + "%",           desc: "→ shade" },
+      { label: "Contrast",       value: s.litVariance.toFixed(0),             desc: "→ Fur texture" }, // UPDATED
+      { label: "Edge density",   value: (s.edgeDensity * 100).toFixed(1) + "%", desc: "→ Ear & Tail styles" }, // UPDATED
+      { label: "Colourfulness",  value: (s.colourfulness * 100).toFixed(1) + "%", desc: "→ ORN ornament seed" },
+      { label: "Aspect ratio",   value: s.aspectRatio.toFixed(2),             desc: "→ Body shape" }, // UPDATED
+    ];
+  }
+},
 
   methods: {
     // ----------------------------------------------------------
