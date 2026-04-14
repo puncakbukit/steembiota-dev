@@ -1977,45 +1977,92 @@ buildPhenotype(genome, age, feedState) {
       this._drawEar(ctx, p, sc, headX, headY, hue, sat, lit,  1, true);
 
       // ---- EYE ----
-      const eyeX = headX - hR * 0.28;
-      const eyeY = headY - hR * 0.14;
-      const eyeR = p.eyeRadius * sc;
+const eyeX = headX - hR * 0.28;
+const eyeY = headY - hR * 0.14;
+const eyeR = p.eyeRadius * sc;
 
-      if (pt.eyeClosed) {
-        // Sleeping — simple curved closed-eye line
-        ctx.strokeStyle = H1(hue, sat, lit - 25);
-        ctx.lineWidth   = eyeR * 0.55;
-        ctx.lineCap     = "round";
-        ctx.beginPath();
-        ctx.arc(eyeX, eyeY, eyeR * 0.72, Math.PI * 0.15, Math.PI * 0.85);
-        ctx.stroke();
-        ctx.lineCap = "butt";
-      } else {
-        // Alert: slightly wider eye for the alert expression
-        const alertScale = (expression === "alert") ? 1.15 : 1.0;
-        const irisGr = this.radGrad(ctx,
-          eyeX - eyeR * 0.2, eyeY - eyeR * 0.2, 0, eyeR * alertScale,
-          [
-            [0,   H1((hue + 120) % 360, 70, 75)],
-            [0.6, H1((hue + 90)  % 360, 80, 50)],
-            [1,   H1((hue + 60)  % 360, 60, 25)],
-          ]
-        );
-        ctx.fillStyle = irisGr;
-        ctx.beginPath(); ctx.arc(eyeX, eyeY, eyeR * alertScale, 0, Math.PI * 2); ctx.fill();
-        // Pupil — shifted down slightly when sad/hungry, normal otherwise
-        const pupilDY = (expression === "sad" || expression === "hungry") ? eyeR * 0.14 : 0;
-        ctx.fillStyle = "#0a0a14";
-        ctx.beginPath(); ctx.ellipse(eyeX + eyeR * 0.05, eyeY + pupilDY,
-                                     eyeR * 0.42, eyeR * 0.62, 0, 0, Math.PI * 2); ctx.fill();
-        // Highlights
-        ctx.fillStyle = "rgba(255,255,255,0.88)";
-        ctx.beginPath(); ctx.arc(eyeX - eyeR * 0.28, eyeY - eyeR * 0.28, eyeR * 0.22, 0, Math.PI * 2); ctx.fill();
-        ctx.fillStyle = "rgba(255,255,255,0.35)";
-        ctx.beginPath(); ctx.arc(eyeX + eyeR * 0.2, eyeY + eyeR * 0.15, eyeR * 0.12, 0, Math.PI * 2); ctx.fill();
-        ctx.strokeStyle = H1(hue, sat, lit - 25); ctx.lineWidth = 0.8;
-        ctx.beginPath(); ctx.arc(eyeX, eyeY, eyeR * alertScale, 0, Math.PI * 2); ctx.stroke();
-      }
+if (pt.eyeClosed) {
+  // Sleeping — simple curved closed-eye line
+  ctx.strokeStyle = H1(hue, sat, lit - 25);
+  ctx.lineWidth   = eyeR * 0.55;
+  ctx.lineCap     = "round";
+  ctx.beginPath();
+  ctx.arc(eyeX, eyeY, eyeR * 0.72, Math.PI * 0.15, Math.PI * 0.85);
+  ctx.stroke();
+  ctx.lineCap = "butt";
+} else {
+  const eyeStyle = p.eyeStyle;
+
+  // Expression scaling
+  const alertScale = (expression === "alert") ? 1.15 : 1.0;
+  const er = eyeR * alertScale;
+
+  // Iris gradient (reuse your original logic)
+  const irisGr = this.radGrad(ctx,
+    eyeX - eyeR * 0.2, eyeY - eyeR * 0.2, 0, er,
+    [
+      [0,   H1((hue + 120) % 360, 70, 75)],
+      [0.6, H1((hue + 90)  % 360, 80, 50)],
+      [1,   H1((hue + 60)  % 360, 60, 25)],
+    ]
+  );
+
+  // Pupil offset (emotion)
+  const pupilDY = (expression === "sad" || expression === "hungry")
+    ? eyeR * 0.14
+    : 0;
+
+  ctx.save();
+  ctx.translate(eyeX, eyeY);
+
+  // ---- IRIS SHAPE ----
+  ctx.beginPath();
+  if (eyeStyle === 1) { // Slit iris
+    ctx.ellipse(0, 0, er * 0.7, er, 0, 0, Math.PI * 2);
+  } else if (eyeStyle === 2) { // Almond
+    ctx.ellipse(0, 0, er * 1.2, er * 0.7, 0.2, 0, Math.PI * 2);
+  } else { // Round / Anime base
+    ctx.arc(0, 0, er, 0, Math.PI * 2);
+  }
+  ctx.fillStyle = irisGr;
+  ctx.fill();
+
+  // ---- PUPIL ----
+  ctx.fillStyle = "#0a0a14";
+  ctx.beginPath();
+  if (eyeStyle === 1) { // Reptilian slit
+    ctx.ellipse(0, pupilDY, er * 0.15, er * 0.8, 0, 0, Math.PI * 2);
+  } else if (eyeStyle === 3) { // Anime large pupil
+    ctx.ellipse(0, pupilDY, er * 0.7, er * 0.75, 0, 0, Math.PI * 2);
+  } else { // Standard
+    ctx.ellipse(er * 0.05, pupilDY, er * 0.42, er * 0.62, 0, 0, Math.PI * 2);
+  }
+  ctx.fill();
+
+  // ---- HIGHLIGHTS (kept from your original) ----
+  ctx.fillStyle = "rgba(255,255,255,0.88)";
+  ctx.beginPath();
+  ctx.arc(-er * 0.28, -er * 0.28, er * 0.22, 0, Math.PI * 2);
+  ctx.fill();
+
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.beginPath();
+  ctx.arc(er * 0.2, er * 0.15, er * 0.12, 0, Math.PI * 2);
+  ctx.fill();
+
+  // ---- OUTLINE ----
+  ctx.strokeStyle = H1(hue, sat, lit - 25);
+  ctx.lineWidth = 0.8;
+  ctx.beginPath();
+  if (eyeStyle === 2) {
+    ctx.ellipse(0, 0, er * 1.2, er * 0.7, 0.2, 0, Math.PI * 2);
+  } else {
+    ctx.arc(0, 0, er, 0, Math.PI * 2);
+  }
+  ctx.stroke();
+
+  ctx.restore();
+}
 
       // ---- FACE EXPRESSION (brow + mouth + extras) ----
       // Only show on creatures old enough to have a visible face (toddler+)
