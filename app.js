@@ -18,7 +18,10 @@ function randomInt(max) {
 function generateGenome() {
   const LIF       = 80 + randomInt(80);
   const FRT_START = Math.min(20 + randomInt(20), LIF - 10);
-  const FRT_END   = Math.min(60 + randomInt(20), LIF - 1);
+  // FRT_END must be strictly greater than FRT_START and less than LIF.
+  // Anchor the lower bound to FRT_START + 5 so the window is always valid,
+  // even when FRT_START was pushed close to LIF by the clamp above.
+  const FRT_END   = Math.min(Math.max(60 + randomInt(20), FRT_START + 5), LIF - 1);
   return {
     GEN: randomInt(1000),
     SX:  randomInt(2),      // 0 = male, 1 = female
@@ -474,11 +477,25 @@ function breedGenomes(a, b) {
   const seed  = breedSeed(a, b);
   const rng   = makePrng(seed);
   const mCh   = mutationChance(a, b);
-  const i     = (av, bv, range, min, max) => inheritGene(rng, av, bv, mCh, range, min, max);
 
-  // Track whether any mutation fired (for UI feedback)
-  const beforeMOR = (rng() < 0.5 ? a.MOR : b.MOR); // peek — rewind not possible, so we check post-hoc below
-  void beforeMOR; // used indirectly via child fields
+  // Wrapper around inheritGene that sets didMutate = true the moment any
+  // mutation branch fires.  This replaces the old post-hoc simpleMix approach,
+  // which consumed extra rng() draws after child construction and could miss
+  // mutations in CLR, LIF, FRT_START, FRT_END, and MUT entirely.
+  let didMutate = false;
+  const i = (av, bv, range, min, max) => {
+    // inheritGene draws rng() twice: once to pick a parent, once to test
+    // mutation.  We replicate that logic here so we can inspect the mutation
+    // draw without advancing a separate PRNG or duplicating state.
+    const picked  = rng() < 0.5 ? av : bv;
+    const mutRoll = rng();
+    if (mutRoll < mCh) {
+      didMutate = true;
+      const shifted = picked + Math.floor(rng() * range * 2) - range;
+      return Math.max(min, Math.min(max, Math.round(shifted)));
+    }
+    return Math.max(min, Math.min(max, Math.round(picked)));
+  };
 
   const child = {
     GEN:       a.GEN,                                   // same genus (may speciate below)
@@ -508,17 +525,7 @@ function breedGenomes(a, b) {
   child.GEN = maybeSpeciate(rng, child.GEN);
   const speciated = child.GEN !== originalGEN;
 
-  // Detect if any field mutated vs simple mix
-  const simpleMix = {
-    MOR: rng() < 0.5 ? a.MOR : b.MOR,
-    APP: rng() < 0.5 ? a.APP : b.APP,
-    ORN: rng() < 0.5 ? a.ORN : b.ORN,
-  };
-  const mutated =
-    speciated ||
-    Math.abs(child.MOR - simpleMix.MOR) > 0 ||
-    Math.abs(child.APP - simpleMix.APP) > 0 ||
-    Math.abs(child.ORN - simpleMix.ORN) > 0;
+  const mutated = speciated || didMutate;
 
   return { child, mutated, speciated };
 }
