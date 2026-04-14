@@ -828,3 +828,15 @@ const UploadView = {
     </div>
   `
 };
+
+/**
+ * Generates a stable 32-bit hash from the pixel data.
+ */
+function hashPixels(data) {
+  let h = 0x811c9dc5; // Offset basis
+  for (let i = 0; i < data.length; i++) {
+    h ^= data[i];
+    h = Math.imul(h, 0x01000193); // FNV prime
+  }
+  return h >>> 0;
+};
