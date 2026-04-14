@@ -4436,3 +4436,39 @@ const EquipPanelComponent = {
     </div>
   `
 };
+
+_drawFur(ctx, p, sc, ox, oy, pt) {
+  if (p.furLength === 0 || p.fossil) return;
+
+  const hue = p.finalHue;
+  const sat = p.colorSat;
+  const lit = p.colorLight;
+  
+  ctx.save();
+  ctx.translate(ox, oy);
+  ctx.rotate(pt.torsoAngle);
+  
+  const count = 40 + (p.furLength * 30); // Density increases with style
+  const strandLen = (2 + p.furLength * 3) * sc;
+  
+  ctx.strokeStyle = this.hsl(hue, sat - 10, lit - 10, 0.6);
+  ctx.lineWidth = 1 * sc;
+
+  for (let i = 0; i < count; i++) {
+    const angle = (i / count) * Math.PI * 2;
+    // Position on the ellipse boundary
+    const px = Math.cos(angle) * p.bodyLen * sc;
+    const py = Math.sin(angle) * p.bodyH * sc;
+    
+    // Direction of hair (pointing outward with slight randomness)
+    const jitter = (Math.sin(i * 13.5) * 0.2); 
+    const nx = Math.cos(angle + jitter) * strandLen;
+    const ny = Math.sin(angle + jitter) * strandLen;
+
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + nx, py + ny);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
