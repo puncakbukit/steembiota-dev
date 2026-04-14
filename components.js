@@ -1119,75 +1119,89 @@ const CreatureCanvasComponent = {
     // ----------------------------------------------------------
     // Derive phenotype from genome + age.
     // ----------------------------------------------------------
-    buildPhenotype(genome, age, feedState) {
-      const lifespanBonus = feedState ? feedState.lifespanBonus : 0;
-      const effectiveLIF  = genome.LIF + lifespanBonus;
-      const pct    = Math.min(age / effectiveLIF, 1.0);
-      const fossil = pct >= 1.0;
+buildPhenotype(genome, age, feedState) {
+  const lifespanBonus = feedState ? feedState.lifespanBonus : 0;
+  const effectiveLIF  = genome.LIF + lifespanBonus;
+  const pct    = Math.min(age / effectiveLIF, 1.0);
+  const fossil = pct >= 1.0;
 
-      // Lifecycle scalars
-      let bodyScale, ornamentScale, patternOpacity;
-      if      (pct < 0.05) { bodyScale = 0.45; ornamentScale = 0.00; patternOpacity = 0.10; }
-      else if (pct < 0.12) { bodyScale = 0.60; ornamentScale = 0.15; patternOpacity = 0.30; }
-      else if (pct < 0.25) { bodyScale = 0.78; ornamentScale = 0.40; patternOpacity = 0.60; }
-      else if (pct < 0.40) { bodyScale = 0.90; ornamentScale = 0.75; patternOpacity = 0.90; }
-      else if (pct < 0.60) { bodyScale = 1.00; ornamentScale = 1.00; patternOpacity = 1.00; }
-      else if (pct < 0.80) { bodyScale = 0.98; ornamentScale = 0.88; patternOpacity = 0.90; }
-      else if (pct < 1.00) { bodyScale = 0.92; ornamentScale = 0.70; patternOpacity = 0.75; }
-      else                 { bodyScale = 0.75; ornamentScale = 0.00; patternOpacity = 0.00; }
+  // Lifecycle scalars
+  let bodyScale, ornamentScale, patternOpacity;
+  if      (pct < 0.05) { bodyScale = 0.45; ornamentScale = 0.00; patternOpacity = 0.10; }
+  else if (pct < 0.12) { bodyScale = 0.60; ornamentScale = 0.15; patternOpacity = 0.30; }
+  else if (pct < 0.25) { bodyScale = 0.78; ornamentScale = 0.40; patternOpacity = 0.60; }
+  else if (pct < 0.40) { bodyScale = 0.90; ornamentScale = 0.75; patternOpacity = 0.90; }
+  else if (pct < 0.60) { bodyScale = 1.00; ornamentScale = 1.00; patternOpacity = 1.00; }
+  else if (pct < 0.80) { bodyScale = 0.98; ornamentScale = 0.88; patternOpacity = 0.90; }
+  else if (pct < 1.00) { bodyScale = 0.92; ornamentScale = 0.70; patternOpacity = 0.75; }
+  else                 { bodyScale = 0.75; ornamentScale = 0.00; patternOpacity = 0.00; }
 
-      const fertile = age >= genome.FRT_START && age < genome.FRT_END && !fossil;
-      const male    = genome.SX === 0;
+  const fertile = age >= genome.FRT_START && age < genome.FRT_END && !fossil;
+  const male    = genome.SX === 0;
 
-      // Colour
-      const palettes = [
-        { base: 160 }, { base: 200 }, { base: 280 }, { base:  30 },
-        { base: 340 }, { base: 100 }, { base: 240 }, { base:  55 },
-      ];
-      const paletteBase = palettes[genome.GEN % 8].base;
-      const finalHue    = (paletteBase + genome.CLR) % 360;
-      const healthPct   = feedState ? feedState.healthPct : 0.5;
-      const satBoost    = fossil ? 0 : Math.round((healthPct - 0.5) * 30);
-      const litBoost    = fossil ? 0 : Math.round((healthPct - 0.5) * 16);
-      const colorSat    = fossil ? 8  : Math.max(10, Math.min(100, 55 + ornamentScale * 20 + (fertile ? 10 : 0) + satBoost));
-      const colorLight  = fossil ? 28 : Math.max(15, Math.min(70,  40 + (pct < 0.6 ? 10 : 0) + litBoost));
+  // Colour
+  const palettes = [
+    { base: 160 }, { base: 200 }, { base: 280 }, { base:  30 },
+    { base: 340 }, { base: 100 }, { base: 240 }, { base:  55 },
+  ];
+  const paletteBase = palettes[genome.GEN % 8].base;
+  const finalHue    = (paletteBase + genome.CLR) % 360;
+  const healthPct   = feedState ? feedState.healthPct : 0.5;
+  const satBoost    = fossil ? 0 : Math.round((healthPct - 0.5) * 30);
+  const litBoost    = fossil ? 0 : Math.round((healthPct - 0.5) * 16);
+  const colorSat    = fossil ? 8  : Math.max(10, Math.min(100, 55 + ornamentScale * 20 + (fertile ? 10 : 0) + satBoost));
+  const colorLight  = fossil ? 28 : Math.max(15, Math.min(70,  40 + (pct < 0.6 ? 10 : 0) + litBoost));
 
-      // MOR → body proportions
-      const morRng      = this.makePrng(genome.MOR);
-      const bodyLen     = 80 + morRng() * 30;   // torso half-width
-      const bodyH       = 42 + morRng() * 18;   // torso half-height
-      const headSize    = 26 + morRng() * 12;   // head radius
-      const tailCurve   = 0.4 + morRng() * 0.5; // tail curl amount
+  // RNG seeds (shared)
+  const appRng = this.makePrng(genome.APP);
+  const morRng = this.makePrng(genome.MOR);
+  const ornRng = this.makePrng(genome.ORN);
 
-      // APP → appendage style
-      const appRng      = this.makePrng(genome.APP);
-      const legLen      = 44 + appRng() * 20;
-      const legThick    = 7  + appRng() * 5;
-      const earH        = 22 + appRng() * 14;
-      const earW        = 10 + appRng() * 6;
-      const hasWings    = appRng() > 0.72;      // rare dorsal wing/fin
-      const wingSpan    = 24 + appRng() * 20;
+  // MOR → body proportions
+  const bodyLen   = 80 + morRng() * 30;
+  const bodyH     = 42 + morRng() * 18;
+  const headSize  = 26 + morRng() * 12;
+  const tailCurve = 0.4 + morRng() * 0.5;
 
-      // ORN → ornament style
-      const ornRng      = this.makePrng(genome.ORN);
-      const glowOrbs    = 2 + Math.floor(ornRng() * 4);  // 2–5 orbs on tail
-      const ribbons     = 1 + Math.floor(ornRng() * 3);  // 1–3 energy ribbons
-      const patternType = Math.floor(ornRng() * 3);      // 0=plain 1=spots 2=dapple
-      const orbHue      = (finalHue + 40 + ornRng() * 60) % 360;
-      const hasChestMark = ornRng() > 0.4;
-      const hasMane      = ornRng() > 0.45;
+  // APP → appendage style
+  const legLen   = 44 + appRng() * 20;
+  const legThick = 7  + appRng() * 5;
+  const earH     = 22 + appRng() * 14;
+  const earW     = 10 + appRng() * 6;
+  const hasWings = appRng() > 0.72;
+  const wingSpan = 24 + appRng() * 20;
 
-      return {
-        fossil, pct, fertile, male,
-        bodyScale, ornamentScale, patternOpacity,
-        finalHue, colorSat, colorLight, orbHue,
-        bodyLen, bodyH, headSize, tailCurve,
-        legLen, legThick, earH, earW,
-        hasWings, wingSpan,
-        glowOrbs, ribbons, patternType, hasChestMark, hasMane,
-        eyeRadius: pct < 0.08 ? 9 : 7,
-      };
-    },
+  // ORN → ornament style
+  const glowOrbs     = 2 + Math.floor(ornRng() * 4);
+  const ribbons      = 1 + Math.floor(ornRng() * 3);
+  const patternType  = Math.floor(ornRng() * 3);
+  const orbHue       = (finalHue + 40 + ornRng() * 60) % 360;
+  const hasChestMark = ornRng() > 0.4;
+  const hasMane      = ornRng() > 0.45;
+
+  // ✅ New Styles (integrated cleanly using same RNG streams)
+  const earStyle  = Math.floor(appRng() * 3);  // 0: Pointed, 1: Rounded, 2: Floppy
+  const tailStyle = Math.floor(morRng() * 3);  // 0: Tapered, 1: Tufted, 2: Plumed
+  const eyeStyle  = genome.GEN % 4;            // 0: Round, 1: Slit, 2: Almond, 3: LargeIris
+  const furLength = Math.floor(ornRng() * 4);  // 0: Smooth, 1: Short, 2: Fuzzy, 3: Shaggy
+
+  return {
+    fossil, pct, fertile, male,
+    bodyScale, ornamentScale, patternOpacity,
+    finalHue, colorSat, colorLight, orbHue,
+
+    bodyLen, bodyH, headSize, tailCurve,
+    legLen, legThick, earH, earW,
+    hasWings, wingSpan,
+
+    glowOrbs, ribbons, patternType, hasChestMark, hasMane,
+
+    // ✅ New outputs
+    earStyle, tailStyle, eyeStyle, furLength,
+
+    eyeRadius: pct < 0.08 ? 9 : 7,
+  };
+},
 
     // ----------------------------------------------------------
     // Helpers
