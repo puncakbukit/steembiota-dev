@@ -2204,44 +2204,62 @@ if (pt.eyeClosed) {
       ctx.globalAlpha = 1;
     },
 
-
-
     // ----------------------------------------------------------
     // Draw a pointed ear
     // ----------------------------------------------------------
-    _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
-      const hR   = p.headSize * sc;
-      const eH   = p.earH * sc;
-      const eW   = p.earW * sc;
-      const baseX = headX - hR * 0.12 + (side < 0 ? -hR * 0.28 : hR * 0.28);
-      const baseY = headY - hR * 0.62;
-      const tipX  = baseX + (side < 0 ? -eW * 0.3 : eW * 0.3);
-      const tipY  = baseY - eH;
-      ctx.globalAlpha = front ? 1.0 : 0.7;
+_drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
+  const hR   = p.headSize * sc;
+  const eH   = p.earH * sc;
+  const eW   = p.earW * sc;
+  const baseX = headX - hR * 0.12 + (side < 0 ? -hR * 0.28 : hR * 0.28);
+  const baseY = headY - hR * 0.62;
 
-      // Outer ear
-      ctx.fillStyle   = this.hsl(hue, sat + 5, lit - 5);
-      ctx.strokeStyle = this.hsl(hue, sat, lit - 20);
-      ctx.lineWidth   = 1.2;
-      ctx.beginPath();
-      ctx.moveTo(baseX - eW * 0.55, baseY);
-      ctx.quadraticCurveTo(baseX - eW * 0.7, baseY - eH * 0.5, tipX, tipY);
-      ctx.quadraticCurveTo(baseX + eW * 0.7, baseY - eH * 0.5, baseX + eW * 0.55, baseY);
-      ctx.closePath();
-      ctx.fill(); ctx.stroke();
+  ctx.globalAlpha = front ? 1.0 : 0.7;
 
-      // Inner ear — pinkish/contrasting
-      if (front && p.ornamentScale > 0.1) {
-        ctx.fillStyle = this.hsl((hue + 15) % 360, sat + 20, lit + 20, 0.65);
-        ctx.beginPath();
-        ctx.moveTo(baseX - eW * 0.3, baseY - eH * 0.12);
-        ctx.quadraticCurveTo(baseX - eW * 0.35, baseY - eH * 0.55, tipX, tipY + eH * 0.22);
-        ctx.quadraticCurveTo(baseX + eW * 0.35, baseY - eH * 0.55, baseX + eW * 0.3, baseY - eH * 0.12);
-        ctx.closePath();
-        ctx.fill();
-      }
-      ctx.globalAlpha = 1;
-    },
+  // Outer ear
+  ctx.fillStyle   = this.hsl(hue, sat + 5, lit - 5);
+  ctx.strokeStyle = this.hsl(hue, sat, lit - 20);
+  ctx.lineWidth   = 1.2;
+
+  ctx.beginPath();
+
+  let tipX, tipY;
+
+  if (p.earStyle === 1) {
+    // Rounded (Bear)
+    ctx.arc(baseX, baseY - eH * 0.4, eW * 0.8, 0, Math.PI * 2);
+  } else if (p.earStyle === 2) {
+    // Floppy (Dog/Hound)
+    ctx.moveTo(baseX - eW, baseY);
+    ctx.bezierCurveTo(baseX - eW, baseY + eH, baseX + eW, baseY + eH, baseX + eW, baseY);
+  } else {
+    // Pointed (Classic)
+    tipX = baseX + (side < 0 ? -eW * 0.3 : eW * 0.3);
+    tipY = baseY - eH;
+
+    ctx.moveTo(baseX - eW * 0.55, baseY);
+    ctx.quadraticCurveTo(baseX - eW * 0.7, baseY - eH * 0.5, tipX, tipY);
+    ctx.quadraticCurveTo(baseX + eW * 0.7, baseY - eH * 0.5, baseX + eW * 0.55, baseY);
+  }
+
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // Inner ear — only for pointed style (cleanest visually)
+  if (front && p.ornamentScale > 0.1 && p.earStyle === 0) {
+    ctx.fillStyle = this.hsl((hue + 15) % 360, sat + 20, lit + 20, 0.65);
+
+    ctx.beginPath();
+    ctx.moveTo(baseX - eW * 0.3, baseY - eH * 0.12);
+    ctx.quadraticCurveTo(baseX - eW * 0.35, baseY - eH * 0.55, tipX, tipY + eH * 0.22);
+    ctx.quadraticCurveTo(baseX + eW * 0.35, baseY - eH * 0.55, baseX + eW * 0.3, baseY - eH * 0.12);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  ctx.globalAlpha = 1;
+},
 
     // ----------------------------------------------------------
     // Draw glowing orb nodes along the tail
