@@ -33,7 +33,7 @@ The dApp runs entirely in the browser with no build tools and no backend.
 | Hosting | GitHub Pages |
 | Build tools | None |
 
-Files: `index.html`, `blockchain.js`, `components.js`, `accessories.js`, `app.js`
+Files: `index.html`, `blockchain.js`, `components.js`, `accessories.js`, `upload.js`, `app.js`
 
 ---
 
@@ -144,9 +144,9 @@ Play activity adds up to +25% to the effective health score before picking the e
 
 Whenever a creature is successfully fed, played with, or walked, the canvas plays a short reaction sequence. The creature cycles through four pose+expression pairs (Standing→Alert→Playful→Sitting, paired with Alert→Alert→Excited→Happy), repeated 2–3 times at random, each step lasting 2–3 seconds. After the sequence finishes the creature returns to its resting pose and normal game-state expression. Any in-progress animation is cancelled and restarted if another interaction completes while it is running.
 
-### Autonomous Behaviour (Latest)
+### Autonomous Behaviour
 
-Beyond static posing, the creature canvas now runs an autonomous movement loop (for non-fossil creatures):
+Beyond static posing, the creature canvas runs an autonomous movement loop (for non-fossil creatures):
 
 - idle drift
 - walking / running bursts
@@ -154,7 +154,7 @@ Beyond static posing, the creature canvas now runs an autonomous movement loop (
 - temporary sleep state
 - click-to-redirect movement ("walk to" interaction)
 
-Movement state is simulated client-side with requestAnimationFrame and restored from session storage so position can persist between route changes within the same browsing session.
+Movement state is simulated client-side with requestAnimationFrame and restored from session storage so position persists between route changes within the same browsing session.
 
 ---
 
@@ -349,28 +349,70 @@ The check is entirely client-side using BFS ancestry traversal (up to 12 generat
 
 ## Breed Permits
 
-Creatures are **closed to external breeding by default**. Only the effective owner can authorise specific users to use their creature as a breeding parent.
+Creatures are **closed to external breeding by default**. The effective owner must explicitly grant a named permit before another user can use that creature as a parent.
+
+### Permit operations (on creature post replies)
+
+| Type | Effect |
+|---|---|
+| `breed_permit` | Grants a named user permission to breed this creature |
+| `breed_revoke` | Removes a previously granted permit |
+
+For each grantee only the latest action applies (permit or revoke). Permits may have an expiry (`expires_days`; set to `0` for no expiry). Expired permits are treated identically to revocations. Only replies authored by the current effective owner are counted. The effective owner is always implicitly permitted on their own creature.
+
+---
+
+## Image-Inspired Creature Upload
+
+The **📸 Upload** page (`/#/upload`, login required) lets users derive a new founder creature genome from any uploaded image — a photograph, illustration, or sketch.
 
 ### How it works
 
-The owner publishes a `breed_permit` reply on the creature's post naming the grantee and an optional expiry period. A `breed_revoke` reply cancels an existing permit. The latest action per grantee wins; expired permits are treated as revoked. Permits are visible to all users in the **Permit Manager** panel on the creature page (owner-only).
+The app does not convert pixels directly into creature art. Instead it extracts visual traits from the image and fits genome values that produce a creature sharing those traits. The creature is algorithmically *inspired by* the image; it remains a fully procedural SteemBiota creature rendered from its genome, not from the source pixels. The source image is never stored on-chain — only the genome is published.
 
-- The effective owner always has implicit breed permission on their own creatures.
-- Permits granted before a completed ownership transfer are **automatically voided** — the new owner starts with a clean permit slate.
+### Analysis pipeline (client-side, no server)
 
-### Permit reply structure (`json_metadata.steembiota`)
+1. The uploaded file is drawn into a 64×64 analysis canvas in the browser.
+2. Pixel statistics are extracted from the downsampled image:
 
-```json
-{
-  "version": "1.0",
-  "type": "breed_permit",
-  "creature": { "author": "alice", "permlink": "vyrex-nymwhisper-..." },
-  "grantee": "carol",
-  "expires_days": 7
-}
-```
+| Stat | How computed |
+|---|---|
+| Dominant hue | Circular mean of HSL hue across all non-grey pixels |
+| Mean saturation | Average saturation of non-grey pixels |
+| Mean lightness | Average lightness of all pixels |
+| Contrast | Lightness variance across all pixels |
+| Edge density | Fraction of high-gradient pixels via a Sobel filter |
+| Colourfulness | Fraction of pixels with saturation > 12% |
+| Aspect ratio | Width ÷ height of the non-background silhouette bounding box |
 
-Set `expires_days` to `0` for a permanent (non-expiring) permit. A `breed_revoke` reply uses the same shape with `"type": "breed_revoke"` and no `expires_days` field.
+3. Each stat is mapped to a genome field:
+
+| Image stat | Gene | Mapping |
+|---|---|---|
+| Dominant hue | `GEN` + `CLR` | Finds the palette + hue-offset pair whose rendered colour exactly matches the image hue (zero rounding error) |
+| Aspect ratio | `MOR` | Searches all 10,000 MOR seeds via coarse + fine scan to find the body shape whose rendered width/height ratio is closest to the image silhouette |
+| Edge density | `APP` | Linear map with jitter — detailed images get more varied appendages |
+| Colourfulness + contrast | `ORN` | Weighted blend — vibrant high-contrast images produce more ornamental creatures |
+| `LIF`, `FRT_*`, `SX`, `MUT` | — | Randomised; no image correspondence |
+
+### Reroll
+
+Because `APP` and `ORN` include random jitter in their fitting, clicking **Reroll** re-runs the analysis on the cached image element and produces a different valid creature that still shares the same colour family and body proportions as the original image.
+
+### Genus override
+
+As with the standard founder creator on the Home page, users can optionally specify a genus number (0–999) before or after analysis. If set, the fitted `GEN` is overridden while `CLR` is recalculated to preserve the correct colour for that palette.
+
+### Published genome
+
+The resulting genome is published as a standard `type: "founder"` creature post via `publishCreature()` — identical in every way to a manually generated founder. It earns the same 100 XP and appears in all the same lists, filters, and profile tabs. A `_source: "image-upload"` field is attached to the genome object and is visible in the genome table on the creature page.
+
+### UI flow
+
+1. **Pick** — drag-and-drop or browse to select an image file (JPG, PNG, GIF, WebP)
+2. **Analyse** — brief loading state while the browser extracts pixel stats
+3. **Preview** — side-by-side comparison of the source image and the generated creature canvas, with a stats table showing each detected trait and its gene mapping, an editable post title, optional genus override, and Reroll / Publish / Start over actions
+4. **Published** — on success, navigates directly to the new creature's page
 
 ---
 
@@ -403,14 +445,6 @@ When a creature has been transferred, the creature page shows a 🤝 "Owned by @
 - Only the named recipient may accept.
 - Permits issued before a completed transfer are voided automatically (`permitsValidFrom` timestamp).
 - Transfer history is stored on-chain and displayed in the Transfer panel's history log.
-
-### Transfer reply structures (`json_metadata.steembiota`)
-
-```json
-{ "version": "1.0", "type": "transfer_offer",  "creature": { "author": "alice", "permlink": "..." }, "to": "bob",   "ts": "2026-03-01T12:00:00Z" }
-{ "version": "1.0", "type": "transfer_accept", "creature": { "author": "alice", "permlink": "..." }, "offer_permlink": "steembiota-transfer-offer-bob-...", "ts": "..." }
-{ "version": "1.0", "type": "transfer_cancel", "creature": { "author": "alice", "permlink": "..." }, "ts": "2026-03-02T08:00:00Z" }
-```
 
 ---
 
@@ -486,7 +520,9 @@ Every creature card and the creature page header show a provenance badge. Priori
 | ⚠ Unverified Origin | Posted as a founder but genome has ≥ 3 simultaneously maxed traits (statistically implausible from random generation) |
 | ⚡ Speciation | Legitimately bred offspring that created a new genus |
 | 🧬 Bred / Bred — Mutation | Legitimately bred offspring with valid parent links |
-| 🌱 Origin Creature | Legitimate randomly-generated founder |
+| 🌱 Origin Creature | Legitimate founder (random or image-inspired) |
+
+Image-uploaded founders carry a `_source: "image-upload"` tag in their genome and display as 🌱 Origin Creature — they are full participants in the ecosystem with no special treatment or restrictions.
 
 ### Warning Banners
 
@@ -503,7 +539,7 @@ Every on-chain action earns XP for the acting user. XP totals are computed clien
 
 | Action | XP |
 |---|---|
-| Publish a founder creature | 100 |
+| Publish a founder creature (random or image-inspired) | 100 |
 | Publish an offspring | 500 |
 | Each unique genus contributed (distinct GEN values across own creatures) | 25 |
 | Each speciation event in own offspring | 75 |
@@ -549,6 +585,7 @@ Filters can be combined and are cleared individually. Pagination resets automati
 | URL | View |
 |---|---|
 | `/#/` | Home — creature grid with filters, founder creator |
+| `/#/upload` | Upload — image-inspired creature creator (login required) |
 | `/#/accessories` | Accessories — accessory creator + global accessory browse grid (template filters) |
 | `/#/about` | About page |
 | `/#/leaderboard` | Global XP leaderboard |
@@ -563,7 +600,7 @@ Filters can be combined and are cleared individually. Pagination resets automati
 
 ### Creature post (`json_metadata.steembiota`)
 
-Founder:
+Founder (random):
 
 ```json
 {
@@ -571,6 +608,20 @@ Founder:
   "type": "founder",
   "genome": { "GEN": 42, "SX": 0, "MOR": 1234, "APP": 5678, "ORN": 9012, "CLR": 180, "LIF": 100, "FRT_START": 30, "FRT_END": 70, "MUT": 1 },
   "name": "Vyrex Nymwhisper",
+  "genusName": "Vyrex",
+  "age": 0,
+  "lifecycleStage": "Baby"
+}
+```
+
+Founder (image-inspired) — identical shape, with one additional genome field:
+
+```json
+{
+  "version": "1.0",
+  "type": "founder",
+  "genome": { "GEN": 42, "SX": 1, "MOR": 3871, "APP": 6204, "ORN": 7115, "CLR": 218, "LIF": 112, "FRT_START": 28, "FRT_END": 74, "MUT": 0, "_source": "image-upload" },
+  "name": "Vyrex Voltwhisper",
   "genusName": "Vyrex",
   "age": 0,
   "lifecycleStage": "Baby"
