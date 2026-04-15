@@ -333,29 +333,40 @@ function fitOrn(colourfulness, litVariance, edgeDensity, rng) {
 }
 
 /**
- * Full image-to-genome conversion.
+ * Full image-to-genome conversion (deterministic with reroll support).
  *
  * @param {HTMLImageElement} img  — decoded image element
+ * @param {number} rerollIndex    — optional reroll seed modifier
  * @returns {object} genome       — valid SteemBiota genome object
  */
-function imageToGenome(img) {
+function imageToGenome(img, rerollIndex = 0) {
   const data  = samplePixels(img);
   const stats = analysePixels(data, img.naturalWidth, img.naturalHeight);
 
-  const { GEN, CLR } = fitHue(stats.dominantHue);
-  const MOR           = fitMor(stats.aspectRatio);
-  const APP           = fitApp(stats.edgeDensity);
-  // Pass edgeDensity here to help determine fur/texture
-  const ORN           = fitOrn(stats.colourfulness, stats.litVariance, stats.edgeDensity);
+  // Create deterministic seed from pixel hash + reroll index
+  const pixelHash = hashPixels(data);
+  const masterSeed = (pixelHash ^ rerollIndex) >>> 0;
+  const rng = makePrngFit(masterSeed);
 
-  // Randomise lifespan and fertility (these have no image correspondence)
-  const LIF       = 80 + Math.floor(Math.random() * 80);
-  const FRT_START = Math.min(20 + Math.floor(Math.random() * 20), LIF - 10);
-  const FRT_END   = Math.min(60 + Math.floor(Math.random() * 20), LIF - 1);
+  // Deterministic gene fitting using shared RNG stream
+  const { GEN, CLR } = fitHue(stats.dominantHue, rng);
+  const MOR           = fitMor(stats.aspectRatio); // already deterministic
+  const APP           = fitApp(stats.edgeDensity, rng);
+  const ORN           = fitOrn(
+    stats.colourfulness,
+    stats.litVariance,
+    stats.edgeDensity,
+    rng
+  );
+
+  // Deterministic lifespan and fertility
+  const LIF       = 80 + Math.floor(rng() * 80);
+  const FRT_START = Math.min(20 + Math.floor(rng() * 20), LIF - 10);
+  const FRT_END   = Math.min(60 + Math.floor(rng() * 20), LIF - 1);
 
   return {
     GEN,
-    SX: Math.floor(Math.random() * 2),
+    SX: Math.floor(rng() * 2),
     MOR,
     APP,
     ORN,
@@ -363,7 +374,7 @@ function imageToGenome(img) {
     LIF,
     FRT_START,
     FRT_END,
-    MUT: Math.floor(Math.random() * 3),
+    MUT: Math.floor(rng() * 3),
     // Provenance tag — not used by renderer but visible in genome table
     _source: "image-upload"
   };
