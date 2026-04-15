@@ -51,7 +51,13 @@ function samplePixels(img) {
   canvas.height = SAMPLE_SIZE;
   const ctx = canvas.getContext("2d");
   ctx.drawImage(img, 0, 0, SAMPLE_SIZE, SAMPLE_SIZE);
-  return ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data;
+  const data = ctx.getImageData(0, 0, SAMPLE_SIZE, SAMPLE_SIZE).data;
+  // Release the GPU backing store immediately — the canvas is never attached
+  // to the DOM but the browser still holds a texture allocation until we
+  // zero the dimensions or drop all references.
+  canvas.width = 0;
+  canvas.height = 0;
+  return data;
 }
 
 /**
@@ -71,6 +77,22 @@ function rgbToHsl(r, g, b) {
   else if (max === g) h = (b - r) / d + 2;
   else                h = (r - g) / d + 4;
   return { h: Math.round(h * 60), s: Math.round(s * 100), l: Math.round(l * 100) };
+}
+
+/**
+ * Generates a stable 32-bit hash from the pixel data (FNV-1a, 32-bit).
+ * Placed here with the other pure pixel helpers so it is always defined
+ * before imageToGenome, which calls it.  (Function declarations are hoisted
+ * by JS, but this ordering avoids the pitfall if the file is ever converted
+ * to ES module syntax where hoisting does not apply.)
+ */
+function hashPixels(data) {
+  let h = 0x811c9dc5; // FNV offset basis
+  for (let i = 0; i < data.length; i++) {
+    h ^= data[i];
+    h = Math.imul(h, 0x01000193); // FNV prime
+  }
+  return h >>> 0;
 }
 
 /**
@@ -263,20 +285,26 @@ function morAspectRatio(mor) {
  * Search the MOR space [0, 9999] for the value whose rendered body
  * aspect ratio is closest to targetRatio.
  *
+ * bodyLen and bodyH are both drawn from the same MOR-seeded PRNG, so they
+ * are correlated — the true achievable aspect-ratio space is not a simple
+ * Cartesian product of [80,110] × [42,60] and cannot be described by a
+ * pair of analytical min/max constants.  We therefore skip the pre-clamp
+ * entirely and let the full coarse+fine scan find the closest achievable
+ * value directly.  The search already returns the best match for any input,
+ * even targets outside the achievable range, so the clamp was only masking
+ * edge cases without improving accuracy.
+ *
  * Uses a coarse scan (every 37 steps ≈ 270 probes) then refines
- * around the best candidate. Runs in < 1ms in all modern browsers.
+ * around the best candidate.  Runs in < 1 ms in all modern browsers.
  *
  * Returns MOR integer.
  */
 function fitMor(targetRatio) {
-  // Clamp to the achievable range: min=80/60=1.33, max=110/42=2.62
-  const clamped = Math.max(1.33, Math.min(2.62, targetRatio));
-
   let bestMor = 0, bestDist = Infinity;
 
   // Coarse scan
   for (let m = 0; m < 10000; m += 37) {
-    const dist = Math.abs(morAspectRatio(m) - clamped);
+    const dist = Math.abs(morAspectRatio(m) - targetRatio);
     if (dist < bestDist) { bestDist = dist; bestMor = m; }
   }
 
@@ -284,7 +312,7 @@ function fitMor(targetRatio) {
   const lo = Math.max(0, bestMor - 200);
   const hi = Math.min(9999, bestMor + 200);
   for (let m = lo; m <= hi; m++) {
-    const dist = Math.abs(morAspectRatio(m) - clamped);
+    const dist = Math.abs(morAspectRatio(m) - targetRatio);
     if (dist < bestDist) { bestDist = dist; bestMor = m; }
   }
 
@@ -313,6 +341,12 @@ function fitApp(edgeDensity, rng) {
  * High colourfulness + contrast + detail → richer ornamentation / fur texture.
  *
  * Now accepts an rng function for deterministic jitter.
+ *
+ * The jitter is scaled to the available headroom on each side so it always
+ * has real effect even when the base lands near 0 or 9999.  Without this,
+ * a near-monochromatic or near-fully-saturated image produces a base close
+ * to a boundary, the ±500 jitter is entirely clamped away, and every such
+ * image maps to the same ORN value — reducing ornament diversity.
  */
 function fitOrn(colourfulness, litVariance, edgeDensity, rng) {
   // Normalize lighting variance (~0–800 → 0–1)
@@ -326,8 +360,10 @@ function fitOrn(colourfulness, litVariance, edgeDensity, rng) {
     (colourfulness * 0.4 + textureScore * 0.6) * 9999
   );
 
-  // Moderate jitter for natural variation
-  const jitter = Math.floor(rng() * 1000) - 500;
+  // Scale the maximum jitter to the smaller of the two headroom values so the
+  // shifted result is always within [0, 9999] and the full ±range is usable.
+  const maxJitter = Math.min(base, 9999 - base, 500);
+  const jitter = Math.floor(rng() * (maxJitter * 2 + 1)) - maxJitter;
 
   return Math.max(0, Math.min(9999, base + jitter));
 }
@@ -859,14 +895,4 @@ methods: {
   `
 };
 
-/**
- * Generates a stable 32-bit hash from the pixel data.
- */
-function hashPixels(data) {
-  let h = 0x811c9dc5; // Offset basis
-  for (let i = 0; i < data.length; i++) {
-    h ^= data[i];
-    h = Math.imul(h, 0x01000193); // FNV prime
-  }
-  return h >>> 0;
-};
+

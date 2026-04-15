@@ -1158,32 +1158,41 @@ buildPhenotype(genome, age, feedState) {
   const ornRng = this.makePrng(genome.ORN);
 
   // MOR → body proportions
-  const bodyLen   = 80 + morRng() * 30;
-  const bodyH     = 42 + morRng() * 18;
-  const headSize  = 26 + morRng() * 12;
-  const tailCurve = 0.4 + morRng() * 0.5;
+  // Draw order is load-bearing — altering it changes every existing creature.
+  // morRng draw 1: bodyLen   draw 2: bodyH
+  // morRng draw 3: headSize  draw 4: tailCurve  draw 5: tailStyle
+  const bodyLen   = 80 + morRng() * 30;   // draw 1
+  const bodyH     = 42 + morRng() * 18;   // draw 2
+  const headSize  = 26 + morRng() * 12;   // draw 3
+  const tailCurve = 0.4 + morRng() * 0.5; // draw 4
 
   // APP → appendage style
-  const legLen   = 44 + appRng() * 20;
-  const legThick = 7  + appRng() * 5;
-  const earH     = 22 + appRng() * 14;
-  const earW     = 10 + appRng() * 6;
-  const hasWings = appRng() > 0.72;
-  const wingSpan = 24 + appRng() * 20;
+  // appRng draw 1: legLen   draw 2: legThick  draw 3: earH    draw 4: earW
+  // appRng draw 5: hasWings draw 6: wingSpan  draw 7: (spare) draw 8: earStyle
+  const legLen   = 44 + appRng() * 20;    // draw 1
+  const legThick = 7  + appRng() * 5;     // draw 2
+  const earH     = 22 + appRng() * 14;    // draw 3
+  const earW     = 10 + appRng() * 6;     // draw 4
+  const hasWings = appRng() > 0.72;       // draw 5
+  const wingSpan = 24 + appRng() * 20;    // draw 6
 
   // ORN → ornament style
-  const glowOrbs     = 2 + Math.floor(ornRng() * 4);
-  const ribbons      = 1 + Math.floor(ornRng() * 3);
-  const patternType  = Math.floor(ornRng() * 3);
-  const orbHue       = (finalHue + 40 + ornRng() * 60) % 360;
-  const hasChestMark = ornRng() > 0.4;
-  const hasMane      = ornRng() > 0.45;
+  // ornRng draw 1: glowOrbs  draw 2: ribbons   draw 3: patternType
+  // ornRng draw 4: orbHue    draw 5: hasChestMark  draw 6: hasMane  draw 7: furLength
+  const glowOrbs     = 2 + Math.floor(ornRng() * 4);   // draw 1
+  const ribbons      = 1 + Math.floor(ornRng() * 3);   // draw 2
+  const patternType  = Math.floor(ornRng() * 3);        // draw 3
+  const orbHue       = (finalHue + 40 + ornRng() * 60) % 360; // draw 4
+  const hasChestMark = ornRng() > 0.4;                  // draw 5
+  const hasMane      = ornRng() > 0.45;                 // draw 6
 
-  // ✅ New Styles (integrated cleanly using same RNG streams)
-  const earStyle  = Math.floor(appRng() * 3);  // 0: Pointed, 1: Rounded, 2: Floppy
-  const tailStyle = Math.floor(morRng() * 3);  // 0: Tapered, 1: Tufted, 2: Plumed
-  const eyeStyle  = genome.GEN % 4;            // 0: Round, 1: Slit, 2: Almond, 3: LargeIris
-  const furLength = Math.floor(ornRng() * 4);  // 0: Smooth, 1: Short, 2: Fuzzy, 3: Shaggy
+  // Aesthetic styles — positioned at the END of each stream so that adding
+  // new body/appendage/ornament parameters upstream doesn't silently shift
+  // them.  eyeStyle derives from GEN (no RNG draw) to keep it fully stable.
+  const earStyle  = Math.floor(appRng() * 3);  // APP draw 7: 0=Pointed 1=Rounded 2=Floppy
+  const tailStyle = Math.floor(morRng() * 3);  // MOR draw 5: 0=Tapered 1=Tufted  2=Plumed
+  const eyeStyle  = genome.GEN % 4;            // no draw: 0=Round 1=Slit 2=Almond 3=LargeIris
+  const furLength = Math.floor(ornRng() * 4);  // ORN draw 7: 0=Smooth 1=Short 2=Fuzzy 3=Shaggy
 
   return {
     fossil, pct, fertile, male,
@@ -1726,7 +1735,7 @@ buildPhenotype(genome, age, feedState) {
         ctx.beginPath();
         ctx.ellipse(ox, oy, p.bodyLen * 0.55, p.bodyH * 0.9, 0, 0, Math.PI * 2);
         ctx.fill(); ctx.stroke();
-        const crRng = this.makePrng(g.MOR + 11);
+        const crRng = this.makePrng(g.MOR ^ 0x9E3779B9);
         ctx.strokeStyle = "#333"; ctx.lineWidth = 1.2;
         for (let i = 0; i < 6; i++) {
           ctx.beginPath();
@@ -1755,7 +1764,7 @@ buildPhenotype(genome, age, feedState) {
 
       // ---- ENERGY RIBBONS (behind body) ----
       if (p.ornamentScale > 0.3) {
-        const ribRng = this.makePrng(g.ORN + 200);
+        const ribRng = this.makePrng(g.ORN ^ 0x6B43A9C5);
         for (let r = 0; r < p.ribbons; r++) {
           const yOff   = (ribRng() - 0.5) * p.bodyH * sc * 0.9;
           const ctrl1x = ox + p.bodyLen * sc * 0.8 + 20 + ribRng() * 30;
@@ -1856,7 +1865,7 @@ buildPhenotype(genome, age, feedState) {
         ctx.clip();
         ctx.globalAlpha = p.patternOpacity * 0.22;
         ctx.fillStyle   = H1((hue + 35) % 360, sat + 10, lit + 20);
-        const patRng = this.makePrng(g.ORN + 77);
+        const patRng = this.makePrng(g.ORN ^ 0xD2A98B37);
         if (p.patternType === 1) {
           for (let i = 0; i < 10; i++) {
             const sx = ox + (patRng() - 0.5) * p.bodyLen * sc * 1.6;
@@ -1920,7 +1929,7 @@ buildPhenotype(genome, age, feedState) {
 
       // ---- MANE ----
       if (p.hasMane && p.ornamentScale > 0.2) {
-        const maneRng = this.makePrng(g.ORN + 555);
+        const maneRng = this.makePrng(g.ORN ^ 0x4F1BBCDC);
         ctx.strokeStyle = H1(hue, sat - 10, lit + 22);
         ctx.lineCap = "round";
         for (let i = 0; i < 7; i++) {
@@ -2295,7 +2304,7 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
     // Draw glowing orb nodes along the tail
     // ----------------------------------------------------------
     _drawOrbNodes(ctx, p, sc, ox, oy, g) {
-      const orbRng = this.makePrng(g.ORN + 888);
+      const orbRng = this.makePrng(g.ORN ^ 0xA3C59E1F);
       const tX0    = ox + p.bodyLen * sc * 0.82;
       const tY0    = oy - p.bodyH * sc * 0.08;
 

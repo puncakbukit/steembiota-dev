@@ -438,12 +438,19 @@ function drawWings(ctx, g, W, H, opts = {}) {
   const rootY = cy + 5 * sz;
 
   function drawWingSide(flip) {
-    const dir = flip ? -1 : 1;
+    const dir = flip ? -1 : 1; // eslint-disable-line no-unused-vars
     ctx.save();
     if (flip) { ctx.scale(-1, 1); ctx.translate(-W, 0); }
 
-    const rx = W - cx;  // reflected cx
-    const wx = rx + 8 * sz * (flip ? -1 : 1);
+    // After the ctx.scale(-1,1) + translate(-W,0) flip, the canvas is mirrored
+    // so that positive-x still points rightward relative to the wing.
+    // wingRootX is the x-coordinate of the torso attachment point in the
+    // (possibly reflected) coordinate space.  Because cx = W*0.5, both the
+    // flipped and unflipped calls produce the same numeric value (W - cx = cx),
+    // which is intentional: the flip transform handles the mirroring, so this
+    // point always sits at the canvas centre in the local coordinate space.
+    const wingRootX = W - cx;
+    const wx = wingRootX + 8 * sz * (flip ? -1 : 1);
 
     if (wingStyle === 0) {
       // Feathered wing — layered ellipses

@@ -54,9 +54,12 @@ function makePrng(seed) {
 
 // Derive a deterministic integer seed from two genomes.
 // Uses a simple hash over all gene values so order-of-paste doesn't matter.
+// GEN appears once (shared by both parents after the same-genus check).
+// SX is included so that a male×female pair hashes differently from a
+// hypothetical female×male call with the same other genes.
 function breedSeed(a, b) {
-  const vals = [a.GEN,a.MOR,a.APP,a.ORN,a.CLR,a.LIF,a.MUT,
-                b.GEN,b.MOR,b.APP,b.ORN,b.CLR,b.LIF,b.MUT];
+  const vals = [a.GEN,a.SX,a.MOR,a.APP,a.ORN,a.CLR,a.LIF,a.MUT,
+                      b.SX,b.MOR,b.APP,b.ORN,b.CLR,b.LIF,b.MUT];
   return vals.reduce((h, v) => (Math.imul(h ^ (v | 0), 0x9e3779b9) >>> 0), 0x12345678);
 }
 
@@ -64,20 +67,6 @@ function breedSeed(a, b) {
 // base = 1%; scales with combined MUT.
 function mutationChance(a, b) {
   return 0.01 * (1 + a.MUT + b.MUT);
-}
-
-// Inherit one gene: pick from either parent, then optionally mutate.
-// rng     — seeded PRNG function
-// a, b    — parent gene values
-// mChance — probability of mutation this call
-// range   — max ± shift when mutation fires
-// min/max — clamp bounds
-function inheritGene(rng, a, b, mChance, range, min, max) {
-  let v = rng() < 0.5 ? a : b;
-  if (rng() < mChance) {
-    v = v + Math.floor(rng() * range * 2) - range;
-  }
-  return Math.max(min, Math.min(max, Math.round(v)));
 }
 
 // Rare speciation: 0.5% chance GEN mutates to an entirely new value.
@@ -478,15 +467,11 @@ function breedGenomes(a, b) {
   const rng   = makePrng(seed);
   const mCh   = mutationChance(a, b);
 
-  // Wrapper around inheritGene that sets didMutate = true the moment any
-  // mutation branch fires.  This replaces the old post-hoc simpleMix approach,
-  // which consumed extra rng() draws after child construction and could miss
-  // mutations in CLR, LIF, FRT_START, FRT_END, and MUT entirely.
+  // Gene inheritance closure — picks one parent's value then optionally mutates.
+  // Sets didMutate = true the moment any mutation branch fires.
+  // Draws rng() twice (pick + mutRoll), plus a third draw only when mutating.
   let didMutate = false;
   const i = (av, bv, range, min, max) => {
-    // inheritGene draws rng() twice: once to pick a parent, once to test
-    // mutation.  We replicate that logic here so we can inspect the mutation
-    // draw without advancing a separate PRNG or duplicating state.
     const picked  = rng() < 0.5 ? av : bv;
     const mutRoll = rng();
     if (mutRoll < mCh) {
@@ -497,17 +482,37 @@ function breedGenomes(a, b) {
     return Math.max(min, Math.min(max, Math.round(picked)));
   };
 
+  // CLR-specific variant: hue is a circular quantity that wraps at 360°.
+  // Clamping to [0, 359] would cause offspring of parents near 0°/359° to
+  // pile up at the boundary instead of wrapping naturally across the seam.
+  // We apply the mutation shift with modular arithmetic instead.
+  const iHue = (av, bv, range) => {
+    const picked  = rng() < 0.5 ? av : bv;
+    const mutRoll = rng();
+    if (mutRoll < mCh) {
+      didMutate = true;
+      const shift = Math.floor(rng() * range * 2) - range;
+      return ((picked + shift) % 360 + 360) % 360;
+    }
+    return picked;
+  };
+
   const child = {
     GEN:       a.GEN,                                   // same genus (may speciate below)
     SX:        Math.floor(rng() * 2),                   // 50/50 sex
     MOR:       i(a.MOR, b.MOR,  200, 0,    9999),
     APP:       i(a.APP, b.APP,  200, 0,    9999),
     ORN:       i(a.ORN, b.ORN,  200, 0,    9999),
-    CLR:       i(a.CLR, b.CLR,   10, 0,     359),
+    CLR:       iHue(a.CLR, b.CLR, 10),                 // hue — wraps mod 360, not clamped
     LIF:       i(a.LIF, b.LIF,   10, 40,    200),
     FRT_START: 0,   // recalculated below
     FRT_END:   0,
-    MUT:       Math.min(5, i(a.MUT, b.MUT, 1, 0, 5) + (rng() < 0.2 ? 1 : 0))
+    // MUT: inherit the base value then apply a balanced ±1 nudge (20% up,
+    // 20% down, 60% unchanged) so high-MUT lineages can recover over time
+    // rather than ratcheting permanently to the cap of 5.
+    MUT: Math.min(5, Math.max(0,
+      i(a.MUT, b.MUT, 1, 0, 5) + (rng() < 0.2 ? 1 : rng() < 0.25 ? -1 : 0)
+    ))
   };
 
   // Recalculate FRT bounds from child LIF
