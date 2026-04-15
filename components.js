@@ -1838,6 +1838,8 @@ buildPhenotype(genome, age, feedState) {
       ctx.ellipse(ox, oy, p.bodyLen * sc, p.bodyH * sc, pt.torsoAngle, 0, Math.PI * 2);
       ctx.fill(); ctx.stroke();
 
+      this._drawFur(ctx, p, sc, ox, oy, pt); 
+
       // ---- CHEST MARKING ----
       if (p.hasChestMark && p.ornamentScale > 0.2) {
         ctx.save();
