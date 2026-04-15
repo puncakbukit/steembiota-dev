@@ -2362,25 +2362,26 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
   const hue = p.finalHue;
   const sat = p.colorSat;
   const lit = p.colorLight;
-  
+
   ctx.save();
   ctx.translate(ox, oy);
   ctx.rotate(pt.torsoAngle);
-  
-  const count = 40 + (p.furLength * 30); // Density increases with style
+
+  // We increase the count because we are now filling an area, not just a perimeter.
+  const fringeCount = 40 + (p.furLength * 30);
+  const surfaceCount = fringeCount * 1.2; // Extra strands for the interior
   const strandLen = (2 + p.furLength * 3) * sc;
-  
+
+  // Fringe fur (around the edges to keep the shaggy silhouette)
   ctx.strokeStyle = this.hsl(hue, sat - 10, lit - 10, 0.6);
   ctx.lineWidth = 1 * sc;
 
-  for (let i = 0; i < count; i++) {
-    const angle = (i / count) * Math.PI * 2;
-    // Position on the ellipse boundary
+  for (let i = 0; i < fringeCount; i++) {
+    const angle = (i / fringeCount) * Math.PI * 2;
     const px = Math.cos(angle) * p.bodyLen * sc;
     const py = Math.sin(angle) * p.bodyH * sc;
-    
-    // Direction of hair (pointing outward with slight randomness)
-    const jitter = (Math.sin(i * 13.5) * 0.2); 
+
+    const jitter = (Math.sin(i * 13.5) * 0.2);
     const nx = Math.cos(angle + jitter) * strandLen;
     const ny = Math.sin(angle + jitter) * strandLen;
 
@@ -2389,6 +2390,33 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
     ctx.lineTo(px + nx, py + ny);
     ctx.stroke();
   }
+
+  // Internal surface fur (texture inside the torso)
+  // We use a lower alpha (0.3) so the underlying body gradients remain visible.
+  ctx.strokeStyle = this.hsl(hue, sat - 12, lit - 15, 0.3);
+  
+  for (let i = 0; i < surfaceCount; i++) {
+    // Deterministic pseudo-random distribution inside the ellipse
+    const t = i / surfaceCount;
+    const angle = t * Math.PI * 2 * 7.5; // Spiral distribution
+    const r = Math.sqrt(t) * 0.9; // sqrt(t) ensures uniform distribution area-wise
+    
+    const px = Math.cos(angle) * p.bodyLen * sc * r;
+    const py = Math.sin(angle) * p.bodyH * sc * r;
+
+    // Interior fur looks better if it follows a slightly more uniform downward/backward flow
+    const jitter = (Math.sin(i * 21.7) * 0.4);
+    const flowAngle = Math.PI * 0.2 + jitter; 
+
+    const nx = Math.cos(flowAngle) * strandLen * 0.8;
+    const ny = Math.sin(flowAngle) * strandLen * 0.8;
+
+    ctx.beginPath();
+    ctx.moveTo(px, py);
+    ctx.lineTo(px + nx, py + ny);
+    ctx.stroke();
+  }
+
   ctx.restore();
 }
   },
