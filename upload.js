@@ -390,32 +390,35 @@ const UploadView = {
   inject: ["username", "hasKeychain", "notify"],
   components: { CreatureCanvasComponent },
 
-  data() {
-    return {
-      // Step management: "pick" | "analyse" | "preview" | "published"
-      step:          "pick",
+data() {
+  return {
+    // Step management: "pick" | "analyse" | "preview" | "published"
+    step:          "pick",
 
-      // Image state
-      imageFile:     null,
-      imageDataUrl:  null,    // for <img> preview
-      imageEl:       null,    // decoded HTMLImageElement
-      analysisError: "",
+    // Image state
+    imageFile:     null,
+    imageDataUrl:  null,    // for <img> preview
+    imageEl:       null,    // decoded HTMLImageElement
+    analysisError: "",
 
-      // Derived genome + render inputs
-      genome:        null,
-      imageStats:    null,    // raw stats from analysePixels()
-      facingRight:   false,
-      unicodeArt:    "",
-      customTitle:   "",
-      genusInput:    "",      // optional genus override (0–999)
+    // Derived genome + render inputs
+    genome:        null,
+    imageStats:    null,    // raw stats from analysePixels()
+    facingRight:   false,
+    unicodeArt:    "",
+    customTitle:   "",
+    genusInput:    "",      // optional genus override (0–999)
 
-      // Publishing
-      publishing:    false,
+    // Publishing
+    publishing:    false,
 
-      // Drag state
-      isDragging:    false,
-    };
-  },
+    // Drag state
+    isDragging:    false,
+
+    // NEW: reroll tracking
+    rerollIndex:   0,
+  };
+},
 
   computed: {
   creatureName()  { return this.genome ? generateFullName(this.genome) : ""; },
@@ -443,144 +446,153 @@ const UploadView = {
   }
 },
 
-  methods: {
-    // ----------------------------------------------------------
-    // File input handling
-    // ----------------------------------------------------------
-    onFileInputChange(e) {
-      const file = e.target.files && e.target.files[0];
-      if (file) this.startAnalysis(file);
-    },
+methods: {
+  // ----------------------------------------------------------
+  // File input handling
+  // ----------------------------------------------------------
+  onFileInputChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (file) this.startAnalysis(file);
+  },
 
-    onDrop(e) {
-      e.preventDefault();
-      this.isDragging = false;
-      const file = e.dataTransfer.files && e.dataTransfer.files[0];
-      if (file && file.type.startsWith("image/")) this.startAnalysis(file);
-    },
+  onDrop(e) {
+    e.preventDefault();
+    this.isDragging = false;
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file && file.type.startsWith("image/")) this.startAnalysis(file);
+  },
 
-    onDragOver(e) { e.preventDefault(); this.isDragging = true; },
-    onDragLeave()  { this.isDragging = false; },
+  onDragOver(e) { e.preventDefault(); this.isDragging = true; },
+  onDragLeave()  { this.isDragging = false; },
 
-    triggerFileInput() { this.$refs.fileInput.click(); },
+  triggerFileInput() { this.$refs.fileInput.click(); },
 
-    // ----------------------------------------------------------
-    // Core analysis pipeline
-    // ----------------------------------------------------------
-    async startAnalysis(file) {
-      this.imageFile    = file;
-      this.analysisError = "";
-      this.genome       = null;
-      this.imageStats   = null;
-      this.step         = "analyse";
+  // ----------------------------------------------------------
+  // Core analysis pipeline
+  // ----------------------------------------------------------
+  async startAnalysis(file) {
+    this.rerollIndex  = 0; // NEW: reset reroll index
+    this.imageFile    = file;
+    this.analysisError = "";
+    this.genome       = null;
+    this.imageStats   = null;
+    this.step         = "analyse";
 
-      // Show image preview immediately
-      const reader = new FileReader();
-      reader.onload = e => { this.imageDataUrl = e.target.result; };
-      reader.readAsDataURL(file);
+    // Show image preview immediately
+    const reader = new FileReader();
+    reader.onload = e => { this.imageDataUrl = e.target.result; };
+    reader.readAsDataURL(file);
 
-      try {
-        const img      = await loadImageFile(file);
-        this.imageEl   = img;
+    try {
+      const img      = await loadImageFile(file);
+      this.imageEl   = img;
 
-        // Run analysis on next tick so the UI shows "analysing…" first
-        await new Promise(r => setTimeout(r, 40));
+      // Run analysis on next tick so the UI shows "analysing…" first
+      await new Promise(r => setTimeout(r, 40));
 
-        const data   = samplePixels(img);
-        const stats  = analysePixels(data, img.naturalWidth, img.naturalHeight);
-        this.imageStats = stats;
+      const data   = samplePixels(img);
+      const stats  = analysePixels(data, img.naturalWidth, img.naturalHeight);
+      this.imageStats = stats;
 
-        const genome = imageToGenome(img);
+      // UPDATED: pass rerollIndex
+      const genome = imageToGenome(img, this.rerollIndex);
 
-        // Apply genus override if provided
-        if (this.genusInput !== "" && this.genusInputValid) {
-          genome.GEN = Number(this.genusInput);
-        }
-
-        this.genome      = genome;
-        this.facingRight = Math.random() < 0.5;
-        this.unicodeArt  = buildUnicodeArt(genome, 0, null, this.facingRight, "standing");
-        this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
-        this.step        = "preview";
-      } catch (err) {
-        this.analysisError = err.message || "Failed to analyse image.";
-        this.step = "pick";
-      }
-    },
-
-    // ----------------------------------------------------------
-    // Reroll — regenerate genome keeping the same image
-    // ----------------------------------------------------------
-    reroll() {
-      if (!this.imageEl) return;
-      const genome = imageToGenome(this.imageEl);
+      // Apply genus override if provided
       if (this.genusInput !== "" && this.genusInputValid) {
         genome.GEN = Number(this.genusInput);
       }
+
       this.genome      = genome;
+      this.facingRight = Math.random() < 0.5;
       this.unicodeArt  = buildUnicodeArt(genome, 0, null, this.facingRight, "standing");
       this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
-    },
-
-    // ----------------------------------------------------------
-    // Publish
-    // ----------------------------------------------------------
-    async publish() {
-      if (!this.canPublish) return;
-      if (!this.genusInputValid) {
-        this.notify("Genus must be a whole number from 0 to 999.", "error");
-        return;
-      }
-      this.publishing = true;
-      publishCreature(
-        this.username,
-        this.genome,
-        this.unicodeArt,
-        this.creatureName,
-        0,
-        this.lifecycleStage.name,
-        this.customTitle,
-        this.genusName,
-        (response) => {
-          this.publishing = false;
-          if (response.success) {
-            invalidateGlobalListCaches();
-            invalidateOwnedCachesForUser(this.username);
-            this.notify("🌿 " + this.creatureName + " published to the blockchain!", "success");
-            this.$router.push("/@" + this.username + "/" + response.permlink);
-          } else {
-            this.notify("Publish failed: " + (response.message || "Unknown error"), "error");
-          }
-        }
-      );
-    },
-
-    // ----------------------------------------------------------
-    // Reset back to image picker
-    // ----------------------------------------------------------
-    reset() {
-      this.step          = "pick";
-      this.imageFile     = null;
-      this.imageDataUrl  = null;
-      this.imageEl       = null;
-      this.genome        = null;
-      this.imageStats    = null;
-      this.analysisError = "";
-      this.genusInput    = "";
-      if (this.$refs.fileInput) this.$refs.fileInput.value = "";
-    },
-
-    onFacingResolved(dir) {
-      this.facingRight = dir;
-      if (this.genome) {
-        this.unicodeArt = buildUnicodeArt(this.genome, 0, null, dir, "standing");
-      }
-    },
-
-    hueSwatchStyle(hue) {
-      return `background: hsl(${hue}, 60%, 55%); width:16px; height:16px; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:6px; flex-shrink:0;`;
-    },
+      this.step        = "preview";
+    } catch (err) {
+      this.analysisError = err.message || "Failed to analyse image.";
+      this.step = "pick";
+    }
   },
+
+  // ----------------------------------------------------------
+  // Reroll — regenerate genome keeping the same image
+  // ----------------------------------------------------------
+  reroll() {
+    if (!this.imageEl) return;
+
+    this.rerollIndex++; // NEW: increment index
+
+    // UPDATED: pass rerollIndex
+    const genome = imageToGenome(this.imageEl, this.rerollIndex);
+
+    if (this.genusInput !== "" && this.genusInputValid) {
+      genome.GEN = Number(this.genusInput);
+    }
+
+    this.genome      = genome;
+    this.unicodeArt  = buildUnicodeArt(genome, 0, null, this.facingRight, "standing");
+    this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
+  },
+
+  // ----------------------------------------------------------
+  // Publish
+  // ----------------------------------------------------------
+  async publish() {
+    if (!this.canPublish) return;
+    if (!this.genusInputValid) {
+      this.notify("Genus must be a whole number from 0 to 999.", "error");
+      return;
+    }
+    this.publishing = true;
+    publishCreature(
+      this.username,
+      this.genome,
+      this.unicodeArt,
+      this.creatureName,
+      0,
+      this.lifecycleStage.name,
+      this.customTitle,
+      this.genusName,
+      (response) => {
+        this.publishing = false;
+        if (response.success) {
+          invalidateGlobalListCaches();
+          invalidateOwnedCachesForUser(this.username);
+          this.notify("🌿 " + this.creatureName + " published to the blockchain!", "success");
+          this.$router.push("/@" + this.username + "/" + response.permlink);
+        } else {
+          this.notify("Publish failed: " + (response.message || "Unknown error"), "error");
+        }
+      }
+    );
+  },
+
+  // ----------------------------------------------------------
+  // Reset back to image picker
+  // ----------------------------------------------------------
+  reset() {
+    this.step          = "pick";
+    this.imageFile     = null;
+    this.imageDataUrl  = null;
+    this.imageEl       = null;
+    this.genome        = null;
+    this.imageStats    = null;
+    this.analysisError = "";
+    this.genusInput    = "";
+    this.rerollIndex   = 0; // OPTIONAL: reset here too
+    if (this.$refs.fileInput) this.$refs.fileInput.value = "";
+  },
+
+  onFacingResolved(dir) {
+    this.facingRight = dir;
+    if (this.genome) {
+      this.unicodeArt = buildUnicodeArt(this.genome, 0, null, dir, "standing");
+    }
+  },
+
+  hueSwatchStyle(hue) {
+    return `background: hsl(${hue}, 60%, 55%); width:16px; height:16px; border-radius:50%; display:inline-block; vertical-align:middle; margin-right:6px; flex-shrink:0;`;
+  },
+},
 
   template: `
     <div style="margin-top:20px;padding:0 16px 60px;max-width:700px;margin-left:auto;margin-right:auto;">
