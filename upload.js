@@ -205,9 +205,11 @@ function hueDist(a, b) {
  *   GEN % 8 === paletteIndex
  * We pick a GEN that also incorporates some randomness for variety.
  *
+ * Now accepts an rng function for deterministic selection.
+ *
  * Returns { GEN, CLR }.
  */
-function fitHue(targetHue) {
+function fitHue(targetHue, rng) {
   let bestGen = 0, bestClr = 0, bestDist = Infinity;
 
   for (let pi = 0; pi < PALETTES.length; pi++) {
@@ -219,8 +221,9 @@ function fitHue(targetHue) {
     if (dist < bestDist) {
       bestDist = dist;
       bestClr  = clr;
-      // Pick a random GEN in [0,999] that maps to this palette index
-      const base_gen = pi + Math.floor(Math.random() * 125) * 8;
+
+      // Pick a GEN in [0,999] that maps to this palette index using rng()
+      const base_gen = pi + Math.floor(rng() * 125) * 8;
       bestGen = Math.min(999, base_gen);
     }
   }
@@ -292,13 +295,15 @@ function fitMor(targetRatio) {
  * Map edge density (0–1) to APP seed.
  * High edge density → higher APP (more varied appendages, e.g., complex ears/wings).
  * APP is in [0, 9999].
+ *
+ * Now accepts an rng function for deterministic jitter.
  */
-function fitApp(edgeDensity) {
+function fitApp(edgeDensity, rng) {
   // Linear mapping to full range
   const base = Math.round(edgeDensity * 9999);
 
   // Slightly reduced jitter for more stability while still allowing variation
-  const jitter = Math.floor(Math.random() * 2000) - 1000;
+  const jitter = Math.floor(rng() * 2000) - 1000;
 
   return Math.max(0, Math.min(9999, base + jitter));
 }
@@ -306,8 +311,10 @@ function fitApp(edgeDensity) {
 /**
  * Map colourfulness + litVariance + edgeDensity to ORN seed.
  * High colourfulness + contrast + detail → richer ornamentation / fur texture.
+ *
+ * Now accepts an rng function for deterministic jitter.
  */
-function fitOrn(colourfulness, litVariance, edgeDensity) {
+function fitOrn(colourfulness, litVariance, edgeDensity, rng) {
   // Normalize lighting variance (~0–800 → 0–1)
   const normLit = Math.min(litVariance / 800, 1.0);
 
@@ -320,7 +327,7 @@ function fitOrn(colourfulness, litVariance, edgeDensity) {
   );
 
   // Moderate jitter for natural variation
-  const jitter = Math.floor(Math.random() * 1000) - 500;
+  const jitter = Math.floor(rng() * 1000) - 500;
 
   return Math.max(0, Math.min(9999, base + jitter));
 }
