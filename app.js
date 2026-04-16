@@ -455,9 +455,12 @@ function computeUserLevel(posts, comments, upvotedCreaturePermlinks = new Set())
   };
 }
 
+// ============================================================
+// UPDATED: breedGenomes now requires a nonce string
+// ============================================================
 // Breed two genomes into a child genome.
 // Returns { child, mutated, speciated } for display purposes.
-function breedGenomes(a, b) {
+function breedGenomes(a, b, nonce) {
   if (a.GEN !== b.GEN) {
     throw new Error(
       "Genus mismatch: GEN " + a.GEN + " ≠ GEN " + b.GEN +
@@ -472,18 +475,16 @@ function breedGenomes(a, b) {
     );
   }
 
-  const seed  = breedSeed(a, b);
+  const seed  = breedSeed(a, b, nonce);
   const rng   = makePrng(seed);
   const mCh   = mutationChance(a, b);
 
-  // Gene inheritance closure — picks one parent's value then optionally mutates.
-  // Sets didMutate = true the moment any mutation branch fires.
-  // Draws rng() twice (pick + mutRoll), plus a third draw only when mutating.
   let didMutate = false;
+
+  // Gene inheritance
   const i = (av, bv, range, min, max) => {
     const picked  = rng() < 0.5 ? av : bv;
-    const mutRoll = rng();
-    if (mutRoll < mCh) {
+    if (rng() < mCh) {
       didMutate = true;
       const shifted = picked + Math.floor(rng() * range * 2) - range;
       return Math.max(min, Math.min(max, Math.round(shifted)));
@@ -491,14 +492,10 @@ function breedGenomes(a, b) {
     return Math.max(min, Math.min(max, Math.round(picked)));
   };
 
-  // CLR-specific variant: hue is a circular quantity that wraps at 360°.
-  // Clamping to [0, 359] would cause offspring of parents near 0°/359° to
-  // pile up at the boundary instead of wrapping naturally across the seam.
-  // We apply the mutation shift with modular arithmetic instead.
+  // Hue (circular)
   const iHue = (av, bv, range) => {
     const picked  = rng() < 0.5 ? av : bv;
-    const mutRoll = rng();
-    if (mutRoll < mCh) {
+    if (rng() < mCh) {
       didMutate = true;
       const shift = Math.floor(rng() * range * 2) - range;
       return ((picked + shift) % 360 + 360) % 360;
@@ -507,44 +504,38 @@ function breedGenomes(a, b) {
   };
 
   const child = {
-    GEN:       a.GEN,                                   // same genus (may speciate below)
-    SX:        Math.floor(rng() * 2),                   // 50/50 sex
+    GEN:       a.GEN,
+    SX:        Math.floor(rng() * 2),
     MOR:       i(a.MOR, b.MOR,  200, 0,    9999),
     APP:       i(a.APP, b.APP,  200, 0,    9999),
     ORN:       i(a.ORN, b.ORN,  200, 0,    9999),
-    CLR:       iHue(a.CLR, b.CLR, 10),                 // hue — wraps mod 360, not clamped
+    CLR:       iHue(a.CLR, b.CLR, 10),
     LIF:       i(a.LIF, b.LIF,   10, 40,    200),
-    FRT_START: 0,   // recalculated below
+    FRT_START: 0,
     FRT_END:   0,
-    // MUT: inherit the base value then apply a balanced ±1 nudge (20% up,
-    // 20% down, 60% unchanged) so high-MUT lineages can recover over time
-    // rather than ratcheting permanently to the cap of 5.
-    // Two independent draws keep both probabilities at exactly 20%.
-    // The nudge is tracked separately so didMutate reflects it correctly.
-    MUT: 0  // placeholder — computed immediately below
+    MUT:       0
   };
 
-  // MUT nudge — two independent draws so +1 and -1 are each exactly 20%.
-  // Using a single chained ternary made -1 conditional on the +1 roll failing,
-  // which reduced its effective probability to 16% (biased toward the cap).
+  // MUT handling (balanced ±1 nudge)
   const mutBase   = i(a.MUT, b.MUT, 1, 0, 5);
   const nudgeUp   = rng() < 0.2 ? 1 : 0;
   const nudgeDown = rng() < 0.2 ? 1 : 0;
-  const mutNudge  = nudgeUp - nudgeDown;          // −1, 0, or +1 (−4% net drift removed)
-  if (mutNudge !== 0) didMutate = true;           // nudge counts as a genome change
+  const mutNudge  = nudgeUp - nudgeDown;
+  if (mutNudge !== 0) didMutate = true;
   child.MUT = Math.min(5, Math.max(0, mutBase + mutNudge));
 
-  // Recalculate FRT bounds from child LIF
+  // Fertility bounds
   child.FRT_START = Math.min(
     i(a.FRT_START, b.FRT_START, 5, 10, child.LIF - 10),
     child.LIF - 10
   );
+
   child.FRT_END = Math.min(
     i(a.FRT_END, b.FRT_END, 5, child.FRT_START + 5, child.LIF - 1),
     child.LIF - 1
   );
 
-  // Speciation check — may change GEN to a new value
+  // Speciation
   const originalGEN = child.GEN;
   child.GEN = maybeSpeciate(rng, child.GEN);
   const speciated = child.GEN !== originalGEN;
