@@ -3317,11 +3317,19 @@ const BreedingPanelComponent = {
           if (age >= g.LIF) throw new Error(
             `${label} (${res.author}) is a fossil (age ${age} ≥ lifespan ${g.LIF}). Fossils cannot breed.`
           );
-          if (age < g.FRT_START) throw new Error(
-            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${g.FRT_START}).`
+          // Apply the same feed-based and play-based fertility extensions that
+          // CreatureView uses so the breeding gate matches what the UI shows.
+          const boost      = res.feedState?.fertilityBoost || 0;        // fruit/crystal feeds
+          const ext        = res.activityState?.fertilityExtension || 0; // play events
+          const windowDays = g.FRT_END - g.FRT_START;
+          const boostDays  = Math.floor(windowDays * boost / 2);
+          const effStart   = g.FRT_START - ext - boostDays;
+          const effEnd     = g.FRT_END   + ext + boostDays;
+          if (age < effStart) throw new Error(
+            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${effStart}${effStart !== g.FRT_START ? ` — extended from ${g.FRT_START} by feeding/play` : ``}).`
           );
-          if (age >= g.FRT_END) throw new Error(
-            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${g.FRT_END}).`
+          if (age >= effEnd) throw new Error(
+            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${effEnd}${effEnd !== g.FRT_END ? ` — extended from ${g.FRT_END} by feeding/play` : ``}).`
           );
         };
         checkFertility(resA, "Parent A");

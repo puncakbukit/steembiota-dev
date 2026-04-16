@@ -1163,7 +1163,10 @@ function publishTransferCancel(username, creatureAuthor, creaturePermlink, creat
 // ============================================================
 
 const MAX_ANCESTOR_DEPTH = 12;   // max generations to walk upward
-const POSTS_PER_AUTHOR   = 100;  // how many recent posts to fetch per author
+const POSTS_PER_AUTHOR   = 500;  // posts to fetch per author for kinship corpus.
+                                  // 100 was too low: prolific breeders' early offspring
+                                  // could fall outside the window, causing missed sibling/
+                                  // descendant relationships in the inbreeding check.
 
 // Parse json_metadata from a raw Steem post object.
 // Returns the steembiota sub-object, or null if not a SteemBiota post.

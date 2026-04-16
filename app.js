@@ -101,7 +101,7 @@ async function loadGenomeFromPost(url) {
   );
   if (!post.author) throw new Error("Post not found: " + url);
 
-  // Fetch all replies once — used for both genome fallback and permit parsing
+  // Fetch all replies once — used for genome fallback, permit parsing, and feed/activity state.
   const replies   = await fetchAllReplies(author, permlink);
   const ownership = parseOwnershipChain(replies, post.author);
   const permits   = parseBreedPermitsWithTransfer(
@@ -109,23 +109,32 @@ async function loadGenomeFromPost(url) {
   );
   const effectiveOwner = ownership.effectiveOwner;
 
+  // Parse feed and activity state from the same reply set so the breeding
+  // eligibility check can honour feed-based and play-based fertility extensions.
+  // These are pure functions — no extra network calls needed.
+  const feedEvents    = parseFeedEvents(replies, post.author);
+  const activityState = computeActivityState(replies, post.author, null);
+
   // Try json_metadata.steembiota.genome first
   try {
     const meta = JSON.parse(post.json_metadata || "{}");
     if (meta.steembiota && meta.steembiota.genome) {
+      const genome     = meta.steembiota.genome;
       const storedAge  = meta.steembiota.age ?? 0;
       const elapsed    = calculateAge(post.created);   // days since post was published
       const currentAge = storedAge + elapsed;
-      return { genome: meta.steembiota.genome, author, permlink, age: currentAge, permits, effectiveOwner };
+      const feedState  = computeFeedState(feedEvents, genome);
+      return { genome, author, permlink, age: currentAge, permits, effectiveOwner, feedState, activityState };
     }
   } catch {}
 
   // Fallback: parse ```genome ... ``` block from post body
   const match = post.body.match(/```genome\s*([\s\S]*?)```/);
   if (!match) throw new Error("No genome found in post: " + url);
-  const genome = JSON.parse(match[1].trim());
-  const elapsed = calculateAge(post.created);
-  return { genome, author, permlink, age: elapsed, permits, effectiveOwner };
+  const genome    = JSON.parse(match[1].trim());
+  const elapsed   = calculateAge(post.created);
+  const feedState = computeFeedState(feedEvents, genome);
+  return { genome, author, permlink, age: elapsed, permits, effectiveOwner, feedState, activityState };
 }
 
 // Stable string key that uniquely identifies a genome's content.
@@ -510,10 +519,20 @@ function breedGenomes(a, b) {
     // MUT: inherit the base value then apply a balanced ±1 nudge (20% up,
     // 20% down, 60% unchanged) so high-MUT lineages can recover over time
     // rather than ratcheting permanently to the cap of 5.
-    MUT: Math.min(5, Math.max(0,
-      i(a.MUT, b.MUT, 1, 0, 5) + (rng() < 0.2 ? 1 : rng() < 0.25 ? -1 : 0)
-    ))
+    // Two independent draws keep both probabilities at exactly 20%.
+    // The nudge is tracked separately so didMutate reflects it correctly.
+    MUT: 0  // placeholder — computed immediately below
   };
+
+  // MUT nudge — two independent draws so +1 and -1 are each exactly 20%.
+  // Using a single chained ternary made -1 conditional on the +1 roll failing,
+  // which reduced its effective probability to 16% (biased toward the cap).
+  const mutBase   = i(a.MUT, b.MUT, 1, 0, 5);
+  const nudgeUp   = rng() < 0.2 ? 1 : 0;
+  const nudgeDown = rng() < 0.2 ? 1 : 0;
+  const mutNudge  = nudgeUp - nudgeDown;          // −1, 0, or +1 (−4% net drift removed)
+  if (mutNudge !== 0) didMutate = true;           // nudge counts as a genome change
+  child.MUT = Math.min(5, Math.max(0, mutBase + mutNudge));
 
   // Recalculate FRT bounds from child LIF
   child.FRT_START = Math.min(
