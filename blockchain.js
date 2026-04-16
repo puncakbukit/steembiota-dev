@@ -2504,3 +2504,57 @@ async function findCreatureWearingAccessory(username, accAuthor, accPermlink) {
   }
   return null;
 }
+
+// ============================================================
+// INDEXEDDB CACHE (Persistence for large creature data)
+// ============================================================
+const DB_NAME = "SteemBiotaDB";
+const DB_VERSION = 1;
+const STORE_CREATURES = "creature_pages";
+
+function openSBDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(DB_NAME, DB_VERSION);
+    request.onupgradeneeded = (e) => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_CREATURES)) {
+        db.createObjectStore(STORE_CREATURES, { keyPath: "id" });
+      }
+    };
+    request.onsuccess = (e) => resolve(e.target.result);
+    request.onerror = (e) => reject(e.target.error);
+  });
+}
+
+async function writeCreatureDB(key, data, ttlMs = 600000) {
+  try {
+    const db = await openSBDB();
+    const tx = db.transaction(STORE_CREATURES, "readwrite");
+    const store = tx.objectStore(STORE_CREATURES);
+    store.put({
+      id: key,
+      savedAt: Date.now(),
+      expiresAt: Date.now() + ttlMs,
+      data: JSON.parse(JSON.stringify(data)) // Deep clone to break Vue reactivity
+    });
+  } catch (err) {
+    console.error("DB Write Error:", err);
+  }
+}
+
+async function readCreatureDB(key) {
+  try {
+    const db = await openSBDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_CREATURES, "readonly");
+      const store = tx.objectStore(STORE_CREATURES);
+      const request = store.get(key);
+      request.onsuccess = () => {
+        const res = request.result;
+        if (res && Date.now() < res.expiresAt) resolve(res.data);
+        else resolve(null);
+      };
+      request.onerror = () => resolve(null);
+    });
+  } catch { return null; }
+}
