@@ -52,15 +52,28 @@ function makePrng(seed) {
   };
 }
 
-// Derive a deterministic integer seed from two genomes.
-// Uses a simple hash over all gene values so order-of-paste doesn't matter.
-// GEN appears once (shared by both parents after the same-genus check).
-// SX is included so that a male×female pair hashes differently from a
-// hypothetical female×male call with the same other genes.
-function breedSeed(a, b) {
-  const vals = [a.GEN,a.SX,a.MOR,a.APP,a.ORN,a.CLR,a.LIF,a.MUT,
-                      b.SX,b.MOR,b.APP,b.ORN,b.CLR,b.LIF,b.MUT];
-  return vals.reduce((h, v) => (Math.imul(h ^ (v | 0), 0x9e3779b9) >>> 0), 0x12345678);
+// ============================================================
+// UPDATED: breedSeed now accepts a nonce (child name + parent permlinks)
+// ============================================================
+// Derive a deterministic integer seed from two genomes + nonce.
+// Ensures siblings differ when nonce differs (e.g., unique permlink/name).
+function breedSeed(a, b, nonce) {
+  const vals = [
+    a.GEN, a.SX, a.MOR, a.APP, a.ORN, a.CLR, a.LIF, a.MUT,
+    b.SX, b.MOR, b.APP, b.ORN, b.CLR, b.LIF, b.MUT,
+    nonce
+  ];
+
+  // FNV-1a style hash
+  let h = 0x811c9dc5;
+  for (let val of vals) {
+    const s = String(val);
+    for (let i = 0; i < s.length; i++) {
+      h ^= s.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+  }
+  return h >>> 0;
 }
 
 // Mutation probability from both parents' MUT genes.
