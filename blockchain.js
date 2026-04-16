@@ -1427,12 +1427,15 @@ async function checkBreedingCompatibility(resA, resB) {
   for (const node of ancestorsA.values()) authorSet.add(node.author);
   for (const node of ancestorsB.values()) authorSet.add(node.author);
 
-  // Fetch all SteemBiota posts by those authors + add known ancestor nodes to corpus
+  // Fetch all SteemBiota posts by those authors
   const corpus = await fetchCorpusByAuthors(authorSet);
 
-  // Seed corpus with ancestor nodes in case they predate the blog fetch window
+  // FIX: Explicitly add all specific ancestor nodes to the corpus.
+  // This ensures they are available for descendant/sibling checks
+  // even if they were posted thousands of blocks ago.
   for (const [k, n] of ancestorsA) corpus.set(k, n);
   for (const [k, n] of ancestorsB) corpus.set(k, n);
+
   // Also add the two creatures themselves
   const nodeA = await fetchSteembiotaPost(resA.author, resA.permlink);
   const nodeB = await fetchSteembiotaPost(resB.author, resB.permlink);
@@ -1452,6 +1455,7 @@ async function checkBreedingCompatibility(resA, resB) {
       if (depth === 3) return "a great-grandparent";
       return `an ancestor (${depth} generations up)`;
     }
+
     // Check if other is a descendant of subject
     const desc = findDescendants(new Set([subjectKey]), corpus);
     if (desc.has(otherKey)) return "a descendant";
@@ -1468,11 +1472,15 @@ async function checkBreedingCompatibility(resA, resB) {
         if (depth === 1) return "an aunt or uncle";
         return `a relative (sibling of an ancestor ${depth} generations up)`;
       }
+
       // Check if niece/nephew descendant (descendant of a sibling)
       const selfSibs = findSiblings(new Set([subjectKey]), corpus);
       const nibDescendants = findDescendants(selfSibs, corpus);
-      if (nibDescendants.has(otherKey)) return "a niece, nephew, or their descendant";
+      if (nibDescendants.has(otherKey)) {
+        return "a niece, nephew, or their descendant";
+      }
     }
+
     return "a close relative";
   }
 
@@ -1484,6 +1492,7 @@ async function checkBreedingCompatibility(resA, resB) {
       `SteemBiota prevents inbreeding to encourage genetic diversity.`
     );
   }
+
   if (forbiddenB.has(keyA)) {
     const rel = describeRelationship(keyB, keyA, ancestorsB, corpus);
     throw new Error(
