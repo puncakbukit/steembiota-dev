@@ -1207,42 +1207,82 @@ async function fetchSteembiotaPost(author, permlink) {
   } catch { return null; }
 }
 
-// Walk ancestors of a creature upward via BFS.
-// Returns a Map<key, {author,permlink,meta,depth}> of all ancestors found.
-// If any ancestor is tombstoned (phantom), throws an Error so callers can
-// refuse breeding — an incomplete ancestry tree could mask inbreeding.
+// ============================================================
+// REFACTORED: fetchAncestors (Cache-first BFS)
+// ============================================================
+
+// Walk ancestors via BFS with cache-first strategy.
+// Returns Map<key, {author, permlink, meta, depth}>
 async function fetchAncestors(startAuthor, startPermlink) {
-  const visited = new Map();                           // key → node
-  const queue   = [{ author: startAuthor, permlink: startPermlink, depth: 0 }];
+  const visited = new Map();
+  const queue = [{ author: startAuthor, permlink: startPermlink, depth: 0 }];
 
   while (queue.length > 0) {
     const { author, permlink, depth } = queue.shift();
     const key = nodeKey(author, permlink);
+
     if (visited.has(key)) continue;
 
-    const node = await fetchSteembiotaPost(author, permlink);
-    if (!node) continue;
+    let parentA = null;
+    let parentB = null;
+    let phantom = false;
+    let meta = null;
 
-    // Phantom ancestor — ancestry incomplete, breeding must be refused.
-    if (node.phantom) {
+    // 1. TRY CACHE FIRST
+    const cached = await readAncestryDB(key);
+
+    if (cached) {
+      parentA = cached.parentA;
+      parentB = cached.parentB;
+      phantom = cached.isPhantom;
+
+      // Minimal meta reconstruction (enough for traversal)
+      meta = { parentA, parentB };
+    } else {
+      // 2. CACHE MISS → FETCH FROM BLOCKCHAIN
+      const node = await fetchSteembiotaPost(author, permlink);
+      if (!node) continue;
+
+      phantom = node.phantom;
+
+      if (!phantom) {
+        meta = node.meta;
+        parentA = meta.parentA;
+        parentB = meta.parentB;
+      }
+
+      // 3. STORE RESULT (including phantom)
+      await writeAncestryDB(key, parentA, parentB, phantom);
+    }
+
+    // Phantom check (same safety guarantee as original)
+    if (phantom) {
       throw new Error(
-        `Ancestor @${author}/${permlink} is a Phantom — its post was removed from the ` +
-        `visible chain. Ancestry cannot be fully verified; breeding is blocked to ` +
-        `protect genetic integrity.`
+        `Ancestor @${author}/${permlink} is a Phantom — its post was removed. ` +
+        `Ancestry cannot be verified; breeding blocked.`
       );
     }
 
-    visited.set(key, { ...node, depth });
+    visited.set(key, { author, permlink, meta, depth });
 
     if (depth >= MAX_ANCESTOR_DEPTH) continue;
 
-    // Enqueue parents if this was an offspring post
-    const pA = node.meta.parentA;
-    const pB = node.meta.parentB;
-    if (pA && pA.author && pA.permlink)
-      queue.push({ author: pA.author, permlink: pA.permlink, depth: depth + 1 });
-    if (pB && pB.author && pB.permlink)
-      queue.push({ author: pB.author, permlink: pB.permlink, depth: depth + 1 });
+    // Enqueue parents
+    if (parentA && parentA.author && parentA.permlink) {
+      queue.push({
+        author: parentA.author,
+        permlink: parentA.permlink,
+        depth: depth + 1
+      });
+    }
+
+    if (parentB && parentB.author && parentB.permlink) {
+      queue.push({
+        author: parentB.author,
+        permlink: parentB.permlink,
+        depth: depth + 1
+      });
+    }
   }
 
   return visited;
@@ -2499,21 +2539,68 @@ function norm(s) {
 // INDEXEDDB CACHE (Persistence for large creature data)
 // ============================================================
 const DB_NAME = "SteemBiotaDB";
-const DB_VERSION = 1;
+const DB_VERSION = 2; // Incremented for new store
 const STORE_CREATURES = "creature_pages";
+const STORE_ANCESTRY = "ancestry_cache"; // NEW
 
 function openSBDB() {
   return new Promise((resolve, reject) => {
     const request = indexedDB.open(DB_NAME, DB_VERSION);
+
     request.onupgradeneeded = (e) => {
       const db = e.target.result;
+
       if (!db.objectStoreNames.contains(STORE_CREATURES)) {
         db.createObjectStore(STORE_CREATURES, { keyPath: "id" });
       }
+
+      // NEW: ancestry cache store
+      if (!db.objectStoreNames.contains(STORE_ANCESTRY)) {
+        db.createObjectStore(STORE_ANCESTRY, { keyPath: "id" });
+      }
     };
+
     request.onsuccess = (e) => resolve(e.target.result);
     request.onerror = (e) => reject(e.target.error);
   });
+}
+
+// ============================================================
+// ANCESTRY CACHE HELPERS
+// ============================================================
+
+async function writeAncestryDB(key, parentA, parentB, isPhantom) {
+  try {
+    const db = await openSBDB();
+    const tx = db.transaction(STORE_ANCESTRY, "readwrite");
+    const store = tx.objectStore(STORE_ANCESTRY);
+
+    store.put({
+      id: key,
+      parentA,
+      parentB,
+      isPhantom,
+      ts: Date.now()
+    });
+  } catch (err) {
+    console.warn("Ancestry Cache Write Error:", err);
+  }
+}
+
+async function readAncestryDB(key) {
+  try {
+    const db = await openSBDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_ANCESTRY, "readonly");
+      const store = tx.objectStore(STORE_ANCESTRY);
+      const request = store.get(key);
+
+      request.onsuccess = () => resolve(request.result || null);
+      request.onerror = () => resolve(null);
+    });
+  } catch {
+    return null;
+  }
 }
 
 async function writeCreatureDB(key, data, ttlMs = 600000) {
