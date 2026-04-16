@@ -1207,81 +1207,12 @@ async function fetchSteembiotaPost(author, permlink) {
   } catch { return null; }
 }
 
-// ============================================================
-// INDEXEDDB CACHE (Persistence for large creature data)
-// ============================================================
-const DB_NAME = "SteemBiotaDB";
-const DB_VERSION = 2; // Incremented for new store
-const STORE_CREATURES = "creature_pages";
-const STORE_ANCESTRY = "ancestry_cache"; // NEW: High-performance kinship store
-
-function openSBDB() {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION);
-    request.onupgradeneeded = (e) => {
-      const db = e.target.result;
-
-      if (!db.objectStoreNames.contains(STORE_CREATURES)) {
-        db.createObjectStore(STORE_CREATURES, { keyPath: "id" });
-      }
-
-      // NEW: Store parent links specifically for kinship checks
-      if (!db.objectStoreNames.contains(STORE_ANCESTRY)) {
-        db.createObjectStore(STORE_ANCESTRY, { keyPath: "id" });
-      }
-    };
-
-    request.onsuccess = (e) => resolve(e.target.result);
-    request.onerror = (e) => reject(e.target.error);
-  });
-}
-
-// --- New Ancestry Cache Helpers ---
-
-async function writeAncestryDB(key, parentA, parentB, isPhantom) {
-  try {
-    const db = await openSBDB();
-    const tx = db.transaction(STORE_ANCESTRY, "readwrite");
-    const store = tx.objectStore(STORE_ANCESTRY);
-
-    store.put({
-      id: key,
-      parentA,
-      parentB,
-      isPhantom,
-      ts: Date.now()
-    });
-  } catch (err) {
-    console.warn("Ancestry Cache Write Error:", err);
-  }
-}
-
-async function readAncestryDB(key) {
-  try {
-    const db = await openSBDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_ANCESTRY, "readonly");
-      const store = tx.objectStore(STORE_ANCESTRY);
-      const request = store.get(key);
-
-      request.onsuccess = () => resolve(request.result || null);
-      request.onerror = () => resolve(null);
-    });
-  } catch {
-    return null;
-  }
-}
-
-// ============================================================
-// REFACTORED: fetchAncestors (BFS + Cache Optimization)
-// ============================================================
-
 // Walk ancestors of a creature upward via BFS.
-// Returns a Map<key, {author, permlink, meta, depth}> of all ancestors found.
+// Returns a Map<key, {author,permlink,meta,depth}> of all ancestors found.
 // If any ancestor is tombstoned (phantom), throws an Error so callers can
 // refuse breeding — an incomplete ancestry tree could mask inbreeding.
 async function fetchAncestors(startAuthor, startPermlink) {
-  const visited = new Map(); // key → node
+  const visited = new Map();                           // key → node
   const queue   = [{ author: startAuthor, permlink: startPermlink, depth: 0 }];
 
   while (queue.length > 0) {
@@ -1289,38 +1220,11 @@ async function fetchAncestors(startAuthor, startPermlink) {
     const key = nodeKey(author, permlink);
     if (visited.has(key)) continue;
 
-    let parentA = null, parentB = null, phantom = false, meta = null;
-
-    // 1. ATTEMPT CACHE READ
-    const cached = await readAncestryDB(key);
-
-    if (cached) {
-      // Cache hit — avoid RPC
-      parentA = cached.parentA;
-      parentB = cached.parentB;
-      phantom = cached.isPhantom;
-
-      // Reconstruct minimal meta for traversal
-      meta = { parentA, parentB };
-    } else {
-      // 2. CACHE MISS — FETCH FROM BLOCKCHAIN
-      const node = await fetchSteembiotaPost(author, permlink);
-      if (!node) continue;
-
-      phantom = node.phantom;
-
-      if (!phantom) {
-        meta = node.meta;
-        parentA = meta.parentA;
-        parentB = meta.parentB;
-      }
-
-      // 3. WRITE TO CACHE (including phantom nodes)
-      await writeAncestryDB(key, parentA, parentB, phantom);
-    }
+    const node = await fetchSteembiotaPost(author, permlink);
+    if (!node) continue;
 
     // Phantom ancestor — ancestry incomplete, breeding must be refused.
-    if (phantom) {
+    if (node.phantom) {
       throw new Error(
         `Ancestor @${author}/${permlink} is a Phantom — its post was removed from the ` +
         `visible chain. Ancestry cannot be fully verified; breeding is blocked to ` +
@@ -1328,26 +1232,17 @@ async function fetchAncestors(startAuthor, startPermlink) {
       );
     }
 
-    visited.set(key, { author, permlink, meta, depth });
+    visited.set(key, { ...node, depth });
 
     if (depth >= MAX_ANCESTOR_DEPTH) continue;
 
-    // Enqueue parents
-    if (parentA && parentA.author && parentA.permlink) {
-      queue.push({
-        author: parentA.author,
-        permlink: parentA.permlink,
-        depth: depth + 1
-      });
-    }
-
-    if (parentB && parentB.author && parentB.permlink) {
-      queue.push({
-        author: parentB.author,
-        permlink: parentB.permlink,
-        depth: depth + 1
-      });
-    }
+    // Enqueue parents if this was an offspring post
+    const pA = node.meta.parentA;
+    const pB = node.meta.parentB;
+    if (pA && pA.author && pA.permlink)
+      queue.push({ author: pA.author, permlink: pA.permlink, depth: depth + 1 });
+    if (pB && pB.author && pB.permlink)
+      queue.push({ author: pB.author, permlink: pB.permlink, depth: depth + 1 });
   }
 
   return visited;
