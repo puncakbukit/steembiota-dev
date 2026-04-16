@@ -2465,19 +2465,34 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
  * Returns the name of the creature if found, otherwise null.
  */
 async function findCreatureWearingAccessory(username, accAuthor, accPermlink) {
-  const ownedCreatures = await fetchCreaturesOwnedBy(username);
-  const targetKey = `${accAuthor.toLowerCase()}/${accPermlink.toLowerCase()}`;
+  // Use the cached owned creatures list (which now contains 'wearing' arrays)
+  // This avoids re-fetching replies for every single creature.
+  const cacheKey = `steembiota:owned:creatures:${String(username).toLowerCase()}:v2`;
+  let owned = readOwnedProfileCache(cacheKey);
+  
+  if (!owned) {
+    // Fallback if cache is empty (legacy behavior path)
+    owned = await fetchCreaturesOwnedBy(username);
+  }
 
-  for (const c of ownedCreatures) {
-    // We need to fetch the replies for each creature to see the current wear state
-    const replies = await fetchAllReplies(c.post.author, c.post.permlink);
-    const equipped = parseEquippedAccessories(replies, c.post.author);
+  const targetKey = norm(`${accAuthor}/${accPermlink}`);
+
+  for (const c of owned) {
+    if (!c.wearing) continue;
+
+    const isWearing = c.wearing.some(w => 
+      norm(`${w.accAuthor}/${w.accPermlink}`) === targetKey
+    );
     
-    if (equipped.has(targetKey)) {
-      return c.meta.name || c.post.author;
+    if (isWearing) {
+      return (c.meta && c.meta.name) ? c.meta.name : c.post.author;
     }
   }
   return null;
+}
+
+function norm(s) {
+  return String(s || "").toLowerCase().trim();
 }
 
 // ============================================================
