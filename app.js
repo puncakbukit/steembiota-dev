@@ -2153,160 +2153,172 @@ const CreatureView = {
       this.loading         = false;
       return true;
     },    
+
     async loadCreature() {
-      this.loading   = true;
-      this.loadError = null;
-      const { author, permlink } = this.$route.params;
-      this.author   = author;
-      this.permlink = permlink;
-      const cacheKey = this.creatureCacheKey(author, permlink);
-      const cached   = readCreaturePageCache(cacheKey);
-      this.applyCachedCreature(cached, author, permlink);
-      try {
-        const post = await fetchPost(author, permlink);
-        if (!post) throw new Error("Post not found.");
-        // Tombstoned — author field is empty string after delete_comment
-        if (isPhantomPost(post)) {
-          this.isPhantom = true;
-          this.loading   = false;
-          return;
-        }
-        if (!post.author) throw new Error("Post not found.");
+  this.loading   = true;
+  this.loadError = null;
 
-        let meta = {};
-        try { meta = JSON.parse(post.json_metadata || "{}"); } catch {}
-        if (!meta.steembiota) throw new Error("This post is not a SteemBiota creature.");
+  const { author, permlink } = this.$route.params;
+  this.author   = author;
+  this.permlink = permlink;
 
-        // Accessory posts share the same /@author/permlink route — hand off to AccessoryItemView
-        if (meta.steembiota.type === "accessory") {
-          this.$router.replace({ name: "AccessoryItemView", params: this.$route.params });
-          return;
-        }
+  const cacheKey = this.creatureCacheKey(author, permlink);
 
-        const sb       = meta.steembiota;
-        this.genome        = sb.genome;
-        this.name          = sb.name || author;
-        this.creatureType  = sb.type || "founder";
-        this.speciated     = sb.speciated || false;
-        this.mutated       = sb.mutated   || false;
-        this._postCreated  = post.created || null;   // raw timestamp for duplicate check
-        this.postAge   = calculateAge(post.created);   // live age from publish timestamp
+  // NEW: Await IndexedDB cache
+  const cached = await readCreatureDB(cacheKey);
+  if (cached) {
+    this.applyCachedCreature(cached, author, permlink);
+    // Continue loading in background for fresh data
+  }
 
-        // Load feed events, activity events, and breed permits from replies
-        const replies      = await fetchAllReplies(author, permlink);
-        const feedEvents   = parseFeedEvents(replies, author);
-        this.feedEvents    = feedEvents;
-        this.feedState     = computeFeedState(feedEvents, this.genome);
-        this.activityState = computeActivityState(replies, author, this.username);
+  try {
+    const post = await fetchPost(author, permlink);
+    if (!post) throw new Error("Post not found.");
 
-        // Ownership chain — must be derived before permits (permits depend on it)
-        const ownership         = parseOwnershipChain(replies, author);
-        this.transferState      = ownership;
-        this.effectiveOwner     = ownership.effectiveOwner;
-        this.permitState        = parseBreedPermitsWithTransfer(
-          replies, ownership.effectiveOwner, ownership.permitsValidFrom
-        );
+    if (isPhantomPost(post)) {
+      this.isPhantom = true;
+      this.loading   = false;
+      return;
+    }
 
-        // Check if logged-in user already fed today
-        if (this.username) {
-          const todayUTC = new Date().toISOString().slice(0, 10);
-          this.alreadyFedToday = replies.some(r => {
-            if (r.author !== this.username) return false;
-            let m = {}; try { m = JSON.parse(r.json_metadata || "{}"); } catch {}
-            if (!m.steembiota || m.steembiota.type !== "feed") return false;
-            const d = r.created.endsWith("Z") ? r.created : r.created + "Z";
-            return new Date(d).toISOString().slice(0, 10) === todayUTC;
-          });
-        }
+    if (!post.author) throw new Error("Post not found.");
 
-        // Store parent refs from metadata (no extra fetch needed for display)
-        this._rawParentA = sb.parentA || null;
-        this._rawParentB = sb.parentB || null;
-        
-        // Fetch equipped accessory in background
-        fetchCreatureWearings(author, permlink, replies).then(ws => {
-          if (!ws || (ws.length === 0 && this.wearings.length > 0)) {
-             // If background fetch returns empty but we already had items 
-             // from cache, the RPC likely failed. Do NOT wipe the UI.
-             if (!ws) return; 
-          }
-          
-          // Merge results, preserving genome data for items that had network errors
-          this.wearings = ws.map(newItem => {
-             if (newItem.networkError) {
-                const existing = this.wearings.find(ex => ex.accPermlink === newItem.accPermlink);
-                return existing || newItem;
-             }
-             return newItem;
-          });
-          
-          this.wearing = this.wearings[0] || null;
-          
-          // ONLY write to cache once we have a high-confidence state
-          writeCreaturePageCache(cacheKey, {
-            genome: this.genome,
-            name: this.name,
-            creatureType: this.creatureType,
-            speciated: this.speciated,
-            mutated: this.mutated,
-            postCreated: this._postCreated,
-            postAge: this.postAge,
-            feedEvents: this.feedEvents,
-            feedState: this.feedState,
-            activityState: this.activityState,
-            effectiveOwner: this.effectiveOwner,
-            transferState: this.transferState,
-            permitGrantees: [...(this.permitState?.grantees || [])],
-            alreadyFedToday: this.alreadyFedToday,
-            parentA: this._rawParentA,
-            parentB: this._rawParentB,
-            wearing: this.wearing,
-            wearings: this.wearings
-          });
-        }).catch(err => {
-          console.error("Accessory sync failed:", err);
-          // Do NOT reset this.wearings to [] here; keep the cached version visible.
-        });
+    let meta = {};
+    try { meta = JSON.parse(post.json_metadata || "{}"); } catch {}
 
-        // FIX: The "Immediate Write" should NOT include the wearings array 
-        // if the background fetch is still pending, to avoid wiping it.
-        const snapshot = {
-          genome: this.genome,
-          name: this.name,
-          creatureType: this.creatureType,
-          speciated: this.speciated,
-          mutated: this.mutated,
-          postCreated: this._postCreated,
-          postAge: this.postAge,
-          feedEvents: this.feedEvents,
-          feedState: this.feedState,
-          activityState: this.activityState,
-          effectiveOwner: this.effectiveOwner,
-          transferState: this.transferState,
-          permitGrantees: [...(this.permitState?.grantees || [])],
-          alreadyFedToday: this.alreadyFedToday,
-          parentA: this._rawParentA,
-          parentB: this._rawParentB,
-          wearing: this.wearing
-        };
-        // Only include wearings in the immediate write if we already have them from applyCachedCreature
-        if (this.wearings && this.wearings.length > 0) {
-           snapshot.wearings = this.wearings;
-        }
-        writeCreaturePageCache(cacheKey, snapshot);
+    if (!meta.steembiota) {
+      throw new Error("This post is not a SteemBiota creature.");
+    }
 
-      } catch (err) {
-        this.loadError = err.message || "Failed to load creature.";
+    if (meta.steembiota.type === "accessory") {
+      this.$router.replace({ name: "AccessoryItemView", params: this.$route.params });
+      return;
+    }
+
+    const sb = meta.steembiota;
+
+    this.genome       = sb.genome;
+    this.name         = sb.name || author;
+    this.creatureType = sb.type || "founder";
+    this.speciated    = sb.speciated || false;
+    this.mutated      = sb.mutated   || false;
+    this._postCreated = post.created || null;
+    this.postAge      = calculateAge(post.created);
+
+    const replies      = await fetchAllReplies(author, permlink);
+    const feedEvents   = parseFeedEvents(replies, author);
+    this.feedEvents    = feedEvents;
+    this.feedState     = computeFeedState(feedEvents, this.genome);
+    this.activityState = computeActivityState(replies, author, this.username);
+
+    const ownership        = parseOwnershipChain(replies, author);
+    this.transferState     = ownership;
+    this.effectiveOwner    = ownership.effectiveOwner;
+
+    this.permitState = parseBreedPermitsWithTransfer(
+      replies,
+      ownership.effectiveOwner,
+      ownership.permitsValidFrom
+    );
+
+    if (this.username) {
+      const todayUTC = new Date().toISOString().slice(0, 10);
+      this.alreadyFedToday = replies.some(r => {
+        if (r.author !== this.username) return false;
+        let m = {}; try { m = JSON.parse(r.json_metadata || "{}"); } catch {}
+        if (!m.steembiota || m.steembiota.type !== "feed") return false;
+        const d = r.created.endsWith("Z") ? r.created : r.created + "Z";
+        return new Date(d).toISOString().slice(0, 10) === todayUTC;
+      });
+    }
+
+    this._rawParentA = sb.parentA || null;
+    this._rawParentB = sb.parentB || null;
+
+    // Background accessory fetch
+    fetchCreatureWearings(author, permlink, replies).then(async ws => {
+      if (!ws || (ws.length === 0 && this.wearings.length > 0)) {
+        if (!ws) return;
       }
-      this.loading = false;
 
-      // Load kinship + duplicate check + social data in background after main render
-      if (!this.loadError) {
-        this.loadKinship();
-        this.checkDuplicate();
-        this.loadSocialData();
-      }
-    },
+      this.wearings = ws.map(newItem => {
+        if (newItem.networkError) {
+          const existing = this.wearings.find(ex => ex.accPermlink === newItem.accPermlink);
+          return existing || newItem;
+        }
+        return newItem;
+      });
+
+      this.wearing = this.wearings[0] || null;
+
+      // Write high-confidence state to IndexedDB
+      await writeCreatureDB(cacheKey, {
+        genome: this.genome,
+        name: this.name,
+        creatureType: this.creatureType,
+        speciated: this.speciated,
+        mutated: this.mutated,
+        postCreated: this._postCreated,
+        postAge: this.postAge,
+        feedEvents: this.feedEvents,
+        feedState: this.feedState,
+        activityState: this.activityState,
+        effectiveOwner: this.effectiveOwner,
+        transferState: this.transferState,
+        permitGrantees: [...(this.permitState?.grantees || [])],
+        alreadyFedToday: this.alreadyFedToday,
+        parentA: this._rawParentA,
+        parentB: this._rawParentB,
+        wearing: this.wearing,
+        wearings: this.wearings
+      }, CREATURE_PAGE_CACHE_TTL_MS);
+
+    }).catch(err => {
+      console.error("Accessory sync failed:", err);
+    });
+
+    // Immediate snapshot (without unsafe wearings overwrite)
+    const snapshot = {
+      genome: this.genome,
+      name: this.name,
+      creatureType: this.creatureType,
+      speciated: this.speciated,
+      mutated: this.mutated,
+      postCreated: this._postCreated,
+      postAge: this.postAge,
+      feedEvents: this.feedEvents,
+      feedState: this.feedState,
+      activityState: this.activityState,
+      effectiveOwner: this.effectiveOwner,
+      transferState: this.transferState,
+      permitGrantees: [...(this.permitState?.grantees || [])],
+      alreadyFedToday: this.alreadyFedToday,
+      parentA: this._rawParentA,
+      parentB: this._rawParentB,
+      wearing: this.wearing
+    };
+
+    if (this.wearings && this.wearings.length > 0) {
+      snapshot.wearings = this.wearings;
+    }
+
+    // NEW: async IndexedDB write
+    await writeCreatureDB(cacheKey, snapshot, CREATURE_PAGE_CACHE_TTL_MS);
+
+  } catch (err) {
+    if (!this.genome) {
+      this.loadError = err.message || "Failed to load creature.";
+    }
+  }
+
+  this.loading = false;
+
+  if (!this.loadError) {
+    this.loadKinship();
+    this.checkDuplicate();
+    this.loadSocialData();
+  }
+},
 
     // ── Duplicate / timestamp-priority check ────────────────────
     // Fetches all steembiota posts (up to 200, same approach as leaderboard)
