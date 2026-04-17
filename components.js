@@ -3920,145 +3920,153 @@ const TransferPanelComponent = {
     }
   },
 
-  template: `
-    <div style="margin-top:24px;max-width:520px;margin-left:auto;margin-right:auto;">
-
-      <!-- ===== RECIPIENT VIEW: pending offer awaiting acceptance ===== -->
-      <div v-if="isPendingRecipient && pendingOffer" style="
-        padding:16px 18px;border-radius:10px;
-        background:#0d1a0d;border:1px solid #2e7d32;
-      ">
-        <div style="font-size:1rem;font-weight:bold;color:#a5d6a7;margin-bottom:8px;">
-          🤝 Ownership Transfer Offer
-        </div>
-        <p style="font-size:0.83rem;color:#888;margin:0 0 14px;line-height:1.5;">
-          @{{ pendingOffer.offeredBy || "The current owner" }} is offering to transfer
-          <strong style="color:#eee;">{{ creatureName }}</strong> to you.
-          Accepting is permanent and recorded on-chain.
-          All previous breed permits will be voided — you start fresh.
-        </p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
-          <button
-            @click="acceptOffer"
-            :disabled="publishing"
-            style="background:#1a3a1a;"
-          >
-            {{ publishing ? "Publishing…" : "✅ Accept Ownership" }}
-          </button>
-          <button
-            @click="$emit('notify', 'To decline, simply ignore the offer. The sender can cancel it at any time.', 'info')"
-            style="background:#1a1a1a;color:#888;border:1px solid #333;"
-          >
-            ℹ️ How to decline
-          </button>
+template: `
+  <div style="margin-top:32px;padding-top:24px;border-top:1px solid #333;">
+    <h3 style="color:#80deea;margin:0 0 4px;">🧬 Breed Creatures</h3>
+    
+    <!-- Matchmaker Button -->
+    <div v-if="lockedA && !childGenome" style="margin-bottom:12px;">
+      <button @click="findPartners" :disabled="searchingPartners" style="background:#004d40;font-size:12px;">
+        🔍 {{ searchingPartners ? 'Searching...' : 'Find Compatible Partner' }}
+      </button>
+      
+      <!-- Partner Suggestions -->
+      <div v-if="partners.length" style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">
+        <div v-for="p in partners" :key="p.permlink" @click="selectPartner(p)" 
+          style="flex:0 0 120px;background:#0a1a1a;border:1px solid #2e7d32;border-radius:8px;padding:8px;cursor:pointer;font-size:11px;">
+          <div style="font-weight:bold;color:#a5d6a7;overflow:hidden;text-overflow:ellipsis;">{{ p.name }}</div>
+          <div style="color:#555;">@{{ p.author }}</div>
         </div>
       </div>
-
-      <!-- ===== OWNER VIEW ===== -->
-      <template v-if="isOwner">
-
-        <!-- Collapsed header -->
-        <div
-          @click="expanded = !expanded"
-          style="display:flex;align-items:center;justify-content:space-between;
-                 cursor:pointer;padding:10px 14px;border-radius:8px;
-                 background:#0a0a12;border:1px solid #1a1a2e;user-select:none;"
-        >
-          <span style="font-size:0.88rem;color:#80cbc4;font-weight:bold;">
-            🤝 Transfer Ownership
-            <span v-if="pendingOffer" style="font-weight:normal;color:#ffb74d;font-size:0.80rem;margin-left:8px;">
-              ⏳ offer pending → @{{ pendingOffer.to }}
-            </span>
-            <span v-else-if="hasHistory" style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
-              {{ transferHistory.length }} transfer{{ transferHistory.length === 1 ? "" : "s" }} on record
-            </span>
-            <span v-else style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
-              original owner
-            </span>
-          </span>
-          <span style="color:#444;font-size:0.78rem;">{{ expanded ? "▲ collapse" : "▼ manage" }}</span>
-        </div>
-
-        <div v-if="expanded" style="
-          border:1px solid #1a1a2e;border-top:none;border-radius:0 0 8px 8px;
-          background:#08080f;padding:14px;
-        ">
-          <p style="font-size:0.78rem;color:#555;margin:0 0 12px;line-height:1.5;">
-            Transfers are two-sided: you send an offer, the recipient must accept on-chain.
-            All breed permits are voided on transfer — the new owner starts fresh.
-            The original <code style="color:#444;">post.author</code> never changes on-chain;
-            SteemBiota derives the effective owner from the signed reply history.
-          </p>
-
-          <!-- Pending offer status -->
-          <div v-if="pendingOffer" style="
-            padding:12px;border-radius:8px;background:#1a1200;
-            border:1px solid #3a2800;margin-bottom:14px;
-          ">
-            <div style="font-size:0.80rem;color:#ffb74d;font-weight:bold;margin-bottom:6px;">
-              ⏳ Pending offer → @{{ pendingOffer.to }}
-            </div>
-            <p style="font-size:0.75rem;color:#888;margin:0 0 10px;">
-              Waiting for @{{ pendingOffer.to }} to accept on-chain.
-              You can cancel this offer at any time.
-            </p>
-            <button
-              @click="cancelOffer"
-              :disabled="publishing"
-              style="background:#1a0000;color:#ff8a80;border:1px solid #3b0000;font-size:0.78rem;"
-            >
-              {{ publishing ? "Publishing…" : "❌ Cancel Offer" }}
-            </button>
-          </div>
-
-          <!-- New offer form — only shown when no offer is pending -->
-          <template v-else>
-            <div style="font-size:0.75rem;color:#80cbc4;text-transform:uppercase;
-                        letter-spacing:0.07em;margin-bottom:8px;">Send Transfer Offer</div>
-            <div style="display:flex;flex-direction:column;gap:8px;">
-              <input
-                v-model="recipientInput"
-                type="text"
-                placeholder="Recipient username (without @)"
-                style="font-size:13px;width:100%;"
-                @keydown.enter="sendOffer"
-              />
-              <p style="font-size:0.72rem;color:#444;margin:0;">
-                ⚠ This cannot be undone unless the recipient declines (never accepts).
-                The offer stays open until they accept or you cancel it.
-              </p>
-              <button
-                @click="sendOffer"
-                :disabled="publishing || !recipientInput.trim()"
-                style="background:#0d1a2e;"
-              >
-                {{ publishing ? "Publishing…" : "🤝 Send Offer" }}
-              </button>
-            </div>
-          </template>
-
-          <!-- Transfer history -->
-          <template v-if="hasHistory">
-            <div style="font-size:0.75rem;color:#80cbc4;text-transform:uppercase;
-                        letter-spacing:0.07em;margin:14px 0 8px;">Transfer History</div>
-            <div
-              v-for="(t, i) in transferHistory"
-              :key="i"
-              style="font-size:0.75rem;color:#555;padding:5px 0;
-                     border-bottom:1px solid #111;display:flex;gap:8px;align-items:center;"
-            >
-              <span style="color:#3a3a3a;">{{ formatDate(t.ts) }}</span>
-              <span style="color:#444;">@{{ t.from }}</span>
-              <span style="color:#2a2a2a;">→</span>
-              <span style="color:#80cbc4;">@{{ t.to }}</span>
-            </div>
-          </template>
-
-        </div>
-      </template>
-
     </div>
-  `
+
+    <p style="font-size:12px;color:#555;margin:0 0 12px;">Requires one ♂ Male and one ♀ Female of the same genus.</p>
+
+    <!-- Login gate -->
+    <div v-if="!username" style="text-align:center;padding:18px 0;color:#555;font-size:13px;">
+      🔒 Log in to breed creatures.
+    </div>
+
+    <template v-else>
+    <div style="display:flex;flex-direction:column;gap:8px;max-width:520px;margin:0 auto;">
+      <!-- Parent A — locked to page creature, or free input -->
+      <div style="position:relative;">
+        <!-- Locked display -->
+        <div v-if="lockedA" :style="{
+          fontSize:'13px', padding:'8px 10px', borderRadius:'6px',
+          background:'#0d1a0d', border:'1px solid #2e7d32',
+          color:'#a5d6a7', display:'flex', justifyContent:'space-between', alignItems:'center'
+        }">
+          <span>🔒 Parent A: <strong>{{ lockedA.name }}</strong></span>
+          <span :style="{ fontSize:'12px', fontWeight:'bold', color: lockedA.sex.startsWith('♂') ? '#90caf9' : '#f48fb1' }">
+            {{ lockedA.sex }}
+          </span>
+        </div>
+        <!-- Free input -->
+        <template v-else>
+          <input
+            v-model="urlA"
+            type="text"
+            placeholder="Parent A — Steem post URL"
+            style="font-size:13px;width:100%;padding-right:70px;"
+          />
+          <span
+            v-if="genomeA"
+            :style="{
+              position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)',
+              fontSize:'12px', fontWeight:'bold',
+              color: genomeA.SX === 0 ? '#90caf9' : '#f48fb1',
+              pointerEvents:'none'
+            }"
+          >{{ parentASex }}</span>
+        </template>
+      </div>
+
+      <!-- Parent B -->
+      <div style="position:relative;">
+        <input
+          v-model="urlB"
+          type="text"
+          placeholder="Parent B — Steem post URL"
+          style="font-size:13px;width:100%;padding-right:70px;"
+        />
+        <span
+          v-if="genomeB"
+          :style="{
+            position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)',
+            fontSize:'12px', fontWeight:'bold',
+            color: genomeB.SX === 0 ? '#90caf9' : '#f48fb1',
+            pointerEvents:'none'
+          }"
+        >{{ parentBSex }}</span>
+      </div>
+
+      <button
+        @click="breedCreatures"
+        :disabled="loading"
+        style="background:#1a3a2a;"
+      >
+        {{ loading ? "Checking…" : "🔬 Breed" }}
+      </button>
+    </div>
+
+    <!-- Status message during kinship check -->
+    <div v-if="loadStatus" style="color:#80deea;font-size:12px;margin-top:8px;font-style:italic;">
+      ⏳ {{ loadStatus }}
+    </div>
+
+    <!-- Error -->
+    <div v-if="loadError" style="color:#ff8a80;font-size:13px;margin-top:8px;">
+      ⚠ {{ loadError }}
+    </div>
+
+    <!-- Child preview -->
+    <div v-if="childGenome" style="margin-top:20px;">
+      <div style="font-size:1.1rem;font-weight:bold;color:#80deea;">
+        🧬 {{ childName }}
+      </div>
+      <div style="font-size:0.85rem;color:#888;margin:2px 0 6px;">
+        {{ sexLabel }}
+        &nbsp;·&nbsp;
+        <span :style="{ color: mutationColor }">{{ mutationLabel }}</span>
+      </div>
+
+      <!-- Unicode art preview -->
+      <pre style="font-size:11px;line-height:1.3;display:inline-block;text-align:left;">{{ childArt }}</pre>
+
+      <!-- Genome summary -->
+      <div style="font-size:12px;color:#666;margin:4px 0 10px;">
+        GEN {{ childGenome.GEN }}
+        &nbsp;·&nbsp; MOR {{ childGenome.MOR }}
+        &nbsp;·&nbsp; APP {{ childGenome.APP }}
+        &nbsp;·&nbsp; ORN {{ childGenome.ORN }}
+        &nbsp;·&nbsp; MUT {{ childGenome.MUT }}
+        &nbsp;·&nbsp; LIF {{ childGenome.LIF }} days
+      </div>
+
+      <!-- Post title — pre-filled, user-editable -->
+      <div style="margin-top:12px;max-width:520px;margin-left:auto;margin-right:auto;">
+        <label style="display:block;font-size:12px;color:#888;margin-bottom:4px;">Post title</label>
+        <input
+          v-model="customTitle"
+          type="text"
+          maxlength="255"
+          style="width:100%;font-size:13px;"
+        />
+      </div>
+
+      <button
+        @click="publishChild"
+        :disabled="publishing || !username"
+        style="background:#1565c0;margin-top:10px;"
+      >
+        {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
+      </button>
+    </div>
+    </template>
+  </div>
+`
+
 };
 
 // ============================================================
