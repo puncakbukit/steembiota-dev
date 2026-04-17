@@ -1054,7 +1054,6 @@ const AccessoriesView = {
 //   notify(msg, type)
 //   permissions-updated(newPermissions)  — after any owner action
 // ============================================================
- 
 const WearPanelComponent = {
   name: "WearPanelComponent",
   props: {
@@ -1353,6 +1352,32 @@ const WearPanelComponent = {
             <span v-else style="color:#444;">Owner</span>
           </div>
         </template>
+        
+    <template v-else>
+       <!-- PENDING STATE: Prominent UI -->
+       <div v-if="!isAccOwner && hasPendingRequest && !hasPermission"
+         style="margin-bottom:14px; padding:16px; border:1px solid #f57c00; 
+                background:linear-gradient(135deg, #1a1200 0%, #0a0800 100%); 
+                border-radius:8px; text-align:center; animation: SBpulse 2s infinite;">
+         <div style="font-size:1.2rem; margin-bottom:8px;">⏳</div>
+         <div style="color:#ffb74d; font-weight:bold; font-size:0.9rem; margin-bottom:4px;">
+           Request Sent to @{{ accAuthor }}
+         </div>
+         <p style="font-size:0.75rem; color:#888; margin:0;">
+           Your request is pending. Once the owner approves, you can equip this item from any of your creatures' pages.
+         </p>
+       </div>
+       
+       <!-- CSS injected into the page -->
+       <style>
+         @keyframes SBpulse {
+           0% { border-color: #3a2800; }
+           50% { border-color: #f57c00; box-shadow: 0 0 10px rgba(245, 124, 0, 0.2); }
+           100% { border-color: #3a2800; }
+         }
+       </style>
+       <!-- ... -->
+    </template>
 
         <!-- Granted -->
         <template v-if="isAccOwner && grantedList.length > 0">
@@ -1372,7 +1397,7 @@ const WearPanelComponent = {
       </div>
     </div>
   `
-};
+}; 
 
 // ============================================================
 // AccessoryItemView  — route /@:author/:permlink (accessory posts)
