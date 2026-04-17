@@ -1974,6 +1974,7 @@ const CreatureView = {
     return {
       loading:       true,
       loadError:     null,
+      activeTab: 'interact', // Default tab
       isPhantom:     false,   // true when post was tombstoned via delete_comment
       genome:        null,
       name:          null,
@@ -2763,6 +2764,185 @@ const CreatureView = {
           @facing-resolved="onFacingResolved"
           @pose-resolved="onPoseResolved"
         ></creature-canvas-component>
+        
+         <!-- NEW: Tab Navigation -->
+         <div style="display:flex; justify-content:center; gap:5px; margin:20px 0 10px; border-bottom:1px solid #222;">
+            <button v-for="t in [
+              {id:'interact', label:'🌿 Interact', color:'#a5d6a7'},
+              {id:'lineage',  label:'🧬 Family',   color:'#80deea'},
+              {id:'stats',    label:'📊 Stats',    color:'#ce93d8'},
+              {id:'mgmt',     label:'⚙️ Manage',   color:'#ffb74d', ownerOnly: true},
+              {id:'social',   label:'💬 Social',   color:'#ef9a9a'}
+            ]" 
+            v-show="!t.ownerOnly || isOwner || isPendingRecipient"
+            @click="activeTab = t.id"
+            :style="{
+              background: activeTab === t.id ? '#1a1a1a' : 'transparent',
+              border: 'none', borderBottom: '2px solid ' + (activeTab === t.id ? t.color : 'transparent'),
+              color: activeTab === t.id ? t.color : '#555',
+              padding: '8px 12px', fontSize: '12px', fontWeight: 'bold', borderRadius: '4px 4px 0 0'
+            }">{{ t.label }}</button>
+         </div>
+
+         <!-- Tab Content -->
+         <div v-show="activeTab === 'interact'">
+
+        <!-- ── Worn Accessories + Equip Panel ── -->
+        <equip-panel-component
+          :username="username"
+          :creature-author="author"
+          :creature-permlink="permlink"
+          :creature-name="name"
+          :wearings="wearings"
+          :is-owner="isOwner"
+          @notify="(msg,type) => notify(msg,type)"
+          @wearings-updated="ws => { wearings = ws; wearing = ws[0] || null; }"
+        ></equip-panel-component>
+
+        <!-- Activity panel (Feed + Play + Walk) -->
+        <activity-panel-component
+          :username="username"
+          :creature-author="author"
+          :creature-permlink="permlink"
+          :creature-name="name"
+          :unicode-art="unicodeArt"
+          :ctx-feed-state="feedState"
+          :ctx-feed-events="feedEvents"
+          :ctx-already-fed="alreadyFedToday"
+          :initial-activity-state="activityState"
+          @notify="(msg,type) => notify(msg,type)"
+          @feed-state-updated="onFeedStateUpdated"
+          @activity-state-updated="onActivityStateUpdated"
+        ></activity-panel-component>
+         </div>
+
+         <div v-show="activeTab === 'lineage'">
+
+        <!-- ── Kinship Panel ── -->
+        <div style="margin:8px 0 20px;">
+          <h3 style="color:#a5d6a7;margin:0 0 12px;font-size:1rem;">🌿 Family</h3>
+
+          <div v-if="kinshipLoading" style="color:#555;font-size:13px;margin:8px 0;">
+            ⏳ Loading kinship…
+          </div>
+          <template v-else>
+
+            <!-- Parents -->
+            <template v-if="parentA || parentB">
+              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Parents</div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:500px;">
+                <template v-if="parentA">
+                  <creature-card-component v-if="!parentA.isPhantom" :post="parentA"></creature-card-component>
+                  <div v-else style="border:1px solid #333;border-radius:10px;padding:16px;text-align:center;background:#0a0a0a;color:#555;">
+                    <div style="font-size:1.8rem;">👻</div>
+                    <div style="font-size:0.78rem;margin-top:6px;">Phantom Parent</div>
+                    <div style="font-size:0.68rem;color:#3a3a3a;margin-top:4px;">@{{ parentA.author }}</div>
+                    <div style="font-size:0.65rem;color:#2a2a2a;margin-top:4px;font-style:italic;">Post removed from visible chain</div>
+                  </div>
+                </template>
+                <template v-if="parentB">
+                  <creature-card-component v-if="!parentB.isPhantom" :post="parentB"></creature-card-component>
+                  <div v-else style="border:1px solid #333;border-radius:10px;padding:16px;text-align:center;background:#0a0a0a;color:#555;">
+                    <div style="font-size:1.8rem;">👻</div>
+                    <div style="font-size:0.78rem;margin-top:6px;">Phantom Parent</div>
+                    <div style="font-size:0.68rem;color:#3a3a3a;margin-top:4px;">@{{ parentB.author }}</div>
+                    <div style="font-size:0.65rem;color:#2a2a2a;margin-top:4px;font-style:italic;">Post removed from visible chain</div>
+                  </div>
+                </template>
+              </div>
+            </template>
+            <div v-else style="font-size:12px;color:#333;margin-bottom:8px;">No parent data (origin creature)</div>
+
+            <!-- Children -->
+            <template v-if="children.length > 0">
+              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 6px;">
+                Children ({{ children.length }})
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:920px;">
+                <creature-card-component v-for="c in children" :key="c.author+'/'+c.permlink" :post="c"></creature-card-component>
+              </div>
+            </template>
+
+            <!-- Siblings -->
+            <template v-if="siblings.length > 0">
+              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 6px;">
+                Siblings ({{ siblings.length }})
+              </div>
+              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:920px;">
+                <creature-card-component v-for="s in siblings" :key="s.author+'/'+s.permlink" :post="s"></creature-card-component>
+              </div>
+            </template>
+
+          </template>
+        </div>
+         </div>
+
+         <div v-show="activeTab === 'stats'">
+
+        <!-- Unicode render -->
+        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Unicode Render</h3>
+        <pre :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
+
+        <!-- Genome table -->
+        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Genome</h3>
+        <genome-table-component :genome="genome"></genome-table-component>
+         </div>
+
+         <div v-show="activeTab === 'mgmt'">
+
+        <!-- Permit Manager — owner only, always visible while creature is alive -->
+        <template v-if="isOwner && !fossil && !isPhantom">
+          <hr/>
+          <breed-permit-panel-component
+            :username="username"
+            :creature-author="author"
+            :creature-permlink="permlink"
+            :creature-name="name"
+            :current-grantees="currentGrantees"
+            @notify="(msg,type) => notify(msg,type)"
+            @permits-updated="onPermitsUpdated"
+          ></breed-permit-panel-component>
+          <!-- Note: BreedPermitPanel publishes replies authored by username.
+               parseBreedPermitsWithTransfer already filters by effectiveOwner,
+               so permits from previous owners are automatically excluded. -->
+        </template>
+
+        <!-- Transfer Panel — shown to owner OR to pending recipient -->
+        <template v-if="(isOwner || isPendingRecipient) && !isPhantom">
+          <hr/>
+          <transfer-panel-component
+            :username="username"
+            :creature-author="author"
+            :creature-permlink="permlink"
+            :creature-name="name"
+            :transfer-state="transferState"
+            :is-owner="isOwner"
+            :is-pending-recipient="isPendingRecipient"
+            @notify="(msg,type) => notify(msg,type)"
+            @transfer-updated="onTransferUpdated"
+          ></transfer-panel-component>
+        </template>
+         </div>
+
+         <div v-show="activeTab === 'social'">
+
+        <!-- Social panel (upvotes, resteems, comments) — below activities -->
+        <social-panel-component
+          :username="username"
+          :creature-author="author"
+          :creature-permlink="permlink"
+          :votes="votes"
+          :rebloggers="rebloggers"
+          :social-comments="socialComments"
+          :social-loading="socialLoading"
+          @notify="(msg,type) => notify(msg,type)"
+          @comment-posted="onCommentPosted"
+        ></social-panel-component>
+         </div>
+      </div>
+    </div>
+
+        
         <!-- Pose label + social counters row -->
         <div style="display:flex;align-items:center;justify-content:space-between;
                     min-height:18px;margin:3px 0 0;">
@@ -2861,56 +3041,7 @@ const CreatureView = {
           🦴 This creature has fossilised. Its genome is preserved on-chain.
         </div>
 
-        <!-- ── Worn Accessories + Equip Panel ── -->
-        <equip-panel-component
-          :username="username"
-          :creature-author="author"
-          :creature-permlink="permlink"
-          :creature-name="name"
-          :wearings="wearings"
-          :is-owner="isOwner"
-          @notify="(msg,type) => notify(msg,type)"
-          @wearings-updated="ws => { wearings = ws; wearing = ws[0] || null; }"
-        ></equip-panel-component>
-
-        <!-- Activity panel (Feed + Play + Walk) -->
-        <activity-panel-component
-          :username="username"
-          :creature-author="author"
-          :creature-permlink="permlink"
-          :creature-name="name"
-          :unicode-art="unicodeArt"
-          :ctx-feed-state="feedState"
-          :ctx-feed-events="feedEvents"
-          :ctx-already-fed="alreadyFedToday"
-          :initial-activity-state="activityState"
-          @notify="(msg,type) => notify(msg,type)"
-          @feed-state-updated="onFeedStateUpdated"
-          @activity-state-updated="onActivityStateUpdated"
-        ></activity-panel-component>
-
-        <!-- Social panel (upvotes, resteems, comments) — below activities -->
-        <social-panel-component
-          :username="username"
-          :creature-author="author"
-          :creature-permlink="permlink"
-          :votes="votes"
-          :rebloggers="rebloggers"
-          :social-comments="socialComments"
-          :social-loading="socialLoading"
-          @notify="(msg,type) => notify(msg,type)"
-          @comment-posted="onCommentPosted"
-        ></social-panel-component>
-
         <hr/>
-
-        <!-- Unicode render -->
-        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Unicode Render</h3>
-        <pre :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
-
-        <!-- Genome table -->
-        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Genome</h3>
-        <genome-table-component :genome="genome"></genome-table-component>
 
         <!-- Steem post link + copy button -->
         <div v-if="steemitUrl" style="margin:16px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">
@@ -2945,97 +3076,6 @@ const CreatureView = {
 
         <hr/>
 
-        <!-- ── Kinship Panel ── -->
-        <div style="margin:8px 0 20px;">
-          <h3 style="color:#a5d6a7;margin:0 0 12px;font-size:1rem;">🌿 Family</h3>
-
-          <div v-if="kinshipLoading" style="color:#555;font-size:13px;margin:8px 0;">
-            ⏳ Loading kinship…
-          </div>
-          <template v-else>
-
-            <!-- Parents -->
-            <template v-if="parentA || parentB">
-              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Parents</div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:500px;">
-                <template v-if="parentA">
-                  <creature-card-component v-if="!parentA.isPhantom" :post="parentA"></creature-card-component>
-                  <div v-else style="border:1px solid #333;border-radius:10px;padding:16px;text-align:center;background:#0a0a0a;color:#555;">
-                    <div style="font-size:1.8rem;">👻</div>
-                    <div style="font-size:0.78rem;margin-top:6px;">Phantom Parent</div>
-                    <div style="font-size:0.68rem;color:#3a3a3a;margin-top:4px;">@{{ parentA.author }}</div>
-                    <div style="font-size:0.65rem;color:#2a2a2a;margin-top:4px;font-style:italic;">Post removed from visible chain</div>
-                  </div>
-                </template>
-                <template v-if="parentB">
-                  <creature-card-component v-if="!parentB.isPhantom" :post="parentB"></creature-card-component>
-                  <div v-else style="border:1px solid #333;border-radius:10px;padding:16px;text-align:center;background:#0a0a0a;color:#555;">
-                    <div style="font-size:1.8rem;">👻</div>
-                    <div style="font-size:0.78rem;margin-top:6px;">Phantom Parent</div>
-                    <div style="font-size:0.68rem;color:#3a3a3a;margin-top:4px;">@{{ parentB.author }}</div>
-                    <div style="font-size:0.65rem;color:#2a2a2a;margin-top:4px;font-style:italic;">Post removed from visible chain</div>
-                  </div>
-                </template>
-              </div>
-            </template>
-            <div v-else style="font-size:12px;color:#333;margin-bottom:8px;">No parent data (origin creature)</div>
-
-            <!-- Children -->
-            <template v-if="children.length > 0">
-              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 6px;">
-                Children ({{ children.length }})
-              </div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:920px;">
-                <creature-card-component v-for="c in children" :key="c.author+'/'+c.permlink" :post="c"></creature-card-component>
-              </div>
-            </template>
-
-            <!-- Siblings -->
-            <template v-if="siblings.length > 0">
-              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 6px;">
-                Siblings ({{ siblings.length }})
-              </div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:920px;">
-                <creature-card-component v-for="s in siblings" :key="s.author+'/'+s.permlink" :post="s"></creature-card-component>
-              </div>
-            </template>
-
-          </template>
-        </div>
-
-        <!-- Permit Manager — owner only, always visible while creature is alive -->
-        <template v-if="isOwner && !fossil && !isPhantom">
-          <hr/>
-          <breed-permit-panel-component
-            :username="username"
-            :creature-author="author"
-            :creature-permlink="permlink"
-            :creature-name="name"
-            :current-grantees="currentGrantees"
-            @notify="(msg,type) => notify(msg,type)"
-            @permits-updated="onPermitsUpdated"
-          ></breed-permit-panel-component>
-          <!-- Note: BreedPermitPanel publishes replies authored by username.
-               parseBreedPermitsWithTransfer already filters by effectiveOwner,
-               so permits from previous owners are automatically excluded. -->
-        </template>
-
-        <!-- Transfer Panel — shown to owner OR to pending recipient -->
-        <template v-if="(isOwner || isPendingRecipient) && !isPhantom">
-          <hr/>
-          <transfer-panel-component
-            :username="username"
-            :creature-author="author"
-            :creature-permlink="permlink"
-            :creature-name="name"
-            :transfer-state="transferState"
-            :is-owner="isOwner"
-            :is-pending-recipient="isPendingRecipient"
-            @notify="(msg,type) => notify(msg,type)"
-            @transfer-updated="onTransferUpdated"
-          ></transfer-panel-component>
-        </template>
-
         <!-- Breed panel — shown while fertile AND current user is permitted -->
         <template v-if="isFertile && isPermittedToBread">
           <hr/>
@@ -3065,8 +3105,6 @@ const CreatureView = {
     </div>
   `
 };
-
-
 
 // ============================================================
 // LEADERBOARD HELPERS
