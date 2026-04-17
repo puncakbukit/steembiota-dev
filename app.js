@@ -2135,9 +2135,12 @@ const CreatureView = {
     lockedA() {
       if (!this.genome || !this.breedPrefilledUrl) return null;
       return {
-        url:  this.breedPrefilledUrl,
-        name: this.name || this.author,
-        sex:  this.genome.SX === 0 ? "♂ Male" : "♀ Female"
+        url:      this.breedPrefilledUrl,
+        name:     this.name || this.author,
+        sex:      this.genome.SX === 0 ? "♂ Male" : "♀ Female",
+        genome:   this.genome,
+        author:   this.author,
+        permlink: this.permlink
       };
     }
   },

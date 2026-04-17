@@ -3224,7 +3224,7 @@ const BreedingPanelComponent = {
     username:    String,
     initialUrlA: { type: String, default: "" },
     // When set from CreatureView, locks Parent A to the page's creature.
-    // Shape: { url, name, sex }  (sex is "♂ Male" or "♀ Female")
+    // Shape: { url, name, sex, genome, author, permlink }
     lockedA:     { type: Object,  default: null }
   },
   emits: ["notify"],
@@ -3248,12 +3248,17 @@ const BreedingPanelComponent = {
 
       // NEW: Matchmaker state
       partners: [],
-      searchingPartners: false
+      searchingPartners: false,
+      pendingPartner: null   // partner awaiting user confirmation (fix #9)
     };
   },
   watch: {
     // Keep urlA in sync if the locked creature changes (e.g. navigation)
-    lockedA(val) { if (val?.url) this.urlA = val.url; }
+    lockedA(val) {
+      if (val?.url) this.urlA = val.url;
+      this.partners       = [];
+      this.pendingPartner = null;
+    }
   },
   computed: {
     sexLabel() {
@@ -3289,33 +3294,85 @@ const BreedingPanelComponent = {
     async findPartners() {
       if (!this.lockedA) return;
       this.searchingPartners = true;
-      this.partners = [];
+      this.partners       = [];
+      this.pendingPartner = null;
       try {
-        const targetGEN = this.lockedA.genome?.GEN;
-        const targetSex = this.lockedA.genome?.SX === 0 ? 1 : 0;
+        // Fix #1: lockedA now carries genome/author/permlink — these are real values.
+        const targetGEN  = this.lockedA.genome.GEN;
+        const targetSex  = this.lockedA.genome.SX === 0 ? 1 : 0;
+        const selfKey    = this.lockedA.author + "/" + this.lockedA.permlink;
 
-        const raw = await fetchPostsByTag("steembiota", 100);
+        const raw    = await fetchPostsByTag("steembiota", 100);
         const parsed = parseSteembiotaPosts(raw);
 
-        this.partners = parsed.filter(c => 
-          c.genome.GEN === targetGEN && 
-          c.genome.SX === targetSex &&
-          (c.author + "/" + c.permlink !== this.lockedA.author + "/" + this.lockedA.permlink) &&
-          c.age < c.genome.LIF
+        // Fix #2: fertility window — use base FRT_START/FRT_END as a conservative
+        // filter (feed/play boosts are not available from tag-scan data, but
+        // breedCreatures() will apply the full check with boosts before committing).
+        const isFertile = (c) => {
+          const g = c.genome;
+          return c.age >= g.FRT_START && c.age < g.FRT_END && c.age < g.LIF;
+        };
+
+        // Fix #3: exclude duplicates and phantoms.
+        // Fix #4: kinship is too expensive to pre-check (needs N ancestry walks);
+        //         breedCreatures() enforces it fully — partners may still show a
+        //         relative, but the breed step will block it with a clear message.
+        // Fix #5: permit check — owner is always allowed; for non-owners we can
+        //         only do a shallow check here because full permit parsing needs
+        //         fetchAllReplies per post. We flag the card as "permit required"
+        //         and let breedCreatures() give the definitive answer.
+        const candidates = parsed.filter(c =>
+          c.genome.GEN === targetGEN &&
+          c.genome.SX  === targetSex &&
+          c.author + "/" + c.permlink !== selfKey &&
+          !c.isDuplicate &&
+          !c.isPhantom &&
+          isFertile(c)
         ).slice(0, 5);
+
+        // Annotate each candidate with a shallow permit hint.
+        const user = this.username;
+        this.partners = candidates.map(c => ({
+          ...c,
+          _permitOwned: !user || user === c.author  // owner always free; others: unknown until breed
+        }));
 
         if (this.partners.length === 0) {
           this.$emit("notify", "No compatible partners found in the recent history.", "info");
         }
       } catch (e) {
+        console.error("findPartners:", e);
         this.$emit("notify", "Partner search failed.", "error");
       }
       this.searchingPartners = false;
     },
 
+    // Fix #9: two-step confirm — first click stages the partner, second click breeds.
     selectPartner(p) {
-      this.urlB = `https://steemit.com/@${p.author}/${p.permlink}`;
-      this.breedCreatures();
+      if (this.pendingPartner && this.pendingPartner.permlink === p.permlink) {
+        // Second click on the same card — confirmed, proceed to breed.
+        this.urlB           = `https://steemit.com/@${p.author}/${p.permlink}`;
+        this.pendingPartner = null;
+        this.breedCreatures();
+      } else {
+        // First click — stage it for confirmation.
+        this.pendingPartner = p;
+      }
+    },
+
+    // Fix #7: reset child preview and restore matchmaker panel.
+    resetBreed() {
+      this.childGenome    = null;
+      this.childArt       = null;
+      this.childName      = null;
+      this.breedInfo      = null;
+      this.customTitle    = "";
+      this.urlB           = "";
+      this.genomeA        = null;
+      this.genomeB        = null;
+      this.loadError      = "";
+      this.loadStatus     = "";
+      this.pendingPartner = null;
     },
 
     // ============================================================
@@ -3485,20 +3542,93 @@ const BreedingPanelComponent = {
   template: `
     <div style="margin-top:32px;padding-top:24px;border-top:1px solid #333;">
       <h3 style="color:#80deea;margin:0 0 4px;">🧬 Breed Creatures</h3>
-      
-      <!-- Matchmaker Button -->
-      <div v-if="lockedA && !childGenome" style="margin-bottom:12px;">
+
+      <!-- ── Matchmaker panel ───────────────────────────────────────
+           Fix #7: shown whenever lockedA is present, even after a
+           child preview — "Try another partner" replaces the label.
+      ──────────────────────────────────────────────────────────── -->
+      <div v-if="lockedA" style="margin-bottom:12px;">
         <button @click="findPartners" :disabled="searchingPartners" style="background:#004d40;font-size:12px;">
-          🔍 {{ searchingPartners ? 'Searching...' : 'Find Compatible Partner' }}
+          🔍 {{ searchingPartners ? 'Searching...' : (childGenome ? 'Try Another Partner' : 'Find Compatible Partner') }}
         </button>
-        
-        <!-- Partner Suggestions -->
-        <div v-if="partners.length" style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">
-          <div v-for="p in partners" :key="p.permlink" @click="selectPartner(p)" 
-            style="flex:0 0 120px;background:#0a1a1a;border:1px solid #2e7d32;border-radius:8px;padding:8px;cursor:pointer;font-size:11px;">
-            <div style="font-weight:bold;color:#a5d6a7;overflow:hidden;text-overflow:ellipsis;">{{ p.name }}</div>
-            <div style="color:#555;">@{{ p.author }}</div>
+
+        <!-- Fix #8: loading skeleton while RPC call is in flight -->
+        <div v-if="searchingPartners" style="margin-top:10px;display:flex;gap:8px;">
+          <div v-for="n in 3" :key="n"
+            style="flex:0 0 148px;height:102px;background:#0a1a1a;border:1px solid #1b3a2a;border-radius:8px;padding:8px;animation:mmPulse 1.2s ease-in-out infinite;">
+            <div style="height:11px;border-radius:4px;background:#1b3a2a;margin-bottom:6px;width:70%;"></div>
+            <div style="height:9px;border-radius:4px;background:#1b3a2a;margin-bottom:10px;width:50%;"></div>
+            <div style="height:9px;border-radius:4px;background:#1b3a2a;margin-bottom:4px;width:85%;"></div>
+            <div style="height:9px;border-radius:4px;background:#1b3a2a;width:60%;"></div>
           </div>
+        </div>
+
+        <!-- Fix #6: richer partner cards with sex, age, MUT, LIF, lifecycle stage -->
+        <div v-if="!searchingPartners && partners.length"
+          style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">
+          <div v-for="p in partners" :key="p.permlink"
+            @click="selectPartner(p)"
+            :style="{
+              flex: '0 0 148px',
+              background: pendingPartner && pendingPartner.permlink === p.permlink ? '#0d2d1a' : '#0a1a1a',
+              border: '1px solid ' + (pendingPartner && pendingPartner.permlink === p.permlink ? '#66bb6a' : '#2e7d32'),
+              borderRadius: '8px', padding: '8px', cursor: 'pointer', fontSize: '11px',
+              outline: pendingPartner && pendingPartner.permlink === p.permlink ? '2px solid #66bb6a' : 'none',
+              transition: 'all 0.15s'
+            }">
+
+            <!-- Name + sex badge -->
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
+              <div style="font-weight:bold;color:#a5d6a7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px;">
+                {{ p.name }}
+              </div>
+              <span :style="{ fontSize:'11px', fontWeight:'bold', color: p.genome.SX === 0 ? '#90caf9' : '#f48fb1' }">
+                {{ p.genome.SX === 0 ? '♂' : '♀' }}
+              </span>
+            </div>
+
+            <!-- Author -->
+            <div style="color:#555;margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              @{{ p.author }}
+            </div>
+
+            <!-- Lifecycle stage + age -->
+            <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+              <span :style="{ color: p.lifecycleStage ? p.lifecycleStage.color : '#888' }">
+                {{ p.lifecycleStage ? p.lifecycleStage.icon + ' ' + p.lifecycleStage.name : '' }}
+              </span>
+              <span style="color:#666;">Day {{ p.age }}</span>
+            </div>
+
+            <!-- Fertile window -->
+            <div style="color:#555;margin-bottom:2px;">
+              🌸 {{ p.genome.FRT_START }}–{{ p.genome.FRT_END }}d
+            </div>
+
+            <!-- MUT + LIF -->
+            <div style="display:flex;justify-content:space-between;">
+              <span style="color:#80cbc4;">MUT {{ p.genome.MUT }}</span>
+              <span style="color:#666;">LIF {{ p.genome.LIF }}d</span>
+            </div>
+
+            <!-- Fix #5: permit hint for non-owners -->
+            <div v-if="username && username !== p.author && !p._permitOwned"
+              style="margin-top:4px;color:#ffe082;font-size:10px;">
+              🔑 Permit may be needed
+            </div>
+
+            <!-- Fix #9: confirm prompt on first click -->
+            <div v-if="pendingPartner && pendingPartner.permlink === p.permlink"
+              style="margin-top:5px;padding:4px 0;border-top:1px solid #2e7d32;color:#66bb6a;font-size:10px;font-weight:bold;">
+              Tap again to breed ✓
+            </div>
+          </div>
+        </div>
+
+        <!-- Kinship disclaimer -->
+        <div v-if="!searchingPartners && partners.length"
+          style="font-size:10px;color:#444;margin-top:4px;font-style:italic;">
+          ⚠ Genus &amp; sex matched. Family relationships are verified at breed time.
         </div>
       </div>
 
@@ -3617,15 +3747,32 @@ const BreedingPanelComponent = {
           />
         </div>
 
-        <button
-          @click="publishChild"
-          :disabled="publishing || !username"
-          style="background:#1565c0;margin-top:10px;"
-        >
-          {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
-        </button>
+        <!-- Fix #7: Reset button lets user discard preview and try another partner -->
+        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:10px;">
+          <button
+            @click="resetBreed"
+            style="background:#2a2a2a;color:#aaa;font-size:13px;"
+          >
+            ↩ Try Different Partner
+          </button>
+          <button
+            @click="publishChild"
+            :disabled="publishing || !username"
+            style="background:#1565c0;"
+          >
+            {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
+          </button>
+        </div>
       </div>
       </template>
+
+      <!-- Fix #8: keyframe for skeleton pulse (injected once via inline style tag) -->
+      <style>
+        @keyframes mmPulse {
+          0%, 100% { opacity: 1; }
+          50%       { opacity: 0.4; }
+        }
+      </style>
     </div>
   `
 };
