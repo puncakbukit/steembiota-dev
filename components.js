@@ -2420,7 +2420,23 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
   ctx.restore();
 }
   },
-  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent;outline:none;user-select:none;" @click="onCanvasClick"></canvas>`
+  computed: {
+    canvasAriaLabel() {
+      if (!this.genome) return "Creature canvas";
+      const stage = this.fossil ? "Fossil" : (getLifecycleStage ? getLifecycleStage(this.age, this.genome)?.name : null) || "Unknown";
+      const sex   = this.genome.SX === 0 ? "Male" : "Female";
+      return `${sex} creature — ${stage}`;
+    }
+  },
+  template: `<canvas
+    ref="canvas"
+    :width="canvasW"
+    :height="canvasH"
+    role="img"
+    :aria-label="canvasAriaLabel"
+    style="max-width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent;outline:none;user-select:none;"
+    @click="onCanvasClick"
+  ></canvas>`
 };
 
 // ---- CreatureCardComponent ----
@@ -2649,7 +2665,7 @@ const CreatureCardComponent = {
         <div style="font-size:0.65rem;margin-top:3px;display:flex;gap:4px;
                     justify-content:center;align-items:center;flex-wrap:wrap;"
              @click.prevent.stop>
-          <span style="color:#3a3a3a;">@{{ post.author }}</span>
+          <span style="color:#888;">@{{ post.author }}</span>
           <span :style="{ color: provenanceBadge.color, fontSize:'0.63rem' }">
             {{ provenanceBadge.icon }} {{ provenanceBadge.label }}
           </span>
@@ -2812,6 +2828,7 @@ const GlobalProfileBannerComponent = {
             &nbsp;·&nbsp; 🐣 {{ userLevel.breakdown.offspring }} offspring
             &nbsp;·&nbsp; 🍃 {{ userLevel.breakdown.feedsGiven }} feeds
             &nbsp;·&nbsp; 🔬 {{ userLevel.breakdown.genera }} genera
+            <template v-if="userLevel.breakdown.upvotesGiven > 0">&nbsp;·&nbsp; ❤️ {{ userLevel.breakdown.upvotesGiven }} upvote{{ userLevel.breakdown.upvotesGiven > 1 ? 's' : '' }}</template>
             <template v-if="userLevel.breakdown.speciated > 0">&nbsp;·&nbsp; ⚡ {{ userLevel.breakdown.speciated }} speciation{{ userLevel.breakdown.speciated > 1 ? 's' : '' }}</template>
           </div>
         </div>
@@ -2931,6 +2948,22 @@ const ActivityPanelComponent = {
       if (this.alreadyWalkedToday) return "Walked today ✓";
       if (this.activityState && this.activityState.walkTotal >= 15) return "Walk cap reached (15/15)";
       return "🦮 Take for a walk";
+    },
+    // UTC midnight reset time — shown in "come back" messages so users know exactly when.
+    utcResetTime() {
+      const now  = new Date();
+      const msUntilMidnightUtc = (
+        (23 - now.getUTCHours()) * 3600 +
+        (59 - now.getUTCMinutes()) * 60 +
+        (60 - now.getUTCSeconds())
+      ) * 1000;
+      const midnight = new Date(now.getTime() + msUntilMidnightUtc);
+      // Format as "HH:MM UTC" in the user's local time so they can relate to it easily,
+      // with the UTC clock always shown for clarity.
+      const localStr = midnight.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+      const utcH     = String(midnight.getUTCHours()).padStart(2, "0");
+      const utcM     = String(midnight.getUTCMinutes()).padStart(2, "0");
+      return `Resets at 00:${utcM} UTC (${localStr} local)`;
     },
     moodBarWidth() {
       if (!this.activityState) return "0%";
@@ -3095,7 +3128,13 @@ const ActivityPanelComponent = {
               </template>
             </span>
           </div>
-          <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;height:8px;overflow:hidden;">
+          <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;height:8px;overflow:hidden;"
+               role="meter"
+               aria-valuemin="0"
+               aria-valuemax="100"
+               :aria-valuenow="feedState ? Math.round(feedState.healthPct * 100) : 0"
+               :aria-label="'Health: ' + (feedState ? feedState.label : 'Unfed')"
+          >
             <div :style="{ width: healthBarWidth, height:'100%', background: healthBarColor, borderRadius:'6px', transition:'width 0.4s ease' }"></div>
           </div>
         </div>
@@ -3165,7 +3204,7 @@ const ActivityPanelComponent = {
                 borderRadius:'6px', cursor: canFeed ? 'pointer' : 'default'
               }"
             >{{ feedButtonLabel }}</button>
-            <p v-if="alreadyFedToday" style="color:#555;font-size:11px;margin:6px 0 0;">Come back tomorrow!</p>
+            <p v-if="alreadyFedToday" style="color:#555;font-size:11px;margin:6px 0 0;">{{ utcResetTime }}</p>
           </div>
 
           <!-- Play card -->
@@ -3184,7 +3223,7 @@ const ActivityPanelComponent = {
                 borderRadius:'6px', cursor: canPlay ? 'pointer' : 'default'
               }"
             >{{ playButtonLabel }}</button>
-            <p v-if="alreadyPlayedToday" style="color:#555;font-size:11px;margin:6px 0 0;">Come back tomorrow!</p>
+            <p v-if="alreadyPlayedToday" style="color:#555;font-size:11px;margin:6px 0 0;">{{ utcResetTime }}</p>
           </div>
 
           <!-- Walk card -->
@@ -3203,7 +3242,7 @@ const ActivityPanelComponent = {
                 borderRadius:'6px', cursor: canWalk ? 'pointer' : 'default'
               }"
             >{{ walkButtonLabel }}</button>
-            <p v-if="alreadyWalkedToday" style="color:#555;font-size:11px;margin:6px 0 0;">Come back tomorrow!</p>
+            <p v-if="alreadyWalkedToday" style="color:#555;font-size:11px;margin:6px 0 0;">{{ utcResetTime }}</p>
           </div>
 
         </div>
@@ -4244,13 +4283,17 @@ const TransferPanelComponent = {
                 style="font-size:13px;width:100%;"
                 @keydown.enter="sendOffer"
               />
-              <p style="font-size:0.72rem;color:#444;margin:0;">
+              <p v-if="recipientInput.trim().toLowerCase() === username"
+                style="font-size:0.72rem;color:#ff8a80;margin:0;">
+                ⚠ You cannot transfer a creature to yourself.
+              </p>
+              <p v-else style="font-size:0.72rem;color:#444;margin:0;">
                 ⚠ This cannot be undone unless the recipient declines (never accepts).
                 The offer stays open until they accept or you cancel it.
               </p>
               <button
                 @click="sendOffer"
-                :disabled="publishing || !recipientInput.trim()"
+                :disabled="publishing || !recipientInput.trim() || recipientInput.trim().toLowerCase() === username"
                 style="background:#0d1a2e;"
               >
                 {{ publishing ? "Publishing…" : "🤝 Send Offer" }}
@@ -4528,7 +4571,6 @@ const EquipPanelComponent = {
       previewError:  "",
 
       // --- CLOSET ---
-      closetSearch: "",
       closet:        [],
       loadingCloset: false
     };
@@ -4537,14 +4579,6 @@ const EquipPanelComponent = {
   computed: {
     hasWearings() { return this.wearings.length > 0; },
     lapsingWearings() { return this.wearings.filter(w => w.permissionLapsed); },
-    filteredCloset() {
-      if (!this.closetSearch) return this.closet;
-      const q = this.closetSearch.toLowerCase();
-      return this.closet.filter(i => 
-        i.name.toLowerCase().includes(q) || 
-        i.template.toLowerCase().includes(q)
-      );
-    }
   },
 
   watch: {
@@ -4782,24 +4816,18 @@ const EquipPanelComponent = {
           🧢 Equip an Accessory {{ expanded ? "▲" : "▼" }}
         </div>
 
-        <div v-if="expanded" style="background:#080808; border:1px solid #2a1a2e; border-top:none; padding:14px; border-radius:0 0 8px 8px;">
+        <div v-if="expanded">
 
           <!-- CLOSET -->
-          <div style="margin-bottom:12px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-              <span style="font-size:0.75rem; color:#ce93d8; text-transform:uppercase;">👜 Your Closet</span>
-              <input v-model="closetSearch" placeholder="Filter by name..." 
-                     style="font-size:11px; padding:3px 8px; width:140px; background:#000; border:1px solid #333; color:#ce93d8;" />
-            </div>
+          <div>
+            <div>👜 Closet</div>
 
             <div v-if="loadingCloset">Loading...</div>
 
-            <div v-else-if="filteredCloset.length === 0" style="color:#444; font-size:12px; padding:10px;">
-              No matching items...
-            </div>
+            <div v-else-if="closet.length === 0">Empty</div>
 
-            <div v-else style="display:flex; gap:8px; overflow-x:auto; padding-bottom:8px; scrollbar-width:thin;">
-              <div v-for="item in filteredCloset"
+            <div v-else style="display:flex;gap:8px;overflow-x:auto;">
+              <div v-for="item in closet"
                    :key="item.permlink"
                    @click="selectFromCloset(item)">
                 <accessory-canvas-component

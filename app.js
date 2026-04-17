@@ -1974,7 +1974,6 @@ const CreatureView = {
     return {
       loading:       true,
       loadError:     null,
-      activeTab: 'interact', // Default tab
       isPhantom:     false,   // true when post was tombstoned via delete_comment
       genome:        null,
       name:          null,
@@ -2016,6 +2015,7 @@ const CreatureView = {
       resteemInProgress:   false,  // true while keychain resteem request is open
       votePickerOpen:      false,  // true when the % slider popover is visible
       votePct:             100,    // last chosen upvote percentage (1–100)
+      votePickerPos:       { bottom: 0, right: 0 },  // fixed coords for teleported popover
       // Equipped accessory — { template, genome, accAuthor, accPermlink, accName } | null
       wearing:             null,
       // Equipped accessories — newest first
@@ -2558,6 +2558,17 @@ const CreatureView = {
       if (!this.username) { this.notify("Please log in to upvote.", "error"); return; }
       if (!window.steem_keychain) { this.notify("Steem Keychain is not installed.", "error"); return; }
       if (this.hasVoted) { this.notify("You have already upvoted this creature.", "error"); return; }
+      if (!this.votePickerOpen) {
+        // Position the teleported popover above/right of the anchor button
+        const btn = this.$refs.voteAnchorBtn;
+        if (btn) {
+          const r = btn.getBoundingClientRect();
+          this.votePickerPos = {
+            bottom: window.innerHeight - r.top + 6,
+            right:  window.innerWidth  - r.right
+          };
+        }
+      }
       this.votePickerOpen = !this.votePickerOpen;
     },
 
@@ -2764,28 +2775,105 @@ const CreatureView = {
           @facing-resolved="onFacingResolved"
           @pose-resolved="onPoseResolved"
         ></creature-canvas-component>
-        
-         <!-- NEW: Tab Navigation -->
-         <div style="display:flex; justify-content:center; gap:5px; margin:20px 0 10px; border-bottom:1px solid #222;">
-            <button v-for="t in [
-              {id:'interact', label:'🌿 Interact', color:'#a5d6a7'},
-              {id:'lineage',  label:'🧬 Family',   color:'#80deea'},
-              {id:'stats',    label:'📊 Stats',    color:'#ce93d8'},
-              {id:'mgmt',     label:'⚙️ Manage',   color:'#ffb74d', ownerOnly: true},
-              {id:'social',   label:'💬 Social',   color:'#ef9a9a'}
-            ]" 
-            v-show="!t.ownerOnly || isOwner || isPendingRecipient"
-            @click="activeTab = t.id"
-            :style="{
-              background: activeTab === t.id ? '#1a1a1a' : 'transparent',
-              border: 'none', borderBottom: '2px solid ' + (activeTab === t.id ? t.color : 'transparent'),
-              color: activeTab === t.id ? t.color : '#555',
-              padding: '8px 12px', fontSize: '12px', fontWeight: 'bold', borderRadius: '4px 4px 0 0'
-            }">{{ t.label }}</button>
-         </div>
+        <!-- Pose label + social counters row -->
+        <div style="display:flex;align-items:center;justify-content:space-between;
+                    min-height:18px;margin:3px 0 0;">
+          <div v-if="currentPose && !fossil"
+            style="font-size:0.75rem;color:#444;font-style:italic;letter-spacing:0.04em;">
+            {{ { standing:'🐾 standing', sitting:'🪑 sitting', sleeping:'💤 sleeping', alert:'👀 alert', playful:'🎉 playful' }[currentPose] }}
+          </div>
+          <div v-else></div>
+          <!-- Upvote + Resteem counters + action buttons -->
+          <div v-if="!socialLoading" style="display:flex;gap:8px;align-items:center;">
+            <!-- Upvote -->
+            <span style="font-size:0.75rem;color:#ef9a9a;letter-spacing:0.03em;" title="Upvotes">
+              ❤️ {{ votes.length }}
+            </span>
+            <!-- Upvote button + % picker popover -->
+            <div v-if="username && !hasVoted" style="position:relative;">
+              <button
+                ref="voteAnchorBtn"
+                @click="toggleVotePicker"
+                :disabled="votingInProgress"
+                title="Upvote this creature"
+                style="padding:1px 6px;font-size:0.7rem;line-height:1.4;
+                       background:#1a0a0a;border:1px solid #4a1a1a;color:#ef9a9a;
+                       border-radius:4px;cursor:pointer;min-width:0;"
+              >{{ votingInProgress ? "…" : "↑" }}</button>
 
-         <!-- Tab Content -->
-         <div v-show="activeTab === 'interact'">
+              <!-- Teleport keeps the popover in <body> stacking context,
+                   escaping any ancestor overflow:hidden that would clip it. -->
+              <teleport to="body">
+                <div
+                  v-if="votePickerOpen"
+                  :style="{
+                    position: 'fixed',
+                    bottom: votePickerPos.bottom + 'px',
+                    right:  votePickerPos.right  + 'px',
+                    background: '#111', border: '1px solid #3a1a1a', borderRadius: '8px',
+                    padding: '10px 12px', minWidth: '160px', zIndex: 9999,
+                    boxShadow: '0 4px 16px rgba(0,0,0,0.8)'
+                  }"
+                >
+                  <!-- Close on outside click -->
+                  <div
+                    @click.stop="votePickerOpen = false"
+                    style="position:fixed;inset:0;z-index:-1;"
+                  ></div>
+
+                  <div style="font-size:0.72rem;color:#ef9a9a;font-weight:bold;
+                              margin-bottom:8px;text-align:center;letter-spacing:0.05em;">
+                    ❤️ Upvote strength
+                  </div>
+                  <div style="text-align:center;font-size:1rem;font-weight:bold;
+                              color:#ef9a9a;margin-bottom:6px;">
+                    {{ votePct }}%
+                  </div>
+                  <input
+                    type="range"
+                    v-model.number="votePct"
+                    min="1" max="100" step="1"
+                    style="width:100%;accent-color:#ef5350;cursor:pointer;"
+                  />
+                  <div style="display:flex;justify-content:space-between;
+                              font-size:0.62rem;color:#444;margin-top:2px;">
+                    <span>1%</span><span>100%</span>
+                  </div>
+                  <button
+                    @click.stop="submitVote"
+                    style="margin-top:8px;width:100%;background:#3a0a0a;
+                           border:1px solid #6a2020;color:#ef9a9a;font-size:0.78rem;
+                           border-radius:5px;padding:4px 0;cursor:pointer;"
+                  >Confirm {{ votePct }}% upvote</button>
+                </div>
+              </teleport>
+            </div>
+            <span
+              v-else-if="username && hasVoted"
+              title="You upvoted this"
+              style="font-size:0.7rem;color:#ef5350;">✓</span>
+            <!-- Resteem -->
+            <span style="font-size:0.75rem;color:#80cbc4;letter-spacing:0.03em;margin-left:4px;" title="Resteems">
+              🔁 {{ rebloggers.length }}
+            </span>
+            <button
+              v-if="username && !hasResteemed"
+              @click="submitResteem"
+              :disabled="resteemInProgress"
+              title="Resteem this creature"
+              style="padding:1px 6px;font-size:0.7rem;line-height:1.4;
+                     background:#0a1a1a;border:1px solid #1a3a3a;color:#80cbc4;
+                     border-radius:4px;cursor:pointer;min-width:0;"
+            >{{ resteemInProgress ? "…" : "↺" }}</button>
+            <span
+              v-else-if="username && hasResteemed"
+              title="You resteemed this"
+              style="font-size:0.7rem;color:#26c6da;">✓</span>
+          </div>
+        </div>
+        <div v-if="fossil" style="margin:6px 0;color:#666;font-size:0.85rem;letter-spacing:0.05em;">
+          🦴 This creature has fossilised. Its genome is preserved on-chain.
+        </div>
 
         <!-- ── Worn Accessories + Equip Panel ── -->
         <equip-panel-component
@@ -2814,9 +2902,62 @@ const CreatureView = {
           @feed-state-updated="onFeedStateUpdated"
           @activity-state-updated="onActivityStateUpdated"
         ></activity-panel-component>
-         </div>
 
-         <div v-show="activeTab === 'lineage'">
+        <!-- Social panel (upvotes, resteems, comments) — below activities -->
+        <social-panel-component
+          :username="username"
+          :creature-author="author"
+          :creature-permlink="permlink"
+          :votes="votes"
+          :rebloggers="rebloggers"
+          :social-comments="socialComments"
+          :social-loading="socialLoading"
+          @notify="(msg,type) => notify(msg,type)"
+          @comment-posted="onCommentPosted"
+        ></social-panel-component>
+
+        <hr/>
+
+        <!-- Unicode render -->
+        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Unicode Render</h3>
+        <pre :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
+
+        <!-- Genome table -->
+        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Genome</h3>
+        <genome-table-component :genome="genome"></genome-table-component>
+
+        <!-- Steem post link + copy button -->
+        <div v-if="steemitUrl" style="margin:16px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">
+          <!-- Effective owner indicator (shown when different from post author) -->
+          <span v-if="effectiveOwner && effectiveOwner !== author"
+            style="font-size:0.78rem;padding:2px 10px;border-radius:12px;
+                   background:#0d1a0d;border:1px solid #2e7d32;color:#66bb6a;">
+            🤝 Owned by
+            <router-link :to="'/@' + effectiveOwner"
+              style="color:#a5d6a7;font-weight:bold;">@{{ effectiveOwner }}</router-link>
+          </span>
+          <a :href="steemitUrl" target="_blank" style="font-size:13px;color:#80deea;">
+            📄 View on Steemit
+          </a>
+          <span style="color:#333;font-size:13px;">·</span>
+          <span style="font-size:12px;color:#444;">@{{ author }}/{{ permlink }}</span>
+          <button
+            @click="copyUrl"
+            :style="{
+              padding: '4px 12px',
+              fontSize: '12px',
+              background: urlCopied ? '#1b3a1b' : '#1a1a1a',
+              color: urlCopied ? '#66bb6a' : '#555',
+              border: '1px solid ' + (urlCopied ? '#2e7d32' : '#2a2a2a'),
+              borderRadius: '6px',
+              cursor: 'pointer',
+              transition: 'all 0.2s'
+            }"
+            title="Copy Steemit URL to clipboard"
+          >{{ urlCopied ? "✓ Copied!" : "📋 Copy URL" }}</button>
+        </div>
+
+        <hr/>
 
         <!-- ── Kinship Panel ── -->
         <div style="margin:8px 0 20px;">
@@ -2875,20 +3016,6 @@ const CreatureView = {
 
           </template>
         </div>
-         </div>
-
-         <div v-show="activeTab === 'stats'">
-
-        <!-- Unicode render -->
-        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Unicode Render</h3>
-        <pre :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
-
-        <!-- Genome table -->
-        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Genome</h3>
-        <genome-table-component :genome="genome"></genome-table-component>
-         </div>
-
-         <div v-show="activeTab === 'mgmt'">
 
         <!-- Permit Manager — owner only, always visible while creature is alive -->
         <template v-if="isOwner && !fossil && !isPhantom">
@@ -2922,159 +3049,6 @@ const CreatureView = {
             @transfer-updated="onTransferUpdated"
           ></transfer-panel-component>
         </template>
-         </div>
-
-         <div v-show="activeTab === 'social'">
-
-        <!-- Social panel (upvotes, resteems, comments) — below activities -->
-        <social-panel-component
-          :username="username"
-          :creature-author="author"
-          :creature-permlink="permlink"
-          :votes="votes"
-          :rebloggers="rebloggers"
-          :social-comments="socialComments"
-          :social-loading="socialLoading"
-          @notify="(msg,type) => notify(msg,type)"
-          @comment-posted="onCommentPosted"
-        ></social-panel-component>
-         </div>
-      </div>
-    </div>
-
-        
-        <!-- Pose label + social counters row -->
-        <div style="display:flex;align-items:center;justify-content:space-between;
-                    min-height:18px;margin:3px 0 0;">
-          <div v-if="currentPose && !fossil"
-            style="font-size:0.75rem;color:#444;font-style:italic;letter-spacing:0.04em;">
-            {{ { standing:'🐾 standing', sitting:'🪑 sitting', sleeping:'💤 sleeping', alert:'👀 alert', playful:'🎉 playful' }[currentPose] }}
-          </div>
-          <div v-else></div>
-          <!-- Upvote + Resteem counters + action buttons -->
-          <div v-if="!socialLoading" style="display:flex;gap:8px;align-items:center;">
-            <!-- Upvote -->
-            <span style="font-size:0.75rem;color:#ef9a9a;letter-spacing:0.03em;" title="Upvotes">
-              ❤️ {{ votes.length }}
-            </span>
-            <!-- Upvote button + % picker popover -->
-            <div v-if="username && !hasVoted" style="position:relative;">
-              <button
-                @click="toggleVotePicker"
-                :disabled="votingInProgress"
-                title="Upvote this creature"
-                style="padding:1px 6px;font-size:0.7rem;line-height:1.4;
-                       background:#1a0a0a;border:1px solid #4a1a1a;color:#ef9a9a;
-                       border-radius:4px;cursor:pointer;min-width:0;"
-              >{{ votingInProgress ? "…" : "↑" }}</button>
-
-              <!-- Floating % picker — opens above the button -->
-              <div
-                v-if="votePickerOpen"
-                style="position:absolute;bottom:calc(100% + 6px);right:0;
-                       background:#111;border:1px solid #3a1a1a;border-radius:8px;
-                       padding:10px 12px;min-width:160px;z-index:200;
-                       box-shadow:0 4px 16px rgba(0,0,0,0.7);"
-              >
-                <!-- Close on outside click via a transparent overlay -->
-                <div
-                  @click.stop="votePickerOpen = false"
-                  style="position:fixed;inset:0;z-index:-1;"
-                ></div>
-
-                <div style="font-size:0.72rem;color:#ef9a9a;font-weight:bold;
-                            margin-bottom:8px;text-align:center;letter-spacing:0.05em;">
-                  ❤️ Upvote strength
-                </div>
-
-                <!-- Percentage display -->
-                <div style="text-align:center;font-size:1rem;font-weight:bold;
-                            color:#ef9a9a;margin-bottom:6px;">
-                  {{ votePct }}%
-                </div>
-
-                <!-- Range slider -->
-                <input
-                  type="range"
-                  v-model.number="votePct"
-                  min="1" max="100" step="1"
-                  style="width:100%;accent-color:#ef5350;cursor:pointer;"
-                />
-                <div style="display:flex;justify-content:space-between;
-                            font-size:0.62rem;color:#444;margin-top:2px;">
-                  <span>1%</span><span>100%</span>
-                </div>
-
-                <!-- Confirm button -->
-                <button
-                  @click.stop="submitVote"
-                  style="margin-top:8px;width:100%;background:#3a0a0a;
-                         border:1px solid #6a2020;color:#ef9a9a;font-size:0.78rem;
-                         border-radius:5px;padding:4px 0;cursor:pointer;"
-                >Confirm {{ votePct }}% upvote</button>
-              </div>
-            </div>
-            <span
-              v-else-if="username && hasVoted"
-              title="You upvoted this"
-              style="font-size:0.7rem;color:#ef5350;">✓</span>
-            <!-- Resteem -->
-            <span style="font-size:0.75rem;color:#80cbc4;letter-spacing:0.03em;margin-left:4px;" title="Resteems">
-              🔁 {{ rebloggers.length }}
-            </span>
-            <button
-              v-if="username && !hasResteemed"
-              @click="submitResteem"
-              :disabled="resteemInProgress"
-              title="Resteem this creature"
-              style="padding:1px 6px;font-size:0.7rem;line-height:1.4;
-                     background:#0a1a1a;border:1px solid #1a3a3a;color:#80cbc4;
-                     border-radius:4px;cursor:pointer;min-width:0;"
-            >{{ resteemInProgress ? "…" : "↺" }}</button>
-            <span
-              v-else-if="username && hasResteemed"
-              title="You resteemed this"
-              style="font-size:0.7rem;color:#26c6da;">✓</span>
-          </div>
-        </div>
-        <div v-if="fossil" style="margin:6px 0;color:#666;font-size:0.85rem;letter-spacing:0.05em;">
-          🦴 This creature has fossilised. Its genome is preserved on-chain.
-        </div>
-
-        <hr/>
-
-        <!-- Steem post link + copy button -->
-        <div v-if="steemitUrl" style="margin:16px 0;display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:center;">
-          <!-- Effective owner indicator (shown when different from post author) -->
-          <span v-if="effectiveOwner && effectiveOwner !== author"
-            style="font-size:0.78rem;padding:2px 10px;border-radius:12px;
-                   background:#0d1a0d;border:1px solid #2e7d32;color:#66bb6a;">
-            🤝 Owned by
-            <router-link :to="'/@' + effectiveOwner"
-              style="color:#a5d6a7;font-weight:bold;">@{{ effectiveOwner }}</router-link>
-          </span>
-          <a :href="steemitUrl" target="_blank" style="font-size:13px;color:#80deea;">
-            📄 View on Steemit
-          </a>
-          <span style="color:#333;font-size:13px;">·</span>
-          <span style="font-size:12px;color:#444;">@{{ author }}/{{ permlink }}</span>
-          <button
-            @click="copyUrl"
-            :style="{
-              padding: '4px 12px',
-              fontSize: '12px',
-              background: urlCopied ? '#1b3a1b' : '#1a1a1a',
-              color: urlCopied ? '#66bb6a' : '#555',
-              border: '1px solid ' + (urlCopied ? '#2e7d32' : '#2a2a2a'),
-              borderRadius: '6px',
-              cursor: 'pointer',
-              transition: 'all 0.2s'
-            }"
-            title="Copy Steemit URL to clipboard"
-          >{{ urlCopied ? "✓ Copied!" : "📋 Copy URL" }}</button>
-        </div>
-
-        <hr/>
 
         <!-- Breed panel — shown while fertile AND current user is permitted -->
         <template v-if="isFertile && isPermittedToBread">
@@ -3105,6 +3079,8 @@ const CreatureView = {
     </div>
   `
 };
+
+
 
 // ============================================================
 // LEADERBOARD HELPERS
@@ -3841,7 +3817,7 @@ const App = {
       <router-link
         v-if="username"
         :to="'/@' + username"
-        exact-active-class="nav-active"
+        :class="{ 'nav-active': $route.path.startsWith('/@' + username) }"
       >Profile</router-link>
       <router-link to="/leaderboard" exact-active-class="nav-active">🏆 Leaderboard</router-link>
       <router-link to="/about"       exact-active-class="nav-active">About</router-link>
@@ -3852,6 +3828,7 @@ const App = {
         to="/notifications"
         exact-active-class="nav-active"
         style="position:relative;"
+        :aria-label="notifBadgeCount > 0 ? 'Notifications (' + notifBadgeCount + ' pending)' : 'Notifications'"
       >
         🔔
         <span
