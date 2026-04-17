@@ -4528,6 +4528,7 @@ const EquipPanelComponent = {
       previewError:  "",
 
       // --- CLOSET ---
+      closetSearch: "",
       closet:        [],
       loadingCloset: false
     };
@@ -4536,6 +4537,14 @@ const EquipPanelComponent = {
   computed: {
     hasWearings() { return this.wearings.length > 0; },
     lapsingWearings() { return this.wearings.filter(w => w.permissionLapsed); },
+    filteredCloset() {
+      if (!this.closetSearch) return this.closet;
+      const q = this.closetSearch.toLowerCase();
+      return this.closet.filter(i => 
+        i.name.toLowerCase().includes(q) || 
+        i.template.toLowerCase().includes(q)
+      );
+    }
   },
 
   watch: {
@@ -4773,18 +4782,24 @@ const EquipPanelComponent = {
           🧢 Equip an Accessory {{ expanded ? "▲" : "▼" }}
         </div>
 
-        <div v-if="expanded">
+        <div v-if="expanded" style="background:#080808; border:1px solid #2a1a2e; border-top:none; padding:14px; border-radius:0 0 8px 8px;">
 
           <!-- CLOSET -->
-          <div>
-            <div>👜 Closet</div>
+          <div style="margin-bottom:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <span style="font-size:0.75rem; color:#ce93d8; text-transform:uppercase;">👜 Your Closet</span>
+              <input v-model="closetSearch" placeholder="Filter by name..." 
+                     style="font-size:11px; padding:3px 8px; width:140px; background:#000; border:1px solid #333; color:#ce93d8;" />
+            </div>
 
             <div v-if="loadingCloset">Loading...</div>
 
-            <div v-else-if="closet.length === 0">Empty</div>
+            <div v-else-if="filteredCloset.length === 0" style="color:#444; font-size:12px; padding:10px;">
+              No matching items...
+            </div>
 
-            <div v-else style="display:flex;gap:8px;overflow-x:auto;">
-              <div v-for="item in closet"
+            <div v-else style="display:flex; gap:8px; overflow-x:auto; padding-bottom:8px; scrollbar-width:thin;">
+              <div v-for="item in filteredCloset"
                    :key="item.permlink"
                    @click="selectFromCloset(item)">
                 <accessory-canvas-component
