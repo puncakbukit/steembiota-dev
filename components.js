@@ -3244,11 +3244,7 @@ const BreedingPanelComponent = {
       breedInfo:   null,
       publishing:  false,
       customTitle: "",
-      _facingRight: false,
-
-      // --- Matchmaker state ---
-      partners: [],
-      searchingPartners: false
+      _facingRight: false
     };
   },
   watch: {
@@ -3282,44 +3278,6 @@ const BreedingPanelComponent = {
     }
   },
   methods: {
-    // ============================================================
-    // Matchmaker Logic
-    // ============================================================
-    async findPartners() {
-      if (!this.lockedA) return;
-      this.searchingPartners = true;
-      this.partners = [];
-      try {
-        const targetGEN = this.lockedA.genome?.GEN;
-        const targetSex = this.lockedA.genome?.SX === 0 ? 1 : 0;
-
-        const raw = await fetchPostsByTag("steembiota", 100);
-        const parsed = parseSteembiotaPosts(raw);
-
-        this.partners = parsed.filter(c => 
-          c.genome.GEN === targetGEN && 
-          c.genome.SX === targetSex &&
-          (c.author + "/" + c.permlink !== this.lockedA.author + "/" + this.lockedA.permlink) &&
-          c.age < c.genome.LIF
-        ).slice(0, 5);
-
-        if (this.partners.length === 0) {
-          this.$emit("notify", "No compatible partners found in the recent history.", "info");
-        }
-      } catch (e) {
-        this.$emit("notify", "Partner search failed.", "error");
-      }
-      this.searchingPartners = false;
-    },
-
-    selectPartner(p) {
-      this.urlB = `https://steemit.com/@${p.author}/${p.permlink}`;
-      this.breedCreatures();
-    },
-
-    // ============================================================
-    // Breeding Logic
-    // ============================================================
     async breedCreatures() {
       this.loadError   = "";
       this.loadStatus  = "";
@@ -3347,32 +3305,31 @@ const BreedingPanelComponent = {
           loadGenomeFromPost(ua),
           loadGenomeFromPost(ub)
         ]);
-
+        // Store parent genomes for sex display before attempting breed
         this.genomeA = resA.genome;
         this.genomeB = resB.genome;
 
+        // ---- Fertility check ----
         const checkFertility = (res, label) => {
+          // loadGenomeFromPost already throws for phantoms, but guard here too
           const g   = res.genome;
           const age = res.age;
           if (age >= g.LIF) throw new Error(
             `${label} (${res.author}) is a fossil (age ${age} ≥ lifespan ${g.LIF}). Fossils cannot breed.`
           );
-          const boost      = res.feedState?.fertilityBoost || 0;
-          const ext        = res.activityState?.fertilityExtension || 0;
-          const windowDays = g.FRT_END - g.FRT_START;
-          const boostDays  = Math.floor(windowDays * boost / 2);
-          const effStart   = g.FRT_START - ext - boostDays;
-          const effEnd     = g.FRT_END   + ext + boostDays;
-          if (age < effStart) throw new Error(
-            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${effStart}${effStart !== g.FRT_START ? ` — extended from ${g.FRT_START} by feeding/play` : ``}).`
+          if (age < g.FRT_START) throw new Error(
+            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${g.FRT_START}).`
           );
-          if (age >= effEnd) throw new Error(
-            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${effEnd}${effEnd !== g.FRT_END ? ` — extended from ${g.FRT_END} by feeding/play` : ``}).`
+          if (age >= g.FRT_END) throw new Error(
+            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${g.FRT_END}).`
           );
         };
         checkFertility(resA, "Parent A");
         checkFertility(resB, "Parent B");
 
+        // ---- Breed permit check ----
+        // Opt-in model: effective owner always allowed; others need a named active permit.
+        // res.effectiveOwner comes from loadGenomeFromPost (transfer-aware).
         const checkPermit = (res, label) => {
           const owner = res.effectiveOwner || res.author;
           if (!isBreedingPermitted(owner, this.username, res.permits)) {
@@ -3386,15 +3343,13 @@ const BreedingPanelComponent = {
         checkPermit(resA, "Parent A");
         checkPermit(resB, "Parent B");
 
+        // ---- Kinship check ----
         this.loadStatus = "Checking ancestry and family relationships…";
         await checkBreedingCompatibility(resA, resB);
 
+        // ---- Breed ----
         this.loadStatus = "";
-
-        // --- deterministic nonce added ---
-        const nonce = this.urlA + this.urlB + Date.now();
-        const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome, nonce);
-
+        const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome);
         this._facingRight = Math.random() < 0.5;
         this.childGenome = child;
         this.childName   = generateFullName(child);
@@ -3436,6 +3391,7 @@ const BreedingPanelComponent = {
             if (typeof invalidateGlobalListCaches === "function") invalidateGlobalListCaches();
             if (typeof invalidateOwnedCachesForUser === "function") invalidateOwnedCachesForUser(this.username);
 
+            // Fire birth-announcement replies to both parents (best-effort, non-blocking)
             const art = this.childArt || "";
             const breedMeta = this.breedInfo;
             const cName  = this.childName;
@@ -3443,6 +3399,7 @@ const BreedingPanelComponent = {
             const poster  = this.username;
 
             const notifyBirthError = (who) => {
+              // Silently swallow — birth reply failure should not alarm the user
               console.warn("Birth reply to " + who + " failed (non-fatal).");
             };
 
@@ -3473,23 +3430,6 @@ const BreedingPanelComponent = {
   template: `
     <div style="margin-top:32px;padding-top:24px;border-top:1px solid #333;">
       <h3 style="color:#80deea;margin:0 0 4px;">🧬 Breed Creatures</h3>
-
-      <!-- Matchmaker Button -->
-      <div v-if="lockedA && !childGenome" style="margin-bottom:12px;">
-        <button @click="findPartners" :disabled="searchingPartners" style="background:#004d40;font-size:12px;">
-          🔍 {{ searchingPartners ? 'Searching...' : 'Find Compatible Partner' }}
-        </button>
-
-        <!-- Partner Suggestions -->
-        <div v-if="partners.length" style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">
-          <div v-for="p in partners" :key="p.permlink" @click="selectPartner(p)" 
-            style="flex:0 0 120px;background:#0a1a1a;border:1px solid #2e7d32;border-radius:8px;padding:8px;cursor:pointer;font-size:11px;">
-            <div style="font-weight:bold;color:#a5d6a7;overflow:hidden;text-overflow:ellipsis;">{{ p.name }}</div>
-            <div style="color:#555;">@{{ p.author }}</div>
-          </div>
-        </div>
-      </div>
-
       <p style="font-size:12px;color:#555;margin:0 0 12px;">Requires one ♂ Male and one ♀ Female of the same genus.</p>
 
       <!-- Login gate -->
@@ -3499,8 +3439,9 @@ const BreedingPanelComponent = {
 
       <template v-else>
       <div style="display:flex;flex-direction:column;gap:8px;max-width:520px;margin:0 auto;">
-        <!-- Parent A -->
+        <!-- Parent A — locked to page creature, or free input -->
         <div style="position:relative;">
+          <!-- Locked display -->
           <div v-if="lockedA" :style="{
             fontSize:'13px', padding:'8px 10px', borderRadius:'6px',
             background:'#0d1a0d', border:'1px solid #2e7d32',
@@ -3511,44 +3452,104 @@ const BreedingPanelComponent = {
               {{ lockedA.sex }}
             </span>
           </div>
+          <!-- Free input -->
           <template v-else>
-            <input v-model="urlA" type="text" placeholder="Parent A — Steem post URL" style="font-size:13px;width:100%;padding-right:70px;" />
-            <span v-if="genomeA" :style="{ position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)', fontSize:'12px', fontWeight:'bold', color: genomeA.SX === 0 ? '#90caf9' : '#f48fb1', pointerEvents:'none' }">
-              {{ parentASex }}
-            </span>
+            <input
+              v-model="urlA"
+              type="text"
+              placeholder="Parent A — Steem post URL"
+              style="font-size:13px;width:100%;padding-right:70px;"
+            />
+            <span
+              v-if="genomeA"
+              :style="{
+                position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)',
+                fontSize:'12px', fontWeight:'bold',
+                color: genomeA.SX === 0 ? '#90caf9' : '#f48fb1',
+                pointerEvents:'none'
+              }"
+            >{{ parentASex }}</span>
           </template>
         </div>
-
         <!-- Parent B -->
         <div style="position:relative;">
-          <input v-model="urlB" type="text" placeholder="Parent B — Steem post URL" style="font-size:13px;width:100%;padding-right:70px;" />
-          <span v-if="genomeB" :style="{ position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)', fontSize:'12px', fontWeight:'bold', color: genomeB.SX === 0 ? '#90caf9' : '#f48fb1', pointerEvents:'none' }">
-            {{ parentBSex }}
-          </span>
+          <input
+            v-model="urlB"
+            type="text"
+            placeholder="Parent B — Steem post URL"
+            style="font-size:13px;width:100%;padding-right:70px;"
+          />
+          <span
+            v-if="genomeB"
+            :style="{
+              position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)',
+              fontSize:'12px', fontWeight:'bold',
+              color: genomeB.SX === 0 ? '#90caf9' : '#f48fb1',
+              pointerEvents:'none'
+            }"
+          >{{ parentBSex }}</span>
         </div>
-
-        <button @click="breedCreatures" :disabled="loading" style="background:#1a3a2a;">
+        <button
+          @click="breedCreatures"
+          :disabled="loading"
+          style="background:#1a3a2a;"
+        >
           {{ loading ? "Checking…" : "🔬 Breed" }}
         </button>
       </div>
 
+      <!-- Status message during kinship check -->
       <div v-if="loadStatus" style="color:#80deea;font-size:12px;margin-top:8px;font-style:italic;">
         ⏳ {{ loadStatus }}
       </div>
 
+      <!-- Error -->
       <div v-if="loadError" style="color:#ff8a80;font-size:13px;margin-top:8px;">
         ⚠ {{ loadError }}
       </div>
 
-      <!-- Child preview (unchanged) -->
+      <!-- Child preview -->
       <div v-if="childGenome" style="margin-top:20px;">
         <div style="font-size:1.1rem;font-weight:bold;color:#80deea;">
           🧬 {{ childName }}
         </div>
         <div style="font-size:0.85rem;color:#888;margin:2px 0 6px;">
-          {{ sexLabel }} · <span :style="{ color: mutationColor }">{{ mutationLabel }}</span>
+          {{ sexLabel }}
+          &nbsp;·&nbsp;
+          <span :style="{ color: mutationColor }">{{ mutationLabel }}</span>
         </div>
+
+        <!-- Unicode art preview -->
         <pre style="font-size:11px;line-height:1.3;display:inline-block;text-align:left;">{{ childArt }}</pre>
+
+        <!-- Genome summary -->
+        <div style="font-size:12px;color:#666;margin:4px 0 10px;">
+          GEN {{ childGenome.GEN }}
+          &nbsp;·&nbsp; MOR {{ childGenome.MOR }}
+          &nbsp;·&nbsp; APP {{ childGenome.APP }}
+          &nbsp;·&nbsp; ORN {{ childGenome.ORN }}
+          &nbsp;·&nbsp; MUT {{ childGenome.MUT }}
+          &nbsp;·&nbsp; LIF {{ childGenome.LIF }} days
+        </div>
+
+        <!-- Post title — pre-filled, user-editable -->
+        <div style="margin-top:12px;max-width:520px;margin-left:auto;margin-right:auto;">
+          <label style="display:block;font-size:12px;color:#888;margin-bottom:4px;">Post title</label>
+          <input
+            v-model="customTitle"
+            type="text"
+            maxlength="255"
+            style="width:100%;font-size:13px;"
+          />
+        </div>
+
+        <button
+          @click="publishChild"
+          :disabled="publishing || !username"
+          style="background:#1565c0;margin-top:10px;"
+        >
+          {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
+        </button>
       </div>
       </template>
     </div>
