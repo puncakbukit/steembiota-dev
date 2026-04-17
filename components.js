@@ -3244,7 +3244,11 @@ const BreedingPanelComponent = {
       breedInfo:   null,
       publishing:  false,
       customTitle: "",
-      _facingRight: false
+      _facingRight: false,
+
+      // NEW: Matchmaker state
+      partners: [],
+      searchingPartners: false
     };
   },
   watch: {
@@ -3277,7 +3281,46 @@ const BreedingPanelComponent = {
       return "#666";
     }
   },
+
   methods: {
+    // ============================================================
+    // NEW: Matchmaker Logic
+    // ============================================================
+    async findPartners() {
+      if (!this.lockedA) return;
+      this.searchingPartners = true;
+      this.partners = [];
+      try {
+        const targetGEN = this.lockedA.genome?.GEN;
+        const targetSex = this.lockedA.genome?.SX === 0 ? 1 : 0;
+
+        const raw = await fetchPostsByTag("steembiota", 100);
+        const parsed = parseSteembiotaPosts(raw);
+
+        this.partners = parsed.filter(c => 
+          c.genome.GEN === targetGEN && 
+          c.genome.SX === targetSex &&
+          (c.author + "/" + c.permlink !== this.lockedA.author + "/" + this.lockedA.permlink) &&
+          c.age < c.genome.LIF
+        ).slice(0, 5);
+
+        if (this.partners.length === 0) {
+          this.$emit("notify", "No compatible partners found in the recent history.", "info");
+        }
+      } catch (e) {
+        this.$emit("notify", "Partner search failed.", "error");
+      }
+      this.searchingPartners = false;
+    },
+
+    selectPartner(p) {
+      this.urlB = `https://steemit.com/@${p.author}/${p.permlink}`;
+      this.breedCreatures();
+    },
+
+    // ============================================================
+    // EXISTING BREED LOGIC (UPDATED WITH NONCE)
+    // ============================================================
     async breedCreatures() {
       this.loadError   = "";
       this.loadStatus  = "";
@@ -3305,31 +3348,37 @@ const BreedingPanelComponent = {
           loadGenomeFromPost(ua),
           loadGenomeFromPost(ub)
         ]);
+
         // Store parent genomes for sex display before attempting breed
         this.genomeA = resA.genome;
         this.genomeB = resB.genome;
 
         // ---- Fertility check ----
         const checkFertility = (res, label) => {
-          // loadGenomeFromPost already throws for phantoms, but guard here too
           const g   = res.genome;
           const age = res.age;
           if (age >= g.LIF) throw new Error(
             `${label} (${res.author}) is a fossil (age ${age} ≥ lifespan ${g.LIF}). Fossils cannot breed.`
           );
-          if (age < g.FRT_START) throw new Error(
-            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${g.FRT_START}).`
+
+          const boost      = res.feedState?.fertilityBoost || 0;
+          const ext        = res.activityState?.fertilityExtension || 0;
+          const windowDays = g.FRT_END - g.FRT_START;
+          const boostDays  = Math.floor(windowDays * boost / 2);
+          const effStart   = g.FRT_START - ext - boostDays;
+          const effEnd     = g.FRT_END   + ext + boostDays;
+
+          if (age < effStart) throw new Error(
+            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${effStart}${effStart !== g.FRT_START ? ` — extended from ${g.FRT_START} by feeding/play` : ``}).`
           );
-          if (age >= g.FRT_END) throw new Error(
-            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${g.FRT_END}).`
+          if (age >= effEnd) throw new Error(
+            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${effEnd}${effEnd !== g.FRT_END ? ` — extended from ${g.FRT_END} by feeding/play` : ``}).`
           );
         };
         checkFertility(resA, "Parent A");
         checkFertility(resB, "Parent B");
 
         // ---- Breed permit check ----
-        // Opt-in model: effective owner always allowed; others need a named active permit.
-        // res.effectiveOwner comes from loadGenomeFromPost (transfer-aware).
         const checkPermit = (res, label) => {
           const owner = res.effectiveOwner || res.author;
           if (!isBreedingPermitted(owner, this.username, res.permits)) {
@@ -3349,7 +3398,11 @@ const BreedingPanelComponent = {
 
         // ---- Breed ----
         this.loadStatus = "";
-        const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome);
+
+        // UPDATED: deterministic nonce
+        const nonce = this.urlA + this.urlB + Date.now();
+        const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome, nonce);
+
         this._facingRight = Math.random() < 0.5;
         this.childGenome = child;
         this.childName   = generateFullName(child);
@@ -3359,6 +3412,7 @@ const BreedingPanelComponent = {
           parentA: { author: resA.author, permlink: resA.permlink },
           parentB: { author: resB.author, permlink: resB.permlink }
         };
+
       } catch (e) {
         this.loadStatus = "";
         this.loadError = e.message || String(e);
@@ -3427,9 +3481,27 @@ const BreedingPanelComponent = {
       );
     }
   },
+
   template: `
     <div style="margin-top:32px;padding-top:24px;border-top:1px solid #333;">
       <h3 style="color:#80deea;margin:0 0 4px;">🧬 Breed Creatures</h3>
+      
+      <!-- Matchmaker Button -->
+      <div v-if="lockedA && !childGenome" style="margin-bottom:12px;">
+        <button @click="findPartners" :disabled="searchingPartners" style="background:#004d40;font-size:12px;">
+          🔍 {{ searchingPartners ? 'Searching...' : 'Find Compatible Partner' }}
+        </button>
+        
+        <!-- Partner Suggestions -->
+        <div v-if="partners.length" style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">
+          <div v-for="p in partners" :key="p.permlink" @click="selectPartner(p)" 
+            style="flex:0 0 120px;background:#0a1a1a;border:1px solid #2e7d32;border-radius:8px;padding:8px;cursor:pointer;font-size:11px;">
+            <div style="font-weight:bold;color:#a5d6a7;overflow:hidden;text-overflow:ellipsis;">{{ p.name }}</div>
+            <div style="color:#555;">@{{ p.author }}</div>
+          </div>
+        </div>
+      </div>
+
       <p style="font-size:12px;color:#555;margin:0 0 12px;">Requires one ♂ Male and one ♀ Female of the same genus.</p>
 
       <!-- Login gate -->
@@ -3471,6 +3543,7 @@ const BreedingPanelComponent = {
             >{{ parentASex }}</span>
           </template>
         </div>
+
         <!-- Parent B -->
         <div style="position:relative;">
           <input
@@ -3489,6 +3562,7 @@ const BreedingPanelComponent = {
             }"
           >{{ parentBSex }}</span>
         </div>
+
         <button
           @click="breedCreatures"
           :disabled="loading"
