@@ -455,6 +455,21 @@ For each grantee only the latest action applies (permit or revoke). Permits may 
 
 ---
 
+## 🧬 The Breeding Matchmaker
+
+The Breeding Matchmaker simplifies the process of finding compatible mates for your creatures. Located directly on the creature detail page, it automates the search for partners within the SteemBiota ecosystem.
+
+### How it Works:
+1.  **Context-Aware Search:** When viewing your fertile creature, click "Find Compatible Partner."
+2.  **Automated Filtering:** The system scans the blockchain (latest 100 posts) and filters for creatures that meet the strict biological requirements:
+    *   **Same Genus:** Matches the `GEN` gene exactly.
+    *   **Opposite Sex:** If your creature is Male, it looks for Females, and vice-versa.
+    *   **Fertility Check:** Only displays creatures currently within their fertile window (accounting for age and lifespan).
+    *   **Health & Lifecycle:** Prioritizes living creatures over fossils and filters out "Phantoms" (deleted posts).
+3.  **Two-Step Confirmation:** To prevent accidental breeding, the UI requires a "Stage and Confirm" workflow. Click a partner once to view their stats, and click again to initiate the on-chain breeding process.
+
+---
+
 ## Image-Inspired Creature Upload
 
 The **📸 Upload** page (`/#/upload`, login required) lets users derive a new founder creature genome from any uploaded image — a photograph, illustration, or sketch.
@@ -792,7 +807,7 @@ Offspring (additional fields only):
 ```
 
 Use `"type": "breed_revoke"` to cancel a permit. Set `expires_days` to `0` for a permanent grant.
-
+   
 ### Ownership transfer replies
 
 ```json
