@@ -23,19 +23,8 @@ const AppNotificationComponent = {
   },
   beforeUnmount() { clearTimeout(this.timer); },
   computed: {
-    styles() {
-      const base = {
-        display: "flex", alignItems: "center",
-        justifyContent: "space-between",
-        margin: "10px auto", padding: "10px 14px",
-        borderRadius: "6px", maxWidth: "640px",
-        fontSize: "14px", gap: "10px"
-      };
-      if (this.type === "success")
-        return { ...base, background: "#1b2e1b", border: "1px solid #388e3c", color: "#a5d6a7" };
-      if (this.type === "info")
-        return { ...base, background: "#0d1a2e", border: "1px solid #1565c0", color: "#90caf9" };
-      return   { ...base, background: "#3b0000", border: "1px solid #b71c1c", color: "#ff8a80" };
+    notifClass() {
+      return ["notification", this.type];
     },
     icon() {
       if (this.type === "success") return "✅";
@@ -44,11 +33,11 @@ const AppNotificationComponent = {
     }
   },
   template: `
-    <div v-if="message" :style="styles" role="alert">
+    <div v-if="message" :class="notifClass" role="alert">
       <span>{{ icon }} {{ message }}</span>
       <button
         @click="$emit('dismiss')"
-        style="background:none;border:none;cursor:pointer;font-size:16px;padding:0;color:inherit;line-height:1;"
+        class="sb-notif-dismiss"
         aria-label="Dismiss"
       >✕</button>
     </div>
@@ -81,7 +70,7 @@ const AuthComponent = {
     }
   },
   template: `
-    <div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap;justify-content:center;margin:8px 0;">
+    <div class="sb-auth-row">
       <template v-if="!username">
         <input
           v-model="usernameInput"
@@ -93,14 +82,14 @@ const AuthComponent = {
         <button @click="submit" :disabled="!usernameInput.trim() || isLoggingIn">
           {{ isLoggingIn ? "Signing in…" : "Login with Keychain" }}
         </button>
-        <button @click="$emit('close')" style="background:#555;">Cancel</button>
-        <div v-if="loginError" style="width:100%;color:#ff8a80;font-size:13px;margin-top:4px;">
+        <button @click="$emit('close')" class="sb-btn-cancel">Cancel</button>
+        <div v-if="loginError" class="sb-login-error">
           {{ loginError }}
         </div>
       </template>
       <template v-else>
-        <span style="font-size:14px;">Logged in as <strong>@{{ username }}</strong></span>
-        <button @click="$emit('logout')" style="background:#555;">Logout</button>
+        <span class="sb-login-info">Logged in as <strong>@{{ username }}</strong></span>
+        <button @click="$emit('logout')" class="sb-btn-logout-inline">Logout</button>
       </template>
     </div>
   `
@@ -113,14 +102,9 @@ const LoadingSpinnerComponent = {
     message: { type: String, default: "Loading..." }
   },
   template: `
-    <div style="text-align:center;padding:30px;color:#888;">
-      <div style="
-        display:inline-block;width:32px;height:32px;
-        border:4px solid #333;border-top-color:#66bb6a;
-        border-radius:50%;animation:spin 0.8s linear infinite;
-      "></div>
-      <p style="margin-top:10px;font-size:14px;">{{ message }}</p>
-      <style>@keyframes spin { to { transform: rotate(360deg); } }</style>
+    <div class="sb-spinner-wrap">
+      <div class="sb-spinner"></div>
+      <p class="sb-spinner-msg">{{ message }}</p>
     </div>
   `
 };
@@ -139,20 +123,19 @@ const UserProfileComponent = {
   },
   template: `
     <div v-if="profileData">
-      <div :style="{
-        backgroundImage: 'url(' + safeUrl(profileData.coverImage) + ')',
-        backgroundSize: 'cover', backgroundPosition: 'center',
-        height: '120px', borderRadius: '8px', background: '#222'
-      }"></div>
-      <div style="display:flex;align-items:center;margin-top:-36px;padding:10px;justify-content:center;">
+      <div
+        class="sb-profile-cover"
+        :style="safeUrl(profileData.coverImage) ? { backgroundImage: 'url(' + safeUrl(profileData.coverImage) + ')' } : {}"
+      ></div>
+      <div class="sb-profile-avatar-row">
         <img
           :src="safeUrl(profileData.profileImage) || 'https://via.placeholder.com/80'"
-          style="width:72px;height:72px;border-radius:50%;border:3px solid #444;background:#222;"
+          class="sb-avatar-large"
         />
-        <div style="margin-left:15px;text-align:left;">
-          <h2 style="margin:0;color:#eee;">{{ profileData.displayName }}</h2>
-          <small style="color:#aaa;">@{{ profileData.username }}</small>
-          <p style="margin:5px 0;color:#ccc;">{{ profileData.about }}</p>
+        <div class="sb-profile-info">
+          <h2 class="sb-profile-name">{{ profileData.displayName }}</h2>
+          <small class="sb-profile-handle">@{{ profileData.username }}</small>
+          <p class="sb-profile-about">{{ profileData.about }}</p>
         </div>
       </div>
     </div>
@@ -2568,12 +2551,7 @@ const CreatureCardComponent = {
   },
   template: `
     <router-link :to="routePath" style="text-decoration:none;color:inherit;display:block;">
-      <div
-        style="background:#111;border:1px solid #222;border-radius:10px;padding:10px;
-               text-align:center;cursor:pointer;transition:border-color 0.18s;position:relative;"
-        @mouseenter="$event.currentTarget.style.borderColor='#2e7d32'"
-        @mouseleave="$event.currentTarget.style.borderColor='#222'"
-      >
+      <div class="sb-card">
         <creature-canvas-component
           :genome="post.genome"
           :age="post.age"
@@ -2584,109 +2562,57 @@ const CreatureCardComponent = {
           style="display:block;margin:0 auto;"
         ></creature-canvas-component>
 
-        <!-- Creature name -->
-        <div style="font-size:0.82rem;font-weight:bold;color:#a5d6a7;
-                    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:5px;">
-          🧬 {{ post.name }}
-        </div>
+        <div class="sb-card-name">🧬 {{ post.name }}</div>
 
-        <!-- Row 1: sex · age · lifecycle  ·  ❤️ count  [↑] -->
-        <div style="font-size:0.70rem;margin-top:5px;display:flex;gap:5px;
-                    justify-content:center;align-items:center;flex-wrap:wrap;
-                    position:relative;" @click.prevent.stop>
-          <span style="color:#888;">{{ sexSymbol }}</span>
-          <span style="color:#444;">·</span>
-          <span style="color:#888;">{{ post.age }}d</span>
-          <span style="color:#444;">·</span>
+        <!-- Row 1: sex · age · lifecycle · ❤️ count [↑] -->
+        <div class="sb-card-row" @click.prevent.stop>
+          <span class="sb-muted">{{ sexSymbol }}</span>
+          <span class="sb-dot">·</span>
+          <span class="sb-muted">{{ post.age }}d</span>
+          <span class="sb-dot">·</span>
           <span :style="{ color: stageColor }">{{ stageLabel }}</span>
-          <span style="color:#444;">·</span>
-          <!-- Upvote count -->
+          <span class="sb-dot">·</span>
           <span v-if="!socialLoading" style="color:#ef9a9a;" title="Upvotes">❤️ {{ votes.length }}</span>
           <span v-else style="color:#333;">❤️ …</span>
-          <!-- Upvote button or tick -->
           <template v-if="username">
-            <button
-              v-if="!hasVoted"
-              @click="toggleVotePicker"
-              :disabled="votingInProgress"
-              title="Upvote this creature"
-              style="padding:0 5px;font-size:0.66rem;line-height:1.5;
-                     background:#1a0a0a;border:1px solid #4a1a1a;color:#ef9a9a;
-                     border-radius:4px;cursor:pointer;"
-            >{{ votingInProgress ? "…" : "↑" }}</button>
+            <button v-if="!hasVoted" @click="toggleVotePicker" :disabled="votingInProgress"
+              title="Upvote this creature" class="sb-vote-btn">
+              {{ votingInProgress ? "…" : "↑" }}
+            </button>
             <span v-else style="color:#ef5350;font-size:0.66rem;" title="You upvoted this">✓</span>
           </template>
-          <!-- % picker popover — anchored to this row -->
-          <div
-            v-if="votePickerOpen"
-            style="position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);
-                   background:#111;border:1px solid #3a1a1a;border-radius:8px;
-                   padding:10px 12px;min-width:155px;z-index:300;
-                   box-shadow:0 4px 18px rgba(0,0,0,0.8);"
-          >
-            <div @click.stop="votePickerOpen = false"
-                 style="position:fixed;inset:0;z-index:-1;"></div>
-            <div style="font-size:0.7rem;color:#ef9a9a;font-weight:bold;
-                        text-align:center;margin-bottom:7px;">❤️ Vote strength</div>
-            <div style="text-align:center;font-size:1rem;font-weight:bold;
-                        color:#ef9a9a;margin-bottom:5px;">{{ votePct }}%</div>
+          <div v-if="votePickerOpen" class="sb-vote-popover">
+            <div @click.stop="votePickerOpen = false" style="position:fixed;inset:0;z-index:-1;"></div>
+            <div class="sb-vote-popover-title">❤️ Vote strength</div>
+            <div class="sb-vote-popover-pct">{{ votePct }}%</div>
             <input type="range" v-model.number="votePct" min="1" max="100" step="1"
                    style="width:100%;accent-color:#ef5350;cursor:pointer;" />
-            <div style="display:flex;justify-content:space-between;
-                        font-size:0.6rem;color:#444;margin-top:2px;">
-              <span>1%</span><span>100%</span>
-            </div>
-            <button
-              @click.stop="submitVote"
-              style="margin-top:7px;width:100%;background:#3a0a0a;
-                     border:1px solid #6a2020;color:#ef9a9a;font-size:0.75rem;
-                     border-radius:5px;padding:4px 0;cursor:pointer;"
-            >Confirm {{ votePct }}%</button>
+            <div class="sb-vote-popover-labels"><span>1%</span><span>100%</span></div>
+            <button @click.stop="submitVote" class="sb-vote-confirm-btn">Confirm {{ votePct }}%</button>
           </div>
         </div>
 
-        <!-- Row 2: @author · provenance badge  ·  🔁 count  [↺] -->
-        <div style="font-size:0.65rem;margin-top:3px;display:flex;gap:4px;
-                    justify-content:center;align-items:center;flex-wrap:wrap;"
-             @click.prevent.stop>
-          <span style="color:#3a3a3a;">@{{ post.author }}</span>
+        <!-- Row 2: @author · provenance · 🔁 count [↺] -->
+        <div class="sb-card-row-sm" @click.prevent.stop>
+          <span class="sb-dimmer-2">@{{ post.author }}</span>
           <span :style="{ color: provenanceBadge.color, fontSize:'0.63rem' }">
             {{ provenanceBadge.icon }} {{ provenanceBadge.label }}
           </span>
-          <span style="color:#333;">·</span>
-          <!-- Resteem count -->
+          <span class="sb-dot">·</span>
           <span v-if="!socialLoading" style="color:#80cbc4;" title="Resteems">🔁 {{ rebloggers.length }}</span>
           <span v-else style="color:#333;">🔁 …</span>
-          <!-- Resteem button or tick -->
           <template v-if="username">
-            <button
-              v-if="!hasResteemed"
-              @click="submitResteem"
-              :disabled="resteemInProgress"
-              title="Resteem this creature"
-              style="padding:0 5px;font-size:0.63rem;line-height:1.5;
-                     background:#0a1a1a;border:1px solid #1a3a3a;color:#80cbc4;
-                     border-radius:4px;cursor:pointer;"
-            >{{ resteemInProgress ? "…" : "↺" }}</button>
+            <button v-if="!hasResteemed" @click="submitResteem" :disabled="resteemInProgress"
+              title="Resteem this creature" class="sb-resteem-btn">
+              {{ resteemInProgress ? "…" : "↺" }}
+            </button>
             <span v-else style="color:#26c6da;font-size:0.63rem;" title="You resteemed this">✓</span>
           </template>
         </div>
-        <button
-          @click="copyUrl"
-          :style="{
-            marginTop: '7px',
-            padding: '3px 10px',
-            fontSize: '0.68rem',
-            background: copied ? '#1b3a1b' : '#1a1a1a',
-            color: copied ? '#66bb6a' : '#555',
-            border: '1px solid ' + (copied ? '#2e7d32' : '#2a2a2a'),
-            borderRadius: '5px',
-            cursor: 'pointer',
-            transition: 'all 0.2s',
-            width: '100%'
-          }"
-          title="Copy Steemit URL"
-        >{{ copied ? "✓ Copied!" : "📋 Copy URL" }}</button>
+
+        <button @click="copyUrl" :class="copied ? 'sb-copy-btn sb-copy-btn-copied' : 'sb-copy-btn sb-copy-btn-default'" title="Copy Steemit URL">
+          {{ copied ? "✓ Copied!" : "📋 Copy URL" }}
+        </button>
       </div>
     </router-link>
   `
@@ -2720,11 +2646,11 @@ const GenomeTableComponent = {
     }
   },
   template: `
-    <table style="margin:12px auto;border-collapse:collapse;font-size:13px;color:#ccc;">
+    <table class="sb-genome-table">
       <tbody>
         <tr v-for="row in rows" :key="row.key">
-          <td style="padding:3px 12px;text-align:right;color:#888;">{{ row.key }}</td>
-          <td style="padding:3px 12px;text-align:left;color:#eee;font-weight:bold;">{{ row.value }}</td>
+          <td class="sb-genome-key">{{ row.key }}</td>
+          <td class="sb-genome-val">{{ row.value }}</td>
         </tr>
       </tbody>
     </table>
@@ -2751,63 +2677,43 @@ const GlobalProfileBannerComponent = {
     }
   },
   template: `
-    <div v-if="profileData" style="position:relative;margin:8px auto 0;max-width:700px;border-radius:10px;overflow:hidden;border:1px solid #2a2a2a;">
+    <div v-if="profileData" class="sb-banner">
       <!-- Cover image -->
-      <div :style="{
-        height: '72px',
-        background: safeUrl(profileData.coverImage)
-          ? 'url(' + safeUrl(profileData.coverImage) + ') center/cover no-repeat'
-          : 'linear-gradient(135deg, #1a2e1a 0%, #0d1a0d 100%)',
-        borderBottom: '1px solid #222'
-      }"></div>
+      <div
+        class="sb-banner-cover"
+        :style="safeUrl(profileData.coverImage) ? { backgroundImage: 'url(' + safeUrl(profileData.coverImage) + ')' } : {}"
+      ></div>
 
       <!-- Avatar + info row -->
-      <div style="display:flex;align-items:center;gap:12px;padding:0 16px 10px;background:#161616;">
-        <!-- Avatar overlapping cover -->
+      <div class="sb-banner-body">
         <img
           :src="safeUrl(profileData.profileImage) || ''"
           @error="$event.target.style.display='none'"
-          style="width:52px;height:52px;border-radius:50%;border:2px solid #2e7d32;background:#222;margin-top:-26px;flex-shrink:0;object-fit:cover;"
+          class="sb-banner-avatar"
         />
-        <div style="text-align:left;margin-top:4px;min-width:0;flex:1;">
-          <div style="display:flex;align-items:baseline;gap:8px;flex-wrap:wrap;">
-            <div style="font-size:0.95rem;font-weight:bold;color:#eee;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-              {{ profileData.displayName }}
-            </div>
-            <!-- Level badge (logged-in only) -->
-            <div v-if="isLoggedIn && userLevel" :title="'XP: ' + userLevel.totalXp" style="display:inline-flex;align-items:center;gap:4px;background:#1a2e1a;border:1px solid #2e7d32;border-radius:12px;padding:1px 8px;font-size:0.72rem;white-space:nowrap;cursor:default;">
+        <div class="sb-banner-info">
+          <div class="sb-banner-name-row">
+            <div class="sb-banner-name">{{ profileData.displayName }}</div>
+            <div v-if="isLoggedIn && userLevel" :title="'XP: ' + userLevel.totalXp" class="sb-level-badge">
               <span>{{ userLevel.icon }}</span>
-              <span style="color:#a5d6a7;font-weight:bold;">{{ userLevel.rank }}</span>
-              <span style="color:#555;">·</span>
-              <span style="color:#66bb6a;">{{ userLevel.totalXp }} XP</span>
+              <span class="sb-level-rank">{{ userLevel.rank }}</span>
+              <span class="sb-dot">·</span>
+              <span class="sb-level-xp">{{ userLevel.totalXp }} XP</span>
             </div>
           </div>
-          <div style="font-size:0.78rem;color:#66bb6a;">@{{ profileData.username }}</div>
-          <div v-if="profileData.about" style="font-size:0.75rem;color:#666;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:400px;">
-            {{ profileData.about }}
-          </div>
-          <!-- XP progress bar toward next rank (logged-in only) -->
-          <div v-if="isLoggedIn && userLevel && userLevel.nextRank" style="margin-top:6px;max-width:340px;">
-            <div style="display:flex;justify-content:space-between;font-size:0.7rem;color:#555;margin-bottom:3px;">
+          <div class="sb-banner-handle">@{{ profileData.username }}</div>
+          <div v-if="profileData.about" class="sb-banner-about">{{ profileData.about }}</div>
+          <div v-if="isLoggedIn && userLevel && userLevel.nextRank" class="sb-xp-bar-wrap">
+            <div class="sb-xp-bar-labels">
               <span>→ {{ userLevel.nextRankIcon }} {{ userLevel.nextRank }}</span>
               <span>{{ userLevel.totalXp }} / {{ userLevel.nextRankXp }} XP</span>
             </div>
-            <div style="background:#111;border:1px solid #2a2a2a;border-radius:4px;height:5px;overflow:hidden;">
-              <div :style="{
-                width: Math.round(userLevel.progressToNext * 100) + '%',
-                height: '100%',
-                background: 'linear-gradient(90deg, #2e7d32, #66bb6a)',
-                borderRadius: '4px',
-                transition: 'width 0.6s ease'
-              }"></div>
+            <div class="sb-xp-bar-track">
+              <div class="sb-xp-bar-fill" :style="{ width: Math.round(userLevel.progressToNext * 100) + '%' }"></div>
             </div>
           </div>
-          <!-- Max rank message -->
-          <div v-if="isLoggedIn && userLevel && !userLevel.nextRank" style="font-size:0.7rem;color:#66bb6a;margin-top:4px;">
-            ✦ Maximum rank achieved
-          </div>
-          <!-- Activity breakdown tooltip row -->
-          <div v-if="isLoggedIn && userLevel" style="font-size:0.68rem;color:#444;margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+          <div v-if="isLoggedIn && userLevel && !userLevel.nextRank" class="sb-max-rank">✦ Maximum rank achieved</div>
+          <div v-if="isLoggedIn && userLevel" class="sb-activity-summary">
             🌱 {{ userLevel.breakdown.founders }} founders
             &nbsp;·&nbsp; 🐣 {{ userLevel.breakdown.offspring }} offspring
             &nbsp;·&nbsp; 🍃 {{ userLevel.breakdown.feedsGiven }} feeds
@@ -3072,19 +2978,18 @@ const ActivityPanelComponent = {
   },
 
   template: `
-    <div style="margin-top:32px;padding-top:24px;border-top:1px solid #333;">
-      <h3 style="color:#b39ddb;margin:0 0 12px;">🌿 Activities</h3>
+    <div class="sb-activity-section">
+      <h3 class="sb-activity-title">🌿 Activities</h3>
 
-      <!-- Login gate -->
-      <div v-if="!username" style="text-align:center;padding:18px 0;color:#555;font-size:13px;">
+      <div v-if="!username" class="sb-activity-gate">
         🔒 Log in to do activities with this creature.
       </div>
 
       <template v-else>
 
-        <!-- ── Health bar (feed stats) ── -->
-        <div v-if="feedState" style="max-width:320px;margin:0 auto 16px;">
-          <div style="display:flex;justify-content:space-between;font-size:12px;color:#888;margin-bottom:4px;">
+        <!-- Health bar -->
+        <div v-if="feedState" class="sb-stat-bar-wrap">
+          <div class="sb-stat-bar-header">
             <span>🍃 Health <span v-if="feedState.label" style="color:#a5d6a7;">({{ feedState.symbol }} {{ feedState.label }})</span></span>
             <span>{{ feedEvents ? feedEvents.total : 0 }}/20 feeds
               <template v-if="feedState.lifespanBonus > 0">
@@ -3095,17 +3000,15 @@ const ActivityPanelComponent = {
               </template>
             </span>
           </div>
-          <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;height:8px;overflow:hidden;">
-            <div :style="{ width: healthBarWidth, height:'100%', background: healthBarColor, borderRadius:'6px', transition:'width 0.4s ease' }"></div>
+          <div class="sb-stat-bar-track">
+            <div class="sb-stat-bar-fill" :style="{ width: healthBarWidth, background: healthBarColor }"></div>
           </div>
         </div>
 
-        <!-- ── Mood + Vitality bars (activity stats) ── -->
-        <div v-if="activityState && (activityState.playTotal > 0 || activityState.walkTotal > 0)"
-          style="max-width:320px;margin:0 auto 16px;display:flex;flex-direction:column;gap:10px;">
-
+        <!-- Mood + Vitality bars -->
+        <div v-if="activityState && (activityState.playTotal > 0 || activityState.walkTotal > 0)" class="sb-dual-bars">
           <div>
-            <div style="display:flex;justify-content:space-between;font-size:12px;color:#888;margin-bottom:4px;">
+            <div class="sb-stat-bar-header">
               <span>🎮 Mood <span v-if="activityState.moodLabel" style="color:#ce93d8;">({{ activityState.moodLabel }})</span></span>
               <span>{{ activityState.playTotal }}/15 plays
                 <template v-if="activityState.fertilityExtension > 0">
@@ -3113,13 +3016,12 @@ const ActivityPanelComponent = {
                 </template>
               </span>
             </div>
-            <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;height:8px;overflow:hidden;">
-              <div :style="{ width: moodBarWidth, height:'100%', background:'#9c27b0', borderRadius:'6px', transition:'width 0.4s ease' }"></div>
+            <div class="sb-stat-bar-track">
+              <div class="sb-stat-bar-fill" :style="{ width: moodBarWidth, background:'#9c27b0' }"></div>
             </div>
           </div>
-
           <div>
-            <div style="display:flex;justify-content:space-between;font-size:12px;color:#888;margin-bottom:4px;">
+            <div class="sb-stat-bar-header">
               <span>🦮 Vitality <span v-if="activityState.vitalityLabel" style="color:#80cbc4;">({{ activityState.vitalityLabel }})</span></span>
               <span>{{ activityState.walkTotal }}/15 walks
                 <template v-if="activityState.vitalityLifespanBonus > 0">
@@ -3127,25 +3029,21 @@ const ActivityPanelComponent = {
                 </template>
               </span>
             </div>
-            <div style="background:#1a1a1a;border:1px solid #333;border-radius:6px;height:8px;overflow:hidden;">
-              <div :style="{ width: vitalityBarWidth, height:'100%', background:'#00897b', borderRadius:'6px', transition:'width 0.4s ease' }"></div>
+            <div class="sb-stat-bar-track">
+              <div class="sb-stat-bar-fill" :style="{ width: vitalityBarWidth, background:'#00897b' }"></div>
             </div>
           </div>
         </div>
 
-        <!-- ── Three action cards: Feed · Play · Walk ── -->
-        <div style="display:flex;gap:10px;justify-content:center;flex-wrap:wrap;max-width:640px;margin:0 auto;">
+        <!-- Three action cards: Feed · Play · Walk -->
+        <div class="sb-activity-cards">
 
-          <!-- Feed card -->
-          <div style="flex:1;min-width:180px;background:#0d1f0d;border:1px solid #1b5e20;border-radius:10px;padding:14px;text-align:center;">
-            <div style="font-size:1.2rem;margin-bottom:4px;">🍃</div>
-            <div style="font-size:13px;font-weight:bold;color:#a5d6a7;margin-bottom:4px;">Feed</div>
-            <div style="font-size:11px;color:#555;margin-bottom:10px;">Boosts health · lifespan &amp; fertility</div>
-            <!-- Food selector -->
-            <div style="display:flex;flex-direction:column;gap:5px;text-align:left;margin-bottom:10px;">
-              <div v-for="opt in foodOptions" :key="opt.value"
-                   style="display:flex;align-items:center;gap:6px;cursor:pointer;"
-                   @click="foodType = opt.value">
+          <div class="sb-activity-card sb-activity-card-feed">
+            <div class="sb-activity-card-icon">🍃</div>
+            <div class="sb-activity-card-label sb-label-feed">Feed</div>
+            <div class="sb-activity-card-desc">Boosts health · lifespan &amp; fertility</div>
+            <div class="sb-food-selector">
+              <div v-for="opt in foodOptions" :key="opt.value" class="sb-food-option" @click="foodType = opt.value">
                 <div :style="{
                   width:'12px', height:'12px', borderRadius:'50%', flexShrink:0,
                   border: '2px solid ' + (foodType === opt.value ? '#66bb6a' : '#333'),
@@ -3154,56 +3052,30 @@ const ActivityPanelComponent = {
                 <span :style="{ fontSize:'11px', color: foodType === opt.value ? '#ccc' : '#666' }">{{ opt.label }}</span>
               </div>
             </div>
-            <button
-              @click="feedCreature"
-              :disabled="!canFeed"
-              :style="{
-                width:'100%', padding:'7px 0', fontSize:'12px',
-                background: canFeed ? '#1b5e20' : '#1a1a1a',
-                color: canFeed ? '#c8e6c9' : '#444',
-                border: '1px solid ' + (canFeed ? '#2e7d32' : '#2a2a2a'),
-                borderRadius:'6px', cursor: canFeed ? 'pointer' : 'default'
-              }"
+            <button @click="feedCreature" :disabled="!canFeed"
+              :class="canFeed ? 'sb-action-btn sb-action-btn-feed-on' : 'sb-action-btn sb-action-btn-feed-off'"
             >{{ feedButtonLabel }}</button>
-            <p v-if="alreadyFedToday" style="color:#555;font-size:11px;margin:6px 0 0;">Come back tomorrow!</p>
+            <p v-if="alreadyFedToday" class="sb-activity-card-tomorrow">Come back tomorrow!</p>
           </div>
 
-          <!-- Play card -->
-          <div style="flex:1;min-width:180px;background:#120a1e;border:1px solid #4a148c;border-radius:10px;padding:14px;text-align:center;">
-            <div style="font-size:1.2rem;margin-bottom:4px;">🎮</div>
-            <div style="font-size:13px;font-weight:bold;color:#ce93d8;margin-bottom:4px;">Play</div>
-            <div style="font-size:11px;color:#555;margin-bottom:10px;">Boosts mood · widens fertility window</div>
-            <button
-              @click="playWithCreature"
-              :disabled="!canPlay"
-              :style="{
-                width:'100%', padding:'7px 0', fontSize:'12px',
-                background: canPlay ? '#4a148c' : '#1a1a1a',
-                color: canPlay ? '#e1bee7' : '#444',
-                border: '1px solid ' + (canPlay ? '#7b1fa2' : '#2a2a2a'),
-                borderRadius:'6px', cursor: canPlay ? 'pointer' : 'default'
-              }"
+          <div class="sb-activity-card sb-activity-card-play">
+            <div class="sb-activity-card-icon">🎮</div>
+            <div class="sb-activity-card-label sb-label-play">Play</div>
+            <div class="sb-activity-card-desc">Boosts mood · widens fertility window</div>
+            <button @click="playWithCreature" :disabled="!canPlay"
+              :class="canPlay ? 'sb-action-btn sb-action-btn-play-on' : 'sb-action-btn sb-action-btn-play-off'"
             >{{ playButtonLabel }}</button>
-            <p v-if="alreadyPlayedToday" style="color:#555;font-size:11px;margin:6px 0 0;">Come back tomorrow!</p>
+            <p v-if="alreadyPlayedToday" class="sb-activity-card-tomorrow">Come back tomorrow!</p>
           </div>
 
-          <!-- Walk card -->
-          <div style="flex:1;min-width:180px;background:#071a17;border:1px solid #004d40;border-radius:10px;padding:14px;text-align:center;">
-            <div style="font-size:1.2rem;margin-bottom:4px;">🦮</div>
-            <div style="font-size:13px;font-weight:bold;color:#80cbc4;margin-bottom:4px;">Walk</div>
-            <div style="font-size:11px;color:#555;margin-bottom:10px;">Boosts vitality · extends lifespan</div>
-            <button
-              @click="walkCreature"
-              :disabled="!canWalk"
-              :style="{
-                width:'100%', padding:'7px 0', fontSize:'12px',
-                background: canWalk ? '#004d40' : '#1a1a1a',
-                color: canWalk ? '#b2dfdb' : '#444',
-                border: '1px solid ' + (canWalk ? '#00695c' : '#2a2a2a'),
-                borderRadius:'6px', cursor: canWalk ? 'pointer' : 'default'
-              }"
+          <div class="sb-activity-card sb-activity-card-walk">
+            <div class="sb-activity-card-icon">🦮</div>
+            <div class="sb-activity-card-label sb-label-walk">Walk</div>
+            <div class="sb-activity-card-desc">Boosts vitality · extends lifespan</div>
+            <button @click="walkCreature" :disabled="!canWalk"
+              :class="canWalk ? 'sb-action-btn sb-action-btn-walk-on' : 'sb-action-btn sb-action-btn-walk-off'"
             >{{ walkButtonLabel }}</button>
-            <p v-if="alreadyWalkedToday" style="color:#555;font-size:11px;margin:6px 0 0;">Come back tomorrow!</p>
+            <p v-if="alreadyWalkedToday" class="sb-activity-card-tomorrow">Come back tomorrow!</p>
           </div>
 
         </div>
@@ -3540,239 +3412,118 @@ const BreedingPanelComponent = {
   },
 
   template: `
-    <div style="margin-top:32px;padding-top:24px;border-top:1px solid #333;">
-      <h3 style="color:#80deea;margin:0 0 4px;">🧬 Breed Creatures</h3>
+    <div class="sb-breed-section">
+      <h3 class="sb-breed-title">🧬 Breed Creatures</h3>
 
-      <!-- ── Matchmaker panel ───────────────────────────────────────
-           Fix #7: shown whenever lockedA is present, even after a
-           child preview — "Try another partner" replaces the label.
-      ──────────────────────────────────────────────────────────── -->
+      <!-- Matchmaker panel -->
       <div v-if="lockedA" style="margin-bottom:12px;">
         <button @click="findPartners" :disabled="searchingPartners" style="background:#004d40;font-size:12px;">
           🔍 {{ searchingPartners ? 'Searching...' : (childGenome ? 'Try Another Partner' : 'Find Compatible Partner') }}
         </button>
 
-        <!-- Fix #8: loading skeleton while RPC call is in flight -->
-        <div v-if="searchingPartners" style="margin-top:10px;display:flex;gap:8px;">
-          <div v-for="n in 3" :key="n"
-            style="flex:0 0 148px;height:102px;background:#0a1a1a;border:1px solid #1b3a2a;border-radius:8px;padding:8px;animation:mmPulse 1.2s ease-in-out infinite;">
-            <div style="height:11px;border-radius:4px;background:#1b3a2a;margin-bottom:6px;width:70%;"></div>
-            <div style="height:9px;border-radius:4px;background:#1b3a2a;margin-bottom:10px;width:50%;"></div>
-            <div style="height:9px;border-radius:4px;background:#1b3a2a;margin-bottom:4px;width:85%;"></div>
-            <div style="height:9px;border-radius:4px;background:#1b3a2a;width:60%;"></div>
+        <!-- Skeleton cards while loading -->
+        <div v-if="searchingPartners" class="sb-mm-skeletons">
+          <div v-for="n in 3" :key="n" class="sb-skeleton">
+            <div class="sb-skeleton-line" style="width:70%;"></div>
+            <div class="sb-skeleton-line-sm" style="width:50%;margin-bottom:10px;"></div>
+            <div class="sb-skeleton-line-sm" style="width:85%;"></div>
+            <div class="sb-skeleton-line-sm" style="width:60%;"></div>
           </div>
         </div>
 
-        <!-- Fix #6: richer partner cards with sex, age, MUT, LIF, lifecycle stage -->
-        <div v-if="!searchingPartners && partners.length"
-          style="margin-top:10px;display:flex;gap:8px;overflow-x:auto;padding-bottom:10px;">
+        <!-- Partner cards -->
+        <div v-if="!searchingPartners && partners.length" class="sb-mm-cards">
           <div v-for="p in partners" :key="p.permlink"
             @click="selectPartner(p)"
-            :style="{
-              flex: '0 0 148px',
-              background: pendingPartner && pendingPartner.permlink === p.permlink ? '#0d2d1a' : '#0a1a1a',
-              border: '1px solid ' + (pendingPartner && pendingPartner.permlink === p.permlink ? '#66bb6a' : '#2e7d32'),
-              borderRadius: '8px', padding: '8px', cursor: 'pointer', fontSize: '11px',
-              outline: pendingPartner && pendingPartner.permlink === p.permlink ? '2px solid #66bb6a' : 'none',
-              transition: 'all 0.15s'
-            }">
-
-            <!-- Name + sex badge -->
-            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;">
-              <div style="font-weight:bold;color:#a5d6a7;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:90px;">
-                {{ p.name }}
-              </div>
-              <span :style="{ fontSize:'11px', fontWeight:'bold', color: p.genome.SX === 0 ? '#90caf9' : '#f48fb1' }">
+            :class="pendingPartner && pendingPartner.permlink === p.permlink ? 'sb-mm-card sb-mm-card-selected' : 'sb-mm-card sb-mm-card-default'">
+            <div class="sb-mm-card-name-row">
+              <div class="sb-mm-name">{{ p.name }}</div>
+              <span :class="p.genome.SX === 0 ? 'sb-sex-male' : 'sb-sex-female'" style="font-size:11px;font-weight:bold;">
                 {{ p.genome.SX === 0 ? '♂' : '♀' }}
               </span>
             </div>
-
-            <!-- Author -->
-            <div style="color:#555;margin-bottom:5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
-              @{{ p.author }}
-            </div>
-
-            <!-- Lifecycle stage + age -->
-            <div style="display:flex;justify-content:space-between;margin-bottom:2px;">
+            <div class="sb-mm-author">@{{ p.author }}</div>
+            <div class="sb-mm-stats-row">
               <span :style="{ color: p.lifecycleStage ? p.lifecycleStage.color : '#888' }">
                 {{ p.lifecycleStage ? p.lifecycleStage.icon + ' ' + p.lifecycleStage.name : '' }}
               </span>
-              <span style="color:#666;">Day {{ p.age }}</span>
+              <span class="sb-mm-lif">Day {{ p.age }}</span>
             </div>
-
-            <!-- Fertile window -->
-            <div style="color:#555;margin-bottom:2px;">
-              🌸 {{ p.genome.FRT_START }}–{{ p.genome.FRT_END }}d
+            <div class="sb-mm-window">🌸 {{ p.genome.FRT_START }}–{{ p.genome.FRT_END }}d</div>
+            <div class="sb-mm-stats-row">
+              <span class="sb-mm-mut">MUT {{ p.genome.MUT }}</span>
+              <span class="sb-mm-lif">LIF {{ p.genome.LIF }}d</span>
             </div>
-
-            <!-- MUT + LIF -->
-            <div style="display:flex;justify-content:space-between;">
-              <span style="color:#80cbc4;">MUT {{ p.genome.MUT }}</span>
-              <span style="color:#666;">LIF {{ p.genome.LIF }}d</span>
-            </div>
-
-            <!-- Fix #5: permit hint for non-owners -->
-            <div v-if="username && username !== p.author && !p._permitOwned"
-              style="margin-top:4px;color:#ffe082;font-size:10px;">
+            <div v-if="username && username !== p.author && !p._permitOwned" class="sb-mm-permit">
               🔑 Permit may be needed
             </div>
-
-            <!-- Fix #9: confirm prompt on first click -->
-            <div v-if="pendingPartner && pendingPartner.permlink === p.permlink"
-              style="margin-top:5px;padding:4px 0;border-top:1px solid #2e7d32;color:#66bb6a;font-size:10px;font-weight:bold;">
+            <div v-if="pendingPartner && pendingPartner.permlink === p.permlink" class="sb-mm-confirm">
               Tap again to breed ✓
             </div>
           </div>
         </div>
 
-        <!-- Kinship disclaimer -->
-        <div v-if="!searchingPartners && partners.length"
-          style="font-size:10px;color:#444;margin-top:4px;font-style:italic;">
+        <div v-if="!searchingPartners && partners.length" class="sb-mm-disclaimer">
           ⚠ Genus &amp; sex matched. Family relationships are verified at breed time.
         </div>
       </div>
 
-      <p style="font-size:12px;color:#555;margin:0 0 12px;">Requires one ♂ Male and one ♀ Female of the same genus.</p>
+      <p class="sb-breed-hint">Requires one ♂ Male and one ♀ Female of the same genus.</p>
 
-      <!-- Login gate -->
-      <div v-if="!username" style="text-align:center;padding:18px 0;color:#555;font-size:13px;">
-        🔒 Log in to breed creatures.
-      </div>
+      <div v-if="!username" class="sb-breed-gate">🔒 Log in to breed creatures.</div>
 
       <template v-else>
-      <div style="display:flex;flex-direction:column;gap:8px;max-width:520px;margin:0 auto;">
-        <!-- Parent A — locked to page creature, or free input -->
-        <div style="position:relative;">
-          <!-- Locked display -->
-          <div v-if="lockedA" :style="{
-            fontSize:'13px', padding:'8px 10px', borderRadius:'6px',
-            background:'#0d1a0d', border:'1px solid #2e7d32',
-            color:'#a5d6a7', display:'flex', justifyContent:'space-between', alignItems:'center'
-          }">
-            <span>🔒 Parent A: <strong>{{ lockedA.name }}</strong></span>
-            <span :style="{ fontSize:'12px', fontWeight:'bold', color: lockedA.sex.startsWith('♂') ? '#90caf9' : '#f48fb1' }">
-              {{ lockedA.sex }}
-            </span>
+        <div class="sb-breed-inputs">
+          <!-- Parent A -->
+          <div class="sb-parent-input-wrap">
+            <div v-if="lockedA" class="sb-parent-locked">
+              <span>🔒 Parent A: <strong>{{ lockedA.name }}</strong></span>
+              <span :class="lockedA.sex.startsWith('♂') ? 'sb-sex-male' : 'sb-sex-female'" style="font-size:12px;font-weight:bold;">{{ lockedA.sex }}</span>
+            </div>
+            <template v-else>
+              <input v-model="urlA" type="text" placeholder="Parent A — Steem post URL" class="sb-input-full" />
+              <span v-if="genomeA" class="sb-sex-badge-abs" :class="genomeA.SX === 0 ? 'sb-sex-male' : 'sb-sex-female'">{{ parentASex }}</span>
+            </template>
           </div>
-          <!-- Free input -->
-          <template v-else>
-            <input
-              v-model="urlA"
-              type="text"
-              placeholder="Parent A — Steem post URL"
-              style="font-size:13px;width:100%;padding-right:70px;"
-            />
-            <span
-              v-if="genomeA"
-              :style="{
-                position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)',
-                fontSize:'12px', fontWeight:'bold',
-                color: genomeA.SX === 0 ? '#90caf9' : '#f48fb1',
-                pointerEvents:'none'
-              }"
-            >{{ parentASex }}</span>
-          </template>
-        </div>
 
-        <!-- Parent B -->
-        <div style="position:relative;">
-          <input
-            v-model="urlB"
-            type="text"
-            placeholder="Parent B — Steem post URL"
-            style="font-size:13px;width:100%;padding-right:70px;"
-          />
-          <span
-            v-if="genomeB"
-            :style="{
-              position:'absolute', right:'10px', top:'50%', transform:'translateY(-50%)',
-              fontSize:'12px', fontWeight:'bold',
-              color: genomeB.SX === 0 ? '#90caf9' : '#f48fb1',
-              pointerEvents:'none'
-            }"
-          >{{ parentBSex }}</span>
-        </div>
+          <!-- Parent B -->
+          <div class="sb-parent-input-wrap">
+            <input v-model="urlB" type="text" placeholder="Parent B — Steem post URL" class="sb-input-full" />
+            <span v-if="genomeB" class="sb-sex-badge-abs" :class="genomeB.SX === 0 ? 'sb-sex-male' : 'sb-sex-female'">{{ parentBSex }}</span>
+          </div>
 
-        <button
-          @click="breedCreatures"
-          :disabled="loading"
-          style="background:#1a3a2a;"
-        >
-          {{ loading ? "Checking…" : "🔬 Breed" }}
-        </button>
-      </div>
-
-      <!-- Status message during kinship check -->
-      <div v-if="loadStatus" style="color:#80deea;font-size:12px;margin-top:8px;font-style:italic;">
-        ⏳ {{ loadStatus }}
-      </div>
-
-      <!-- Error -->
-      <div v-if="loadError" style="color:#ff8a80;font-size:13px;margin-top:8px;">
-        ⚠ {{ loadError }}
-      </div>
-
-      <!-- Child preview -->
-      <div v-if="childGenome" style="margin-top:20px;">
-        <div style="font-size:1.1rem;font-weight:bold;color:#80deea;">
-          🧬 {{ childName }}
-        </div>
-        <div style="font-size:0.85rem;color:#888;margin:2px 0 6px;">
-          {{ sexLabel }}
-          &nbsp;·&nbsp;
-          <span :style="{ color: mutationColor }">{{ mutationLabel }}</span>
-        </div>
-
-        <!-- Unicode art preview -->
-        <pre style="font-size:11px;line-height:1.3;display:inline-block;text-align:left;">{{ childArt }}</pre>
-
-        <!-- Genome summary -->
-        <div style="font-size:12px;color:#666;margin:4px 0 10px;">
-          GEN {{ childGenome.GEN }}
-          &nbsp;·&nbsp; MOR {{ childGenome.MOR }}
-          &nbsp;·&nbsp; APP {{ childGenome.APP }}
-          &nbsp;·&nbsp; ORN {{ childGenome.ORN }}
-          &nbsp;·&nbsp; MUT {{ childGenome.MUT }}
-          &nbsp;·&nbsp; LIF {{ childGenome.LIF }} days
-        </div>
-
-        <!-- Post title — pre-filled, user-editable -->
-        <div style="margin-top:12px;max-width:520px;margin-left:auto;margin-right:auto;">
-          <label style="display:block;font-size:12px;color:#888;margin-bottom:4px;">Post title</label>
-          <input
-            v-model="customTitle"
-            type="text"
-            maxlength="255"
-            style="width:100%;font-size:13px;"
-          />
-        </div>
-
-        <!-- Fix #7: Reset button lets user discard preview and try another partner -->
-        <div style="display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:10px;">
-          <button
-            @click="resetBreed"
-            style="background:#2a2a2a;color:#aaa;font-size:13px;"
-          >
-            ↩ Try Different Partner
-          </button>
-          <button
-            @click="publishChild"
-            :disabled="publishing || !username"
-            style="background:#1565c0;"
-          >
-            {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
+          <button @click="breedCreatures" :disabled="loading" class="sb-btn-breed">
+            {{ loading ? "Checking…" : "🔬 Breed" }}
           </button>
         </div>
-      </div>
+
+        <div v-if="loadStatus" class="sb-breed-status">⏳ {{ loadStatus }}</div>
+        <div v-if="loadError"  class="sb-breed-error">⚠ {{ loadError }}</div>
+
+        <div v-if="childGenome" class="sb-child-preview">
+          <div class="sb-child-title">🧬 {{ childName }}</div>
+          <div class="sb-child-subtitle">
+            {{ sexLabel }} &nbsp;·&nbsp;
+            <span :style="{ color: mutationColor }">{{ mutationLabel }}</span>
+          </div>
+          <pre>{{ childArt }}</pre>
+          <div class="sb-genome-summary">
+            GEN {{ childGenome.GEN }} &nbsp;·&nbsp; MOR {{ childGenome.MOR }}
+            &nbsp;·&nbsp; APP {{ childGenome.APP }} &nbsp;·&nbsp; ORN {{ childGenome.ORN }}
+            &nbsp;·&nbsp; MUT {{ childGenome.MUT }} &nbsp;·&nbsp; LIF {{ childGenome.LIF }} days
+          </div>
+          <div class="sb-post-title-wrap">
+            <label class="sb-form-label">Post title</label>
+            <input v-model="customTitle" type="text" maxlength="255" class="sb-input-full" />
+          </div>
+          <div class="sb-breed-actions">
+            <button @click="resetBreed" class="sb-btn-grey">↩ Try Different Partner</button>
+            <button @click="publishChild" :disabled="publishing || !username" class="sb-btn-blue">
+              {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
+            </button>
+          </div>
+        </div>
       </template>
-
-      <!-- Fix #8: keyframe for skeleton pulse (injected once via inline style tag) -->
-      <style>
-        @keyframes mmPulse {
-          0%, 100% { opacity: 1; }
-          50%       { opacity: 0.4; }
-        }
-      </style>
     </div>
   `
 };
@@ -3888,97 +3639,45 @@ const BreedPermitPanelComponent = {
   },
 
   template: `
-    <div style="margin-top:24px;max-width:520px;margin-left:auto;margin-right:auto;">
-
-      <!-- Collapsed header --
-           Shows a summary line; clicking expands the manager. -->
-      <div
-        @click="expanded = !expanded"
-        style="display:flex;align-items:center;justify-content:space-between;
-               cursor:pointer;padding:10px 14px;border-radius:8px;
-               background:#0a0f0a;border:1px solid #1a2e1a;user-select:none;"
-      >
-        <span style="font-size:0.88rem;color:#66bb6a;font-weight:bold;">
+    <div class="sb-panel-wrap">
+      <div @click="expanded = !expanded" class="sb-collapsible-header sb-collapsible-header-green">
+        <span class="sb-collapsible-label-green">
           🔑 Breed Permits
-          <span style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
-            {{ hasGrantees ? currentGrantees.length + ' active' : 'none granted' }}
-          </span>
+          <span class="sb-collapsible-meta">{{ hasGrantees ? currentGrantees.length + ' active' : 'none granted' }}</span>
         </span>
-        <span style="color:#444;font-size:0.78rem;">{{ expanded ? '▲ collapse' : '▼ manage' }}</span>
+        <span class="sb-collapsible-toggle">{{ expanded ? '▲ collapse' : '▼ manage' }}</span>
       </div>
 
-      <div v-if="expanded" style="
-        border:1px solid #1a2e1a;border-top:none;border-radius:0 0 8px 8px;
-        background:#080d08;padding:14px;
-      ">
-        <p style="font-size:0.78rem;color:#555;margin:0 0 12px;line-height:1.5;">
+      <div v-if="expanded" class="sb-collapsible-body-green">
+        <p class="sb-panel-hint">
           This creature is <strong style="color:#888;">closed to external breeding by default.</strong>
           Grant a named permit to let another user use it as a parent.
           Permits are recorded permanently on-chain; revocations are also on-chain.
         </p>
 
-        <!-- Active grantees list -->
         <div v-if="hasGrantees" style="margin-bottom:14px;">
-          <div style="font-size:0.75rem;color:#66bb6a;text-transform:uppercase;
-                      letter-spacing:0.07em;margin-bottom:6px;">Active Permits</div>
-          <div
-            v-for="g in currentGrantees"
-            :key="g"
-            style="display:flex;align-items:center;justify-content:space-between;
-                   padding:6px 10px;border-radius:6px;background:#0d1a0d;
-                   border:1px solid #1a2e1a;margin-bottom:5px;"
-          >
-            <span style="font-size:0.83rem;color:#a5d6a7;">@{{ g }}</span>
-            <button
-              @click="revokePermit(g)"
-              :disabled="publishing"
-              style="background:#1a0000;color:#ff8a80;border:1px solid #3b0000;
-                     font-size:0.72rem;padding:3px 10px;border-radius:4px;"
-            >
-              Revoke
-            </button>
+          <div class="sb-kinship-sublabel">Active Permits</div>
+          <div v-for="g in currentGrantees" :key="g" class="sb-permit-grantee-row" style="margin-bottom:5px;">
+            <span class="sb-permit-grantee-name">@{{ g }}</span>
+            <button @click="revokePermit(g)" :disabled="publishing" class="sb-btn-revoke">Revoke</button>
           </div>
         </div>
-        <div v-else style="font-size:0.78rem;color:#333;margin-bottom:14px;">
-          No permits granted yet.
-        </div>
+        <div v-else class="sb-no-data" style="margin-bottom:14px;">No permits granted yet.</div>
 
-        <!-- Grant new permit -->
-        <div style="font-size:0.75rem;color:#66bb6a;text-transform:uppercase;
-                    letter-spacing:0.07em;margin-bottom:8px;">Grant New Permit</div>
+        <div class="sb-kinship-sublabel" style="margin-bottom:8px;">Grant New Permit</div>
         <div style="display:flex;flex-direction:column;gap:8px;">
-          <input
-            v-model="granteeInput"
-            type="text"
-            placeholder="Steem username (without @)"
-            style="font-size:13px;width:100%;"
-            @keydown.enter="grantPermit"
-          />
-          <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
-            <label style="font-size:0.78rem;color:#666;white-space:nowrap;">
-              Expires in
-            </label>
-            <input
-              v-model.number="expiresDays"
-              type="number"
-              min="0"
-              step="1"
-              placeholder="days"
-              style="font-size:13px;width:80px;text-align:center;"
-            />
-            <span style="font-size:0.78rem;color:#444;">
-              days &nbsp;(0 = no expiry)
-            </span>
+          <input v-model="granteeInput" type="text" placeholder="Steem username (without @)"
+            class="sb-input-full" @keydown.enter="grantPermit" />
+          <div class="sb-permit-input-row">
+            <label class="sb-panel-hint" style="margin:0;white-space:nowrap;">Expires in</label>
+            <input v-model.number="expiresDays" type="number" min="0" step="1" placeholder="days"
+              style="font-size:13px;width:80px;text-align:center;" />
+            <span style="font-size:0.78rem;color:#444;">days &nbsp;(0 = no expiry)</span>
           </div>
-          <button
-            @click="grantPermit"
-            :disabled="publishing || !granteeInput.trim()"
-            style="background:#1a3a1a;"
-          >
+          <button @click="grantPermit" :disabled="publishing || !granteeInput.trim()" class="sb-btn-accept">
             {{ publishing ? "Publishing…" : "🔑 Grant Permit" }}
           </button>
         </div>
-
       </div>
     </div>
   `
@@ -4142,117 +3841,66 @@ const TransferPanelComponent = {
   },
 
   template: `
-    <div style="margin-top:24px;max-width:520px;margin-left:auto;margin-right:auto;">
+    <div class="sb-panel-wrap">
 
-      <!-- ===== RECIPIENT VIEW: pending offer awaiting acceptance ===== -->
-      <div v-if="isPendingRecipient && pendingOffer" style="
-        padding:16px 18px;border-radius:10px;
-        background:#0d1a0d;border:1px solid #2e7d32;
-      ">
-        <div style="font-size:1rem;font-weight:bold;color:#a5d6a7;margin-bottom:8px;">
-          🤝 Ownership Transfer Offer
-        </div>
-        <p style="font-size:0.83rem;color:#888;margin:0 0 14px;line-height:1.5;">
+      <!-- RECIPIENT VIEW -->
+      <div v-if="isPendingRecipient && pendingOffer" class="sb-transfer-offer-box">
+        <div class="sb-transfer-offer-title">🤝 Ownership Transfer Offer</div>
+        <p class="sb-transfer-offer-body">
           @{{ pendingOffer.offeredBy || "The current owner" }} is offering to transfer
           <strong style="color:#eee;">{{ creatureName }}</strong> to you.
           Accepting is permanent and recorded on-chain.
           All previous breed permits will be voided — you start fresh.
         </p>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;">
-          <button
-            @click="acceptOffer"
-            :disabled="publishing"
-            style="background:#1a3a1a;"
-          >
+        <div class="sb-transfer-offer-actions">
+          <button @click="acceptOffer" :disabled="publishing" class="sb-btn-accept">
             {{ publishing ? "Publishing…" : "✅ Accept Ownership" }}
           </button>
-          <button
-            @click="$emit('notify', 'To decline, simply ignore the offer. The sender can cancel it at any time.', 'info')"
-            style="background:#1a1a1a;color:#888;border:1px solid #333;"
-          >
-            ℹ️ How to decline
-          </button>
+          <button @click="$emit('notify', 'To decline, simply ignore the offer. The sender can cancel it at any time.', 'info')"
+            class="sb-btn-decline">ℹ️ How to decline</button>
         </div>
       </div>
 
-      <!-- ===== OWNER VIEW ===== -->
+      <!-- OWNER VIEW -->
       <template v-if="isOwner">
-
-        <!-- Collapsed header -->
-        <div
-          @click="expanded = !expanded"
-          style="display:flex;align-items:center;justify-content:space-between;
-                 cursor:pointer;padding:10px 14px;border-radius:8px;
-                 background:#0a0a12;border:1px solid #1a1a2e;user-select:none;"
-        >
-          <span style="font-size:0.88rem;color:#80cbc4;font-weight:bold;">
+        <div @click="expanded = !expanded" class="sb-collapsible-header sb-collapsible-header-teal">
+          <span class="sb-collapsible-label-teal">
             🤝 Transfer Ownership
-            <span v-if="pendingOffer" style="font-weight:normal;color:#ffb74d;font-size:0.80rem;margin-left:8px;">
-              ⏳ offer pending → @{{ pendingOffer.to }}
-            </span>
-            <span v-else-if="hasHistory" style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
-              {{ transferHistory.length }} transfer{{ transferHistory.length === 1 ? "" : "s" }} on record
-            </span>
-            <span v-else style="font-weight:normal;color:#555;font-size:0.80rem;margin-left:8px;">
-              original owner
-            </span>
+            <span v-if="pendingOffer" class="sb-pending-warn">⏳ offer pending → @{{ pendingOffer.to }}</span>
+            <span v-else-if="hasHistory" class="sb-collapsible-meta">{{ transferHistory.length }} transfer{{ transferHistory.length === 1 ? "" : "s" }} on record</span>
+            <span v-else class="sb-collapsible-meta">original owner</span>
           </span>
-          <span style="color:#444;font-size:0.78rem;">{{ expanded ? "▲ collapse" : "▼ manage" }}</span>
+          <span class="sb-collapsible-toggle">{{ expanded ? "▲ collapse" : "▼ manage" }}</span>
         </div>
 
-        <div v-if="expanded" style="
-          border:1px solid #1a1a2e;border-top:none;border-radius:0 0 8px 8px;
-          background:#08080f;padding:14px;
-        ">
-          <p style="font-size:0.78rem;color:#555;margin:0 0 12px;line-height:1.5;">
+        <div v-if="expanded" class="sb-collapsible-body-teal">
+          <p class="sb-panel-hint">
             Transfers are two-sided: you send an offer, the recipient must accept on-chain.
             All breed permits are voided on transfer — the new owner starts fresh.
             The original <code style="color:#444;">post.author</code> never changes on-chain;
             SteemBiota derives the effective owner from the signed reply history.
           </p>
 
-          <!-- Pending offer status -->
-          <div v-if="pendingOffer" style="
-            padding:12px;border-radius:8px;background:#1a1200;
-            border:1px solid #3a2800;margin-bottom:14px;
-          ">
-            <div style="font-size:0.80rem;color:#ffb74d;font-weight:bold;margin-bottom:6px;">
-              ⏳ Pending offer → @{{ pendingOffer.to }}
-            </div>
-            <p style="font-size:0.75rem;color:#888;margin:0 0 10px;">
-              Waiting for @{{ pendingOffer.to }} to accept on-chain.
-              You can cancel this offer at any time.
-            </p>
-            <button
-              @click="cancelOffer"
-              :disabled="publishing"
-              style="background:#1a0000;color:#ff8a80;border:1px solid #3b0000;font-size:0.78rem;"
-            >
+          <!-- Pending offer -->
+          <div v-if="pendingOffer" style="padding:12px;border-radius:8px;background:#1a1200;border:1px solid #3a2800;margin-bottom:14px;">
+            <div style="font-size:0.80rem;color:#ffb74d;font-weight:bold;margin-bottom:6px;">⏳ Pending offer → @{{ pendingOffer.to }}</div>
+            <p style="font-size:0.75rem;color:#888;margin:0 0 10px;">Waiting for @{{ pendingOffer.to }} to accept on-chain. You can cancel this offer at any time.</p>
+            <button @click="cancelOffer" :disabled="publishing" class="sb-btn-revoke" style="font-size:0.78rem;">
               {{ publishing ? "Publishing…" : "❌ Cancel Offer" }}
             </button>
           </div>
 
-          <!-- New offer form — only shown when no offer is pending -->
+          <!-- New offer form -->
           <template v-else>
-            <div style="font-size:0.75rem;color:#80cbc4;text-transform:uppercase;
-                        letter-spacing:0.07em;margin-bottom:8px;">Send Transfer Offer</div>
+            <div class="sb-kinship-sublabel" style="margin-bottom:8px;">Send Transfer Offer</div>
             <div style="display:flex;flex-direction:column;gap:8px;">
-              <input
-                v-model="recipientInput"
-                type="text"
-                placeholder="Recipient username (without @)"
-                style="font-size:13px;width:100%;"
-                @keydown.enter="sendOffer"
-              />
+              <input v-model="recipientInput" type="text" placeholder="Recipient username (without @)"
+                class="sb-input-full" @keydown.enter="sendOffer" />
               <p style="font-size:0.72rem;color:#444;margin:0;">
                 ⚠ This cannot be undone unless the recipient declines (never accepts).
                 The offer stays open until they accept or you cancel it.
               </p>
-              <button
-                @click="sendOffer"
-                :disabled="publishing || !recipientInput.trim()"
-                style="background:#0d1a2e;"
-              >
+              <button @click="sendOffer" :disabled="publishing || !recipientInput.trim()" style="background:#0d1a2e;">
                 {{ publishing ? "Publishing…" : "🤝 Send Offer" }}
               </button>
             </div>
@@ -4260,24 +3908,17 @@ const TransferPanelComponent = {
 
           <!-- Transfer history -->
           <template v-if="hasHistory">
-            <div style="font-size:0.75rem;color:#80cbc4;text-transform:uppercase;
-                        letter-spacing:0.07em;margin:14px 0 8px;">Transfer History</div>
-            <div
-              v-for="(t, i) in transferHistory"
-              :key="i"
-              style="font-size:0.75rem;color:#555;padding:5px 0;
-                     border-bottom:1px solid #111;display:flex;gap:8px;align-items:center;"
-            >
+            <div class="sb-kinship-sublabel sb-kinship-sublabel-spaced">Transfer History</div>
+            <div v-for="(t, i) in transferHistory" :key="i"
+              style="font-size:0.75rem;color:#555;padding:5px 0;border-bottom:1px solid #111;display:flex;gap:8px;align-items:center;">
               <span style="color:#3a3a3a;">{{ formatDate(t.ts) }}</span>
               <span style="color:#444;">@{{ t.from }}</span>
               <span style="color:#2a2a2a;">→</span>
               <span style="color:#80cbc4;">@{{ t.to }}</span>
             </div>
           </template>
-
         </div>
       </template>
-
     </div>
   `
 };
@@ -4394,88 +4035,53 @@ const SocialPanelComponent = {
   template: `
     <div style="margin-top:24px;max-width:580px;margin-left:auto;margin-right:auto;">
 
-      <!-- ===== LOADING ===== -->
       <div v-if="socialLoading" style="text-align:center;padding:12px 0;">
-        <span style="font-size:0.78rem;color:#444;">Loading social data…</span>
+        <span class="sb-no-data">Loading social data…</span>
       </div>
 
       <template v-else>
-
-        <!-- ===== COMMENTS ===== -->
         <div>
-          <div
-            @click="commentsExpanded = !commentsExpanded"
+          <div @click="commentsExpanded = !commentsExpanded"
             style="display:flex;align-items:center;justify-content:space-between;
                    cursor:pointer;padding:9px 14px;border-radius:8px;
-                   background:#0a0a0a;border:1px solid #1e1e1e;user-select:none;"
-          >
+                   background:#0a0a0a;border:1px solid #1e1e1e;user-select:none;">
             <span style="font-size:0.85rem;color:#a5d6a7;">
-              💬 <strong>{{ commentCount }}</strong>
-              Comment{{ commentCount === 1 ? "" : "s" }}
+              💬 <strong>{{ commentCount }}</strong> Comment{{ commentCount === 1 ? "" : "s" }}
             </span>
-            <span style="font-size:0.72rem;color:#333;">{{ commentsExpanded ? "▲" : "▼" }}</span>
+            <span class="sb-no-data">{{ commentsExpanded ? "▲" : "▼" }}</span>
           </div>
 
-          <div v-if="commentsExpanded" style="
-            border:1px solid #1e1e1e;border-top:none;border-radius:0 0 8px 8px;
-            background:#080808;padding:14px;
-          ">
-
-            <!-- Comment compose box -->
+          <div v-if="commentsExpanded" style="border:1px solid #1e1e1e;border-top:none;border-radius:0 0 8px 8px;background:#080808;padding:14px;">
             <div v-if="username" style="margin-bottom:14px;">
-              <textarea
-                v-model="commentText"
-                placeholder="Write a comment…"
-                rows="3"
+              <textarea v-model="commentText" placeholder="Write a comment…" rows="3"
                 style="width:100%;font-size:13px;background:#0f0f0f;color:#ccc;
                        border:1px solid #2a2a2a;border-radius:6px;padding:8px;
                        resize:vertical;font-family:inherit;box-sizing:border-box;"
-                @keydown.ctrl.enter="submitComment"
-              ></textarea>
-              <div style="display:flex;justify-content:flex-end;align-items:center;
-                           gap:10px;margin-top:6px;">
-                <span style="font-size:0.68rem;color:#333;">Ctrl+Enter to post</span>
-                <button
-                  @click="submitComment"
-                  :disabled="submitting || !commentText.trim()"
-                  style="background:#1a2a1a;font-size:0.8rem;padding:5px 14px;"
-                >{{ submitting ? "Publishing…" : "Post" }}</button>
+                @keydown.ctrl.enter="submitComment"></textarea>
+              <div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:6px;">
+                <span class="sb-no-data" style="font-size:0.68rem;">Ctrl+Enter to post</span>
+                <button @click="submitComment" :disabled="submitting || !commentText.trim()"
+                  style="background:#1a2a1a;font-size:0.8rem;padding:5px 14px;">
+                  {{ submitting ? "Publishing…" : "Post" }}
+                </button>
               </div>
             </div>
-            <div v-else style="font-size:0.78rem;color:#444;margin-bottom:12px;">
-              Log in to leave a comment.
+            <div v-else class="sb-no-data" style="margin-bottom:12px;">Log in to leave a comment.</div>
+
+            <div v-if="commentCount === 0" class="sb-no-data">
+              {{ username ? "No comments yet." : "No comments yet. Be the first!" }}
             </div>
 
-            <!-- Comments list -->
-            <div v-if="commentCount === 0 && !username" style="font-size:0.78rem;color:#333;">
-              No comments yet. Be the first!
-            </div>
-            <div v-else-if="commentCount === 0" style="font-size:0.78rem;color:#333;">
-              No comments yet.
-            </div>
-
-            <div
-              v-for="(c, i) in socialComments"
-              :key="c.permlink || i"
-              style="padding:10px 0;border-bottom:1px solid #111;"
-            >
-              <!-- Author row -->
+            <div v-for="(c, i) in socialComments" :key="c.permlink || i"
+              style="padding:10px 0;border-bottom:1px solid #111;">
               <div style="display:flex;align-items:center;gap:8px;margin-bottom:5px;">
-                <a
-                  :href="profileUrl(c.author)"
-                  style="font-size:0.82rem;font-weight:bold;color:#80cbc4;text-decoration:none;"
-                >@{{ c.author }}</a>
+                <a :href="profileUrl(c.author)" style="font-size:0.82rem;font-weight:bold;color:#80cbc4;text-decoration:none;">@{{ c.author }}</a>
                 <span style="font-size:0.68rem;color:#333;">{{ timeAgo(c.created) }} ago</span>
               </div>
-              <!-- Body -->
-              <div style="font-size:0.82rem;color:#aaa;line-height:1.5;white-space:pre-wrap;word-break:break-word;">
-                {{ formatBody(c.body) }}
-              </div>
+              <div style="font-size:0.82rem;color:#aaa;line-height:1.5;white-space:pre-wrap;word-break:break-word;">{{ formatBody(c.body) }}</div>
             </div>
-
           </div>
         </div>
-
       </template>
     </div>
   `
@@ -4741,104 +4347,62 @@ const EquipPanelComponent = {
   },
 
   template: `
-    <div style="max-width:520px;margin:16px auto;">
+    <div class="sb-equip-wrap">
 
       <!-- WORN -->
-      <div v-if="hasWearings" style="margin-bottom:12px;">
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;">
-          <span style="font-size:0.78rem;color:#ce93d8;text-transform:uppercase;font-weight:bold;">
-            ✨ Worn Accessories
-          </span>
-          <span style="font-size:0.72rem;color:#555;">{{ wearings.length }}</span>
+      <div v-if="hasWearings" class="sb-worn-section">
+        <div class="sb-worn-header">
+          <span class="sb-worn-label">✨ Worn Accessories</span>
+          <span class="sb-worn-count">{{ wearings.length }}</span>
         </div>
-
-        <div style="display:flex;flex-direction:column;gap:8px;">
-          <div v-for="w in wearings" :key="w.accAuthor+'/'+w.accPermlink"
-            style="display:flex;align-items:center;gap:12px;padding:10px;border-radius:8px;background:#0d0a10;border:1px solid #2a1a2e;">
-
-            <accessory-canvas-component
-              :template="w.template"
-              :genome="w.genome"
-              :canvas-w="80"
-              :canvas-h="64"
-            />
-
-            <div style="flex:1;text-align:left;">
-              <div style="font-weight:bold;color:#ce93d8;">{{ w.accName }}</div>
-              <div v-if="w.permissionLapsed" style="color:#ff8a80;">⚠ Lapsed</div>
+        <div class="sb-worn-list">
+          <div v-for="w in wearings" :key="w.accAuthor+'/'+w.accPermlink" class="sb-worn-item">
+            <accessory-canvas-component :template="w.template" :genome="w.genome" :canvas-w="80" :canvas-h="64" />
+            <div class="sb-worn-item-info">
+              <div class="sb-worn-item-name">{{ w.accName }}</div>
+              <div v-if="w.permissionLapsed" class="sb-worn-lapsed">⚠ Lapsed</div>
             </div>
-
-            <button v-if="isOwner" @click="removeAccessory(w)" :disabled="publishing">
-              👚 Remove
-            </button>
+            <button v-if="isOwner" @click="removeAccessory(w)" :disabled="publishing">👚 Remove</button>
           </div>
         </div>
       </div>
 
       <!-- EQUIP -->
       <template v-if="isOwner && username">
-
-        <div @click="expanded=!expanded">
+        <div @click="expanded=!expanded" class="sb-equip-toggle">
           🧢 Equip an Accessory {{ expanded ? "▲" : "▼" }}
         </div>
 
-        <div v-if="expanded" style="background:#080808; border:1px solid #2a1a2e; border-top:none; padding:14px; border-radius:0 0 8px 8px;">
-
+        <div v-if="expanded" class="sb-equip-body">
           <!-- CLOSET -->
           <div style="margin-bottom:12px;">
-            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
-              <span style="font-size:0.75rem; color:#ce93d8; text-transform:uppercase;">👜 Your Closet</span>
-              <input v-model="closetSearch" placeholder="Filter by name..." 
-                     style="font-size:11px; padding:3px 8px; width:140px; background:#000; border:1px solid #333; color:#ce93d8;" />
+            <div class="sb-closet-header">
+              <span class="sb-closet-label">👜 Your Closet</span>
+              <input v-model="closetSearch" placeholder="Filter by name..." class="sb-closet-search" />
             </div>
-
-            <div v-if="loadingCloset">Loading...</div>
-
-            <div v-else-if="filteredCloset.length === 0" style="color:#444; font-size:12px; padding:10px;">
-              No matching items...
-            </div>
-
-            <div v-else style="display:flex; gap:8px; overflow-x:auto; padding-bottom:8px; scrollbar-width:thin;">
-              <div v-for="item in filteredCloset"
-                   :key="item.permlink"
-                   @click="selectFromCloset(item)">
-                <accessory-canvas-component
-                  :template="item.template"
-                  :genome="item.genome"
-                  :canvas-w="58"
-                  :canvas-h="46"
-                />
-                <div>{{ item.name }}</div>
+            <div v-if="loadingCloset" class="sb-dimmer">Loading...</div>
+            <div v-else-if="filteredCloset.length === 0" class="sb-closet-empty">No matching items...</div>
+            <div v-else class="sb-closet-scroll">
+              <div v-for="item in filteredCloset" :key="item.permlink" @click="selectFromCloset(item)" style="cursor:pointer;text-align:center;">
+                <accessory-canvas-component :template="item.template" :genome="item.genome" :canvas-w="58" :canvas-h="46" />
+                <div style="font-size:10px;color:#888;">{{ item.name }}</div>
               </div>
             </div>
           </div>
 
           <!-- INPUT -->
-          <input v-model="accUrlInput" @keydown.enter="checkAccessory" />
-          <button @click="checkAccessory" :disabled="checkingUrl">
-            {{ checkingUrl ? "Checking…" : "Check" }}
-          </button>
+          <input v-model="accUrlInput" @keydown.enter="checkAccessory" style="width:100%;font-size:13px;" />
+          <button @click="checkAccessory" :disabled="checkingUrl">{{ checkingUrl ? "Checking…" : "Check" }}</button>
 
-          <div v-if="previewError">⚠ {{ previewError }}</div>
+          <div v-if="previewError" class="sb-equip-error">⚠ {{ previewError }}</div>
 
-          <div v-if="previewAcc">
-            <accessory-canvas-component
-              :template="previewAcc.template"
-              :genome="previewAcc.genome"
-              :canvas-w="80"
-              :canvas-h="64"
-            />
-            <div>{{ previewAcc.accName }}</div>
-
-            <button @click="equipAccessory" :disabled="publishing">
-              🧢 Equip
-            </button>
+          <div v-if="previewAcc" style="margin-top:8px;">
+            <accessory-canvas-component :template="previewAcc.template" :genome="previewAcc.genome" :canvas-w="80" :canvas-h="64" />
+            <div class="sb-equip-preview-name">{{ previewAcc.accName }}</div>
+            <button @click="equipAccessory" :disabled="publishing">🧢 Equip</button>
           </div>
-
         </div>
-
       </template>
-
     </div>
   `
 };

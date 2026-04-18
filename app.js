@@ -1325,8 +1325,8 @@ const HomeView = {
 
       <!-- Founder creation — visible to any logged-in user -->
       <div v-if="username">
-        <div style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;justify-content:center;margin-bottom:8px;">
-          <label style="font-size:13px;color:#888;">Genus (0–999, blank = random):</label>
+        <div class="sb-genus-input-row">
+          <label class="sb-form-label" style="font-size:13px;">Genus (0–999, blank = random):</label>
           <input
             v-model="genusInput"
             type="number"
@@ -1335,36 +1335,36 @@ const HomeView = {
             style="width:90px;font-size:13px;padding:5px 8px;"
             @keydown.enter="createFounder"
           />
-          <span v-if="genusInputValid && genusInput !== ''" style="font-size:12px;color:#66bb6a;font-style:italic;">
+          <span v-if="genusInputValid && genusInput !== ''" class="sb-genus-name">
             {{ generateGenusName(Number(genusInput)) }}
           </span>
           <button @click="createFounder" :disabled="!genusInputValid">🌱 Create Founder Creature</button>
         </div>
 
-        <div v-if="creatureName" style="margin:16px 0 6px;">
-          <div style="font-size:1.3rem;font-weight:bold;color:#a5d6a7;">🧬 {{ creatureName }}</div>
-          <div style="font-size:0.9rem;color:#888;margin-top:2px;">{{ sexLabel }}</div>
+        <div v-if="creatureName" class="sb-creature-preview">
+          <div class="sb-creature-preview-name">🧬 {{ creatureName }}</div>
+          <div class="sb-creature-preview-sex">{{ sexLabel }}</div>
         </div>
 
         <creature-canvas-component v-if="genome" :genome="genome" :age="age" :fossil="fossil" :feed-state="feedState"
           @facing-resolved="onFacingResolved"
         ></creature-canvas-component>
-        <div v-if="fossil" style="margin:6px 0;color:#666;font-size:0.85rem;">🦴 Fossilised. Genome preserved on-chain.</div>
+        <div v-if="fossil" class="sb-fossil-label">🦴 Fossilised. Genome preserved on-chain.</div>
 
         <div v-if="genome">
-          <h3 style="color:#a5d6a7;margin:16px 0 4px;">Genome</h3>
+          <h3 class="sb-section-title">Genome</h3>
           <genome-table-component :genome="genome"></genome-table-component>
-          <h3 style="color:#a5d6a7;margin:16px 0 4px;">Unicode Render</h3>
+          <h3 class="sb-section-title">Unicode Render</h3>
           <pre :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
-          <div style="margin-top:16px;max-width:520px;margin-left:auto;margin-right:auto;">
-            <label style="display:block;font-size:12px;color:#888;margin-bottom:4px;">Post title</label>
-            <input v-model="customTitle" type="text" maxlength="255" style="width:100%;font-size:13px;"/>
+          <div class="sb-post-title-wrap">
+            <label class="sb-form-label">Post title</label>
+            <input v-model="customTitle" type="text" maxlength="255" class="sb-input-full"/>
           </div>
           <br/>
-          <button @click="publishCreature" :disabled="publishing||!username" style="background:#1565c0;">
+          <button @click="publishCreature" :disabled="publishing||!username" class="sb-btn-blue">
             {{ publishing ? "Publishing…" : "📡 Publish to Steem" }}
           </button>
-          <p v-if="!username" style="color:#888;font-size:13px;margin:4px 0;">Log in to publish.</p>
+          <p v-if="!username" class="sb-publish-gate">Log in to publish.</p>
         </div>
         <hr/>
       </div>
@@ -1378,44 +1378,35 @@ const HomeView = {
       <hr/>
 
       <!-- ── All Creatures ── -->
-      <h3 style="color:#a5d6a7;margin:18px 0 12px;font-size:1rem;letter-spacing:0.04em;">
+      <h3 class="sb-section-title-row">
         🌿 All Creatures
-        <span v-if="!listLoading && !listError" style="font-size:0.75rem;color:#555;font-weight:normal;margin-left:8px;">
+        <span v-if="!listLoading && !listError" class="sb-section-count">
           ({{ filteredCreatures.length }}{{ filteredCreatures.length !== allCreatures.length ? ' of ' + allCreatures.length : '' }} total)
         </span>
       </h3>
 
       <loading-spinner-component v-if="listLoading"></loading-spinner-component>
-      <div v-else-if="listError" style="color:#ff8a80;font-size:13px;">⚠ {{ listError }}</div>
-      <div v-else-if="allCreatures.length === 0" style="color:#555;font-size:13px;">No creatures published yet.</div>
+      <div v-else-if="listError" class="sb-error">⚠ {{ listError }}</div>
+      <div v-else-if="allCreatures.length === 0" class="sb-empty">No creatures published yet.</div>
 
       <template v-else>
         <!-- Filters -->
-        <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;margin-bottom:14px;">
+        <div class="sb-filter-row">
           <select
             v-model="filterGenus"
-            style="padding:5px 8px;font-size:13px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;"
+            class="sb-filter-select"
           >
             <option value="">All genera</option>
             <option v-for="g in availableGenera" :key="g.id" :value="String(g.id)">{{ g.name }} ({{ g.id }})</option>
           </select>
-          <div style="display:flex;gap:4px;">
-            <button
-              @click="filterSex = ''"
-              :style="{ padding:'4px 10px', fontSize:'12px', background: filterSex==='' ? '#2e7d32' : '#1a1a1a', color: filterSex==='' ? '#fff' : '#888', border:'1px solid #333', borderRadius:'6px' }"
-            >All</button>
-            <button
-              @click="filterSex = '0'"
-              :style="{ padding:'4px 10px', fontSize:'12px', background: filterSex==='0' ? '#1565c0' : '#1a1a1a', color: filterSex==='0' ? '#90caf9' : '#888', border:'1px solid #333', borderRadius:'6px' }"
-            >♂ Male</button>
-            <button
-              @click="filterSex = '1'"
-              :style="{ padding:'4px 10px', fontSize:'12px', background: filterSex==='1' ? '#880e4f' : '#1a1a1a', color: filterSex==='1' ? '#f48fb1' : '#888', border:'1px solid #333', borderRadius:'6px' }"
-            >♀ Female</button>
+          <div class="sb-filter-btn-group">
+            <button @click="filterSex = ''" :class="['sb-filter-btn', filterSex==='' ? 'active-all' : '']">All</button>
+            <button @click="filterSex = '0'" :class="['sb-filter-btn', filterSex==='0' ? 'active-male' : '']">♂ Male</button>
+            <button @click="filterSex = '1'" :class="['sb-filter-btn', filterSex==='1' ? 'active-female' : '']">♀ Female</button>
           </div>
           <!-- Age filter -->
-          <div style="display:flex;gap:4px;align-items:center;">
-            <span style="font-size:12px;color:#555;">Age</span>
+          <div class="sb-filter-age-group">
+            <span class="sb-filter-age-label">Age</span>
             <button
               v-for="op in ['<','=','>']" :key="op"
               @click="filterAgeOp = (filterAgeOp === op ? '' : op)"
@@ -1426,42 +1417,39 @@ const HomeView = {
               type="number"
               min="0"
               placeholder="days"
-              style="width:64px;padding:4px 6px;font-size:12px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;"
+              class="sb-filter-age-input"
             />
             <button
               v-if="filterAgeOp || filterAgeVal"
               @click="filterAgeOp=''; filterAgeVal=''"
-              style="padding:4px 7px;font-size:11px;background:#1a1a1a;color:#555;border:1px solid #333;border-radius:6px;"
+              class="sb-filter-clear"
               title="Clear age filter"
             >✕</button>
           </div>
         </div>
 
-        <div v-if="filteredCreatures.length === 0" style="color:#555;font-size:13px;margin:12px 0;">
+        <div v-if="filteredCreatures.length === 0" class="sb-empty-padded">
           No creatures match the current filter.
         </div>
         <template v-else>
-        <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
+        <div class="sb-creature-grid">
           <div
             v-for="c in pagedCreatures"
             :key="c.author + '/' + c.permlink"
-            style="position:relative;"
+            class="sb-creature-grid-item"
           >
             <creature-card-component :post="c" :username="username"></creature-card-component>
             <div
               v-if="c.effectiveOwner && c.effectiveOwner !== c.author"
-              style="position:absolute;bottom:6px;left:6px;
-                     font-size:0.62rem;padding:2px 6px;border-radius:8px;
-                     background:#0d1a0d;border:1px solid #2e7d32;color:#66bb6a;
-                     pointer-events:none;"
+              class="sb-transferred-badge"
             >🤝 transferred</div>
           </div>
         </div>
 
-        <div v-if="totalPages > 1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
-          <button @click="prevPage" :disabled="listPage === 1" style="padding:5px 14px;background:#1a2a1a;">◀ Prev</button>
-          <span style="font-size:13px;color:#555;">{{ listPage }} / {{ totalPages }}</span>
-          <button @click="nextPage" :disabled="listPage === totalPages" style="padding:5px 14px;background:#1a2a1a;">Next ▶</button>
+        <div v-if="totalPages > 1" class="sb-pagination">
+          <button @click="prevPage" :disabled="listPage === 1" class="sb-btn-page">◀ Prev</button>
+          <span class="sb-pagination-info">{{ listPage }} / {{ totalPages }}</span>
+          <button @click="nextPage" :disabled="listPage === totalPages" class="sb-btn-page">Next ▶</button>
         </div>
         </template>
       </template>
@@ -1619,9 +1607,9 @@ const AboutView = {
     }
   },
   template: `
-    <div style="margin:20px auto;max-width:720px;padding:0 20px 40px;text-align:left;">
+    <div class="sb-doc-view">
       <loading-spinner-component v-if="loading"></loading-spinner-component>
-      <div v-else-if="loadError" style="color:#ff8a80;margin-top:24px;">
+      <div v-else-if="loadError" class="sb-doc-error">
         ⚠ {{ loadError }}
       </div>
       <div v-else v-html="html"></div>
@@ -1822,13 +1810,11 @@ const ProfileView = {
   template: `
     <div style="margin-top:20px;padding:0 16px;">
 
-      <h2 style="color:#a5d6a7;margin:0 0 4px;">@{{ profileUser }}</h2>
-      <p style="color:#555;font-size:13px;margin:0 0 16px;">
-        Items owned by this user <span style="color:#3a3a3a;">(includes transfers)</span>
-      </p>
+      <h2 class="sb-section-title" style="margin:0 0 4px;">@{{ profileUser }}</h2>
+      <p class="sb-dimmer" style="font-size:13px;margin:0 0 16px;">Items owned by this user <span class="sb-dimmer-2">(includes transfers)</span></p>
 
       <!-- Tab bar -->
-      <div style="display:flex;gap:0;margin-bottom:20px;border-bottom:1px solid #222;">
+      <div class="sb-tab-bar" style="gap:0;">
         <button
           @click="activeTab='creatures'"
           :style="{
@@ -1856,8 +1842,8 @@ const ProfileView = {
       <!-- ═══ CREATURES TAB ═══ -->
       <div v-if="activeTab==='creatures'">
         <loading-spinner-component v-if="creaturesLoading"></loading-spinner-component>
-        <div v-else-if="creaturesError" style="color:#ff8a80;font-size:13px;">⚠ {{ creaturesError }}</div>
-        <div v-else-if="creatures.length===0" style="color:#555;font-size:13px;">
+        <div v-else-if="creaturesError" class="sb-error">⚠ {{ creaturesError }}</div>
+        <div v-else-if="creatures.length===0" class="sb-empty">
           No creatures found for @{{ profileUser }}.
         </div>
         <template v-else>
@@ -1867,13 +1853,13 @@ const ProfileView = {
           </p>
 
           <!-- Creature filters -->
-          <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:center;margin-bottom:14px;">
+          <div class="sb-filter-row">
             <select v-model="filterGenus"
-              style="padding:5px 8px;font-size:13px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;">
+              class="sb-filter-select">
               <option value="">All genera</option>
               <option v-for="g in availableGenera" :key="g.id" :value="String(g.id)">{{ g.name }} ({{ g.id }})</option>
             </select>
-            <div style="display:flex;gap:4px;">
+            <div class="sb-filter-btn-group">
               <button @click="filterSex=''"
                 :style="{padding:'4px 10px',fontSize:'12px',background:filterSex===''?'#2e7d32':'#1a1a1a',color:filterSex===''?'#fff':'#888',border:'1px solid #333',borderRadius:'6px'}">All</button>
               <button @click="filterSex='0'"
@@ -1881,28 +1867,28 @@ const ProfileView = {
               <button @click="filterSex='1'"
                 :style="{padding:'4px 10px',fontSize:'12px',background:filterSex==='1'?'#880e4f':'#1a1a1a',color:filterSex==='1'?'#f48fb1':'#888',border:'1px solid #333',borderRadius:'6px'}">♀ Female</button>
             </div>
-            <div style="display:flex;gap:4px;align-items:center;">
-              <span style="font-size:12px;color:#555;">Age</span>
+            <div class="sb-filter-age-group">
+              <span class="sb-filter-age-label">Age</span>
               <button v-for="op in ['<','=','>']" :key="op"
                 @click="filterAgeOp=(filterAgeOp===op?'':op)"
                 :style="{padding:'4px 8px',fontSize:'12px',fontFamily:'monospace',background:filterAgeOp===op?'#4a3000':'#1a1a1a',color:filterAgeOp===op?'#ffb74d':'#888',border:'1px solid #333',borderRadius:'6px'}">{{ op }}</button>
               <input v-model="filterAgeVal" type="number" min="0" placeholder="days"
-                style="width:64px;padding:4px 6px;font-size:12px;background:#1a1a1a;color:#ccc;border:1px solid #333;border-radius:6px;font-family:monospace;"/>
+                class="sb-filter-age-input"/>
               <button v-if="filterAgeOp||filterAgeVal" @click="filterAgeOp='';filterAgeVal=''"
-                style="padding:4px 7px;font-size:11px;background:#1a1a1a;color:#555;border:1px solid #333;border-radius:6px;" title="Clear">✕</button>
+                class="sb-filter-clear" title="Clear">✕</button>
             </div>
           </div>
 
-          <div v-if="filteredCreatures.length===0" style="color:#555;font-size:13px;margin:12px 0;">No creatures match the filter.</div>
+          <div v-if="filteredCreatures.length===0" class="sb-empty-padded">No creatures match the filter.</div>
           <template v-else>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
+            <div class="sb-creature-grid">
               <creature-card-component v-for="c in pagedCreatures" :key="c.author+'/'+c.permlink"
                 :post="c" :username="profileUser"></creature-card-component>
             </div>
-            <div v-if="crePageCount>1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
-              <button @click="prevCre" :disabled="crePage===1" style="padding:5px 14px;background:#1a2a1a;">◀ Prev</button>
-              <span style="font-size:13px;color:#555;">{{ crePage }} / {{ crePageCount }}</span>
-              <button @click="nextCre" :disabled="crePage===crePageCount" style="padding:5px 14px;background:#1a2a1a;">Next ▶</button>
+            <div v-if="crePageCount>1" class="sb-pagination">
+              <button @click="prevCre" :disabled="crePage===1" class="sb-btn-page">◀ Prev</button>
+              <span class="sb-pagination-info">{{ crePage }} / {{ crePageCount }}</span>
+              <button @click="nextCre" :disabled="crePage===crePageCount" class="sb-btn-page">Next ▶</button>
             </div>
           </template>
         </template>
@@ -1911,8 +1897,8 @@ const ProfileView = {
       <!-- ═══ ACCESSORIES TAB ═══ -->
       <div v-if="activeTab==='accessories'">
         <loading-spinner-component v-if="accessoriesLoading"></loading-spinner-component>
-        <div v-else-if="accessoriesError" style="color:#ff8a80;font-size:13px;">⚠ {{ accessoriesError }}</div>
-        <div v-else-if="accessories.length===0" style="color:#555;font-size:13px;">
+        <div v-else-if="accessoriesError" class="sb-error">⚠ {{ accessoriesError }}</div>
+        <div v-else-if="accessories.length===0" class="sb-empty">
           No accessories found for @{{ profileUser }}.
         </div>
         <template v-else>
@@ -1922,7 +1908,7 @@ const ProfileView = {
           </p>
 
           <!-- Accessory template filter -->
-          <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;margin-bottom:14px;">
+          <div class="sb-filter-row" style="gap:6px;">
             <button @click="filterTemplate=''"
               :style="{padding:'4px 10px',fontSize:'12px',background:filterTemplate===''?'#4a148c':'#1a1a1a',color:filterTemplate===''?'#ce93d8':'#888',border:'1px solid '+(filterTemplate===''?'#7b1fa2':'#333'),borderRadius:'6px'}">All</button>
             <button v-for="t in accTemplates" :key="t.id"
@@ -1932,16 +1918,16 @@ const ProfileView = {
             </button>
           </div>
 
-          <div v-if="filteredAccessories.length===0" style="color:#555;font-size:13px;margin:12px 0;">No accessories match the filter.</div>
+          <div v-if="filteredAccessories.length===0" class="sb-empty-padded">No accessories match the filter.</div>
           <template v-else>
-            <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:12px;max-width:920px;margin:0 auto;">
+            <div class="sb-creature-grid">
               <accessory-card-component v-for="a in pagedAccessories" :key="a.author+'/'+a.permlink"
                 :post="a" :username="profileUser"></accessory-card-component>
             </div>
-            <div v-if="accPageCount>1" style="margin-top:16px;display:flex;align-items:center;justify-content:center;gap:14px;">
-              <button @click="prevAcc" :disabled="accPage===1" style="padding:5px 14px;background:#1a0a2e;">◀ Prev</button>
-              <span style="font-size:13px;color:#555;">{{ accPage }} / {{ accPageCount }}</span>
-              <button @click="nextAcc" :disabled="accPage===accPageCount" style="padding:5px 14px;background:#1a0a2e;">Next ▶</button>
+            <div v-if="accPageCount>1" class="sb-pagination">
+              <button @click="prevAcc" :disabled="accPage===1" class="sb-btn-page" style="background:#1a0a2e;">◀ Prev</button>
+              <span class="sb-pagination-info">{{ accPage }} / {{ accPageCount }}</span>
+              <button @click="nextAcc" :disabled="accPage===accPageCount" class="sb-btn-page" style="background:#1a0a2e;">Next ▶</button>
             </div>
           </template>
         </template>
@@ -2625,9 +2611,9 @@ const CreatureView = {
       <loading-spinner-component v-if="loading"></loading-spinner-component>
 
       <!-- ===== PHANTOM STATE ===== -->
-      <div v-else-if="isPhantom" style="margin-top:32px;padding:0 16px;">
-        <div style="font-size:2.4rem;margin-bottom:12px;">👻</div>
-        <div style="font-size:1.2rem;font-weight:bold;color:#9e9e9e;letter-spacing:0.04em;">
+      <div v-else-if="isPhantom" class="sb-phantom-card" style="margin-top:32px;padding:16px;">
+        <div class="sb-phantom-icon" style="font-size:2.4rem;">👻</div>
+        <div class="sb-phantom-label" style="font-size:1.2rem;font-weight:bold;color:#9e9e9e;letter-spacing:0.04em;">
           Phantom Creature
         </div>
         <div style="
@@ -2656,7 +2642,7 @@ const CreatureView = {
         </div>
       </div>
 
-      <div v-else-if="loadError" style="color:#ff8a80;margin-top:24px;">
+      <div v-else-if="loadError" class="sb-error" style="margin-top:24px;">
         ⚠ {{ loadError }}
         <br/><br/>
         <router-link to="/" style="color:#66bb6a;">← Back to Home</router-link>
@@ -2666,8 +2652,8 @@ const CreatureView = {
 
         <!-- Identity header -->
         <div style="margin-bottom:12px;">
-          <div style="font-size:1.3rem;font-weight:bold;color:#a5d6a7;letter-spacing:0.03em;">🧬 {{ name }}</div>
-          <div style="font-size:0.9rem;color:#888;margin-top:2px;">
+          <div class="sb-creature-preview-name">🧬 {{ name }}</div>
+          <div class="sb-creature-preview-sex">
             {{ sexLabel }}
             <span style="color:#444;margin:0 6px;">·</span>
             <router-link :to="'/@' + author" style="color:#80deea;text-decoration:none;font-size:0.85rem;">@{{ author }}</router-link>
@@ -2735,20 +2721,14 @@ const CreatureView = {
             By timestamp priority, that post is the original. This creature's genome is a copy
             and has no independent lineage value.
           </div>
-          <div v-if="provenanceStatus === 'suspicious-founder'" style="
-            margin-top:10px; padding:10px 14px; border-radius:8px;
-            background:#1a0e00; border:1px solid #e65100;
-            font-size:12px; color:#ffb74d; text-align:left; max-width:520px; margin-left:auto; margin-right:auto;">
+          <div v-if="provenanceStatus === 'suspicious-founder'" class="sb-provenance-warning sb-provenance-suspicious">
             <strong>⚠ Unverified Origin</strong><br/>
             This creature was posted as an origin creature but has an unusually optimal genome.
             Legitimate founders are randomly generated — genomes with multiple maxed-out traits
             may have been manually crafted or copied from another creature.
             Verify this creature's authenticity before interacting with it.
           </div>
-          <div v-if="provenanceStatus === 'broken-offspring'" style="
-            margin-top:10px; padding:10px 14px; border-radius:8px;
-            background:#1a0000; border:1px solid #b71c1c;
-            font-size:12px; color:#ff8a80; text-align:left; max-width:520px; margin-left:auto; margin-right:auto;">
+          <div v-if="provenanceStatus === 'broken-offspring'" class="sb-provenance-warning sb-provenance-broken">
             <strong>⚠ Missing Parent Links</strong><br/>
             This post claims to be a bred offspring but contains no parent references in its metadata.
             Legitimate offspring always record both parent posts. This creature's lineage cannot be verified.
@@ -2766,21 +2746,21 @@ const CreatureView = {
         ></creature-canvas-component>
         
          <!-- NEW: Tab Navigation -->
-         <div style="display:flex; justify-content:center; gap:5px; margin:20px 0 10px; border-bottom:1px solid #222;">
+         <div class="sb-tab-bar">
             <button v-for="t in [
               {id:'interact', label:'🌿 Interact', color:'#a5d6a7'},
               {id:'lineage',  label:'🧬 Family',   color:'#80deea'},
               {id:'stats',    label:'📊 Stats',    color:'#ce93d8'},
               {id:'mgmt',     label:'⚙️ Manage',   color:'#ffb74d', ownerOnly: true},
               {id:'social',   label:'💬 Social',   color:'#ef9a9a'}
-            ]" 
+            ]"
             v-show="!t.ownerOnly || isOwner || isPendingRecipient"
             @click="activeTab = t.id"
+            class="sb-tab-btn"
             :style="{
-              background: activeTab === t.id ? '#1a1a1a' : 'transparent',
-              border: 'none', borderBottom: '2px solid ' + (activeTab === t.id ? t.color : 'transparent'),
+              borderBottomColor: activeTab === t.id ? t.color : 'transparent',
               color: activeTab === t.id ? t.color : '#555',
-              padding: '8px 12px', fontSize: '12px', fontWeight: 'bold', borderRadius: '4px 4px 0 0'
+              background: activeTab === t.id ? '#1a1a1a' : 'transparent'
             }">{{ t.label }}</button>
          </div>
 
@@ -2819,56 +2799,56 @@ const CreatureView = {
          <div v-show="activeTab === 'lineage'">
 
         <!-- ── Kinship Panel ── -->
-        <div style="margin:8px 0 20px;">
-          <h3 style="color:#a5d6a7;margin:0 0 12px;font-size:1rem;">🌿 Family</h3>
+        <div class="sb-kinship-section">
+          <h3 class="sb-kinship-title">🌿 Family</h3>
 
-          <div v-if="kinshipLoading" style="color:#555;font-size:13px;margin:8px 0;">
+          <div v-if="kinshipLoading" class="sb-kinship-loading">
             ⏳ Loading kinship…
           </div>
           <template v-else>
 
             <!-- Parents -->
             <template v-if="parentA || parentB">
-              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:6px;">Parents</div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:500px;">
+              <div class="sb-kinship-sublabel">Parents</div>
+              <div class="sb-kinship-grid sb-kinship-grid-sm">
                 <template v-if="parentA">
                   <creature-card-component v-if="!parentA.isPhantom" :post="parentA"></creature-card-component>
-                  <div v-else style="border:1px solid #333;border-radius:10px;padding:16px;text-align:center;background:#0a0a0a;color:#555;">
-                    <div style="font-size:1.8rem;">👻</div>
-                    <div style="font-size:0.78rem;margin-top:6px;">Phantom Parent</div>
-                    <div style="font-size:0.68rem;color:#3a3a3a;margin-top:4px;">@{{ parentA.author }}</div>
-                    <div style="font-size:0.65rem;color:#2a2a2a;margin-top:4px;font-style:italic;">Post removed from visible chain</div>
+                  <div v-else class="sb-phantom-card">
+                    <div class="sb-phantom-icon">👻</div>
+                    <div class="sb-phantom-label">Phantom Parent</div>
+                    <div class="sb-phantom-author">@{{ parentA.author }}</div>
+                    <div class="sb-phantom-note">Post removed from visible chain</div>
                   </div>
                 </template>
                 <template v-if="parentB">
                   <creature-card-component v-if="!parentB.isPhantom" :post="parentB"></creature-card-component>
-                  <div v-else style="border:1px solid #333;border-radius:10px;padding:16px;text-align:center;background:#0a0a0a;color:#555;">
-                    <div style="font-size:1.8rem;">👻</div>
-                    <div style="font-size:0.78rem;margin-top:6px;">Phantom Parent</div>
-                    <div style="font-size:0.68rem;color:#3a3a3a;margin-top:4px;">@{{ parentB.author }}</div>
-                    <div style="font-size:0.65rem;color:#2a2a2a;margin-top:4px;font-style:italic;">Post removed from visible chain</div>
+                  <div v-else class="sb-phantom-card">
+                    <div class="sb-phantom-icon">👻</div>
+                    <div class="sb-phantom-label">Phantom Parent</div>
+                    <div class="sb-phantom-author">@{{ parentB.author }}</div>
+                    <div class="sb-phantom-note">Post removed from visible chain</div>
                   </div>
                 </template>
               </div>
             </template>
-            <div v-else style="font-size:12px;color:#333;margin-bottom:8px;">No parent data (origin creature)</div>
+            <div v-else class="sb-no-data">No parent data (origin creature)</div>
 
             <!-- Children -->
             <template v-if="children.length > 0">
-              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 6px;">
+              <div class="sb-kinship-sublabel sb-kinship-sublabel-spaced">
                 Children ({{ children.length }})
               </div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:920px;">
+              <div class="sb-kinship-grid">
                 <creature-card-component v-for="c in children" :key="c.author+'/'+c.permlink" :post="c"></creature-card-component>
               </div>
             </template>
 
             <!-- Siblings -->
             <template v-if="siblings.length > 0">
-              <div style="font-size:0.78rem;color:#66bb6a;text-transform:uppercase;letter-spacing:0.08em;margin:14px 0 6px;">
+              <div class="sb-kinship-sublabel sb-kinship-sublabel-spaced">
                 Siblings ({{ siblings.length }})
               </div>
-              <div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(185px,1fr));gap:10px;max-width:920px;">
+              <div class="sb-kinship-grid">
                 <creature-card-component v-for="s in siblings" :key="s.author+'/'+s.permlink" :post="s"></creature-card-component>
               </div>
             </template>
@@ -2880,11 +2860,11 @@ const CreatureView = {
          <div v-show="activeTab === 'stats'">
 
         <!-- Unicode render -->
-        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Unicode Render</h3>
+        <h3 class="sb-section-title">Unicode Render</h3>
         <pre :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
 
         <!-- Genome table -->
-        <h3 style="color:#a5d6a7;margin:16px 0 4px;">Genome</h3>
+        <h3 class="sb-section-title">Genome</h3>
         <genome-table-component :genome="genome"></genome-table-component>
          </div>
 
@@ -3851,16 +3831,10 @@ const App = {
         v-if="username"
         to="/notifications"
         exact-active-class="nav-active"
-        style="position:relative;"
+        class="sb-nav-link-wrap"
       >
         🔔
-        <span
-          v-if="notifBadgeCount > 0"
-          style="position:absolute;top:-6px;right:-10px;
-                 background:#e53935;color:#fff;font-size:0.6rem;font-weight:bold;
-                 border-radius:50%;min-width:16px;height:16px;line-height:16px;
-                 text-align:center;padding:0 2px;"
-        >{{ notifBadgeCount }}</span>
+        <span v-if="notifBadgeCount > 0" class="sb-notif-badge">{{ notifBadgeCount }}</span>
       </router-link>
 
       <a v-if="!username" href="#" @click.prevent="showLoginForm = !showLoginForm">Login</a>
@@ -3868,7 +3842,7 @@ const App = {
     </nav>
 
     <!-- Inline login form -->
-    <div v-if="!username && showLoginForm" style="margin:8px 0;">
+    <div v-if="!username && showLoginForm" class="sb-auth-row" style="margin:8px 0;display:block;">
       <auth-component
         :username="username"
         :has-keychain="hasKeychain"
