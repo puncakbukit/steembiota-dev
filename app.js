@@ -7,29 +7,6 @@
 const { createApp, ref, computed, onMounted, provide, inject, nextTick } = Vue;
 const { createRouter, createWebHashHistory, useRoute } = VueRouter;
 
-const SBStore = Vue.reactive({
-  closet: [],
-  closetLoading: false,
-  closetUsername: "",
-  
-  async refreshCloset(username) {
-    if (!username || this.closetUsername === username) return;
-    this.closetLoading = true;
-    this.closetUsername = username;
-    try {
-      this.closet = await fetchAccessoriesOwnedBy(username);
-    } catch (e) {
-      console.error("Closet sync failed", e);
-    }
-    this.closetLoading = false;
-  },
-  
-  invalidateCloset() {
-    this.closetUsername = "";
-    this.closet = [];
-  }
-});
-
 // ============================================================
 // STEEMBIOTA GENOME HELPERS (pure functions, no DOM)
 // ============================================================
@@ -3692,7 +3669,6 @@ const App = {
     const notification  = ref({ message: "", type: "error" });
     const profileData   = ref(null);
     const userLevel     = ref(null);   // computed from on-chain activity
-    const showMobileNav = ref(false);
 
     async function loadProfile(user) {
       if (!user) {
@@ -3844,7 +3820,6 @@ const App = {
     provide("hasKeychain", hasKeychain);
     provide("notify",      notify);
     provide("profileData", profileData);
-    provide("sbStore", SBStore);
 
     return {
       username, hasKeychain, keychainReady,
@@ -3859,9 +3834,7 @@ const App = {
     <h1>🌿 SteemBiota — Immutable Evolution</h1>
 
     <!-- Navigation -->
-<nav>
-  <button class="nav-mobile-toggle" @click="showMobileNav = !showMobileNav">☰</button>
-  <div class="nav-desktop" :class="{ show: showMobileNav }" @click="showMobileNav = false">
+    <nav>
       <router-link to="/"            exact-active-class="nav-active">Home</router-link>
       <router-link to="/accessories" exact-active-class="nav-active">✨ Accessories</router-link>
       <router-link v-if="username" to="/upload" exact-active-class="nav-active">📸 Upload</router-link>
@@ -3892,8 +3865,7 @@ const App = {
 
       <a v-if="!username" href="#" @click.prevent="showLoginForm = !showLoginForm">Login</a>
       <a v-else           href="#" @click.prevent="logout">Logout (@{{ username }})</a>
-  </div>
-</nav>
+    </nav>
 
     <!-- Inline login form -->
     <div v-if="!username && showLoginForm" style="margin:8px 0;">
@@ -3967,4 +3939,3 @@ vueApp.component("UploadView", UploadView);
 
 vueApp.use(router);
 vueApp.mount("#app");
-

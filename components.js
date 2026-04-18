@@ -230,8 +230,6 @@ const CreatureCanvasComponent = {
       _walkToX:    0,
       _walkToY:    0,
       _clickReactionIndex: 0,
-      isIntersecting: false,
-      _observer: null,
     };
   },
   watch: {
@@ -270,21 +268,10 @@ const CreatureCanvasComponent = {
         } catch {}
       }
     }
-    // Lazy Loader setup
-    this._observer = new IntersectionObserver(([entry]) => {
-      this.isIntersecting = entry.isIntersecting;
-      if (this.isIntersecting && !this.fossil) {
-        this._behaviourLoop(); // Resume if visible
-        this.draw();
-      }
-    }, { threshold: 0.1 });
-    
-    this._observer.observe(this.$refs.canvas);
     this.draw();
     if (!this.fossil) this._behaviourLoop();
   },
   beforeUnmount() {
-    if (this._observer) this._observer.disconnect();
     // Cancel any pending animation timers to avoid drawing on a detached canvas.
     this._animTimers.forEach(id => clearTimeout(id));
     this._animTimers = [];
@@ -525,12 +512,7 @@ const CreatureCanvasComponent = {
     // applies edge bounce, handles jump arc and walk-to-point,
     // then redraws.
     // ----------------------------------------------------------
-    // Modify rAF tick to check intersection
     _rafTick(ts) {
-      if (!this.isIntersecting) {
-        this._rafId = null; // Kill loop
-        return; 
-      }
       if (!this._lastTs) this._lastTs = ts;
       const dt = Math.min((ts - this._lastTs) / 1000, 0.1);  // seconds; capped at 0.1s
       this._lastTs = ts;
@@ -1689,9 +1671,7 @@ buildPhenotype(genome, age, feedState) {
     // ----------------------------------------------------------
     // Main draw
     // ----------------------------------------------------------
-    // Modify draw to skip if hidden
     draw() {
-      if (!this.isIntersecting) return;
       const canvas = this.$refs.canvas;
       if (!canvas || !this.genome) return;
       const ctx = canvas.getContext("2d");
@@ -4528,7 +4508,6 @@ const SocialPanelComponent = {
 // ============================================================
 const EquipPanelComponent = {
   name: "EquipPanelComponent",
-  inject: ["sbStore", "username"],
   props: {
     username:         { type: String, default: "" },
     creatureAuthor:   { type: String, required: true },
@@ -4558,15 +4537,12 @@ const EquipPanelComponent = {
   computed: {
     hasWearings() { return this.wearings.length > 0; },
     lapsingWearings() { return this.wearings.filter(w => w.permissionLapsed); },
-    closet() { return this.sbStore.closet; },
-    loadingCloset() { return this.sbStore.closetLoading; },
     filteredCloset() {
       if (!this.closetSearch) return this.closet;
       const q = this.closetSearch.toLowerCase();
-      // Filter the global store results locally
       return this.closet.filter(i => 
-        (i.name.toLowerCase().includes(q) || i.template.toLowerCase().includes(q)) &&
-        !this.wearings.some(w => w.accPermlink === i.permlink)
+        i.name.toLowerCase().includes(q) || 
+        i.template.toLowerCase().includes(q)
       );
     }
   },
@@ -4583,8 +4559,6 @@ const EquipPanelComponent = {
 
   methods: {
     async loadCloset() {
-      // One-time fetch for the session/user
-      await this.sbStore.refreshCloset(this.username);
       this.loadingCloset = true;
       try {
         const items = await fetchAccessoriesOwnedBy(this.username);
