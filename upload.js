@@ -488,13 +488,7 @@ methods: {
   // ----------------------------------------------------------
   onFileInputChange(e) {
     const file = e.target.files && e.target.files[0];
-    if (!file) return;
-    if (!file.type.startsWith("image/")) {
-      this.analysisError = "Please upload an image file — JPG, PNG, GIF, or WebP.";
-      if (this.$refs.fileInput) this.$refs.fileInput.value = "";
-      return;
-    }
-    this.startAnalysis(file);
+    if (file) this.startAnalysis(file);
   },
 
   onDrop(e) {
