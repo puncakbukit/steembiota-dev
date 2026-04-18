@@ -2447,18 +2447,14 @@ const CreatureCardComponent = {
   name: "CreatureCardComponent",
   components: { CreatureCanvasComponent },
   props: {
-    post:               { type: Object,  required: true },
-    username:           { type: String,  default: "" },
-    // When supplied by the parent (HomeView prefetch), the card skips its own
-    // fetchVotes / fetchRebloggers calls — eliminating 2 RPC calls per card.
-    prefetchedVotes:      { type: Array,   default: null },
-    prefetchedRebloggers: { type: Array,   default: null }
+    post:     { type: Object, required: true },
+    username: { type: String, default: "" }
   },
   data() {
     return {
       copied:            false,
-      votes:             [],     // populated from prop or fetched on mount
-      rebloggers:        [],     // populated from prop or fetched on mount
+      votes:             [],     // fetched on mount
+      rebloggers:        [],     // fetched on mount
       resolvedWearing:   null,   // fetched on mount for mini-card canvas
       socialLoading:     true,
       votingInProgress:  false,
@@ -2468,27 +2464,15 @@ const CreatureCardComponent = {
     };
   },
   mounted() {
-    // If the parent already fetched social data, use it directly.
-    if (this.prefetchedVotes !== null && this.prefetchedRebloggers !== null) {
-      this.votes        = this.prefetchedVotes;
-      this.rebloggers   = this.prefetchedRebloggers;
-      this.socialLoading = false;
-    } else {
-      // Fallback: fetch individually (e.g. when card is used outside HomeView)
-      Promise.all([
-        fetchVotes(this.post.author, this.post.permlink),
-        fetchRebloggers(this.post.author, this.post.permlink)
-      ]).then(([v, r]) => {
-        this.votes      = v;
-        this.rebloggers = r;
-      }).catch(() => {}).finally(() => { this.socialLoading = false; });
-    }
+    // Fetch vote + reblog counts in the background — non-blocking
+    Promise.all([
+      fetchVotes(this.post.author, this.post.permlink),
+      fetchRebloggers(this.post.author, this.post.permlink)
+    ]).then(([v, r]) => {
+      this.votes      = v;
+      this.rebloggers = r;
+    }).catch(() => {}).finally(() => { this.socialLoading = false; });
     this.loadWearing();
-    this._onKeydown = (e) => { if (e.key === "Escape" && this.votePickerOpen) this.votePickerOpen = false; };
-    document.addEventListener("keydown", this._onKeydown);
-  },
-  beforeUnmount() {
-    document.removeEventListener("keydown", this._onKeydown);
   },
   computed: {
     fossil()     { return this.post.age >= this.post.genome.LIF; },
@@ -2548,16 +2532,7 @@ const CreatureCardComponent = {
     toggleVotePicker(e) {
       e.preventDefault(); e.stopPropagation();
       if (!this.username || !window.steem_keychain || this.hasVoted) return;
-      if (!this.votePickerOpen) {
-        this.votePickerOpen = true;
-        this.$nextTick(() => {
-          const el = this.$refs.cardVotePopover;
-          if (el) (el.querySelector("input") || el.querySelector("button"))?.focus();
-        });
-      } else {
-        this.votePickerOpen = false;
-        this.$nextTick(() => this.$refs.cardVoteAnchor?.focus());
-      }
+      this.votePickerOpen = !this.votePickerOpen;
     },
     submitVote(e) {
       e.preventDefault(); e.stopPropagation();
@@ -2648,7 +2623,6 @@ const CreatureCardComponent = {
           <template v-if="username">
             <button
               v-if="!hasVoted"
-              ref="cardVoteAnchor"
               @click="toggleVotePicker"
               :disabled="votingInProgress"
               title="Upvote this creature"
@@ -2661,15 +2635,13 @@ const CreatureCardComponent = {
           <!-- % picker popover — anchored to this row -->
           <div
             v-if="votePickerOpen"
-            ref="cardVotePopover"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Upvote strength"
             style="position:absolute;bottom:calc(100% + 6px);left:50%;transform:translateX(-50%);
                    background:#111;border:1px solid #3a1a1a;border-radius:8px;
                    padding:10px 12px;min-width:155px;z-index:300;
                    box-shadow:0 4px 18px rgba(0,0,0,0.8);"
           >
+            <div @click.stop="votePickerOpen = false"
+                 style="position:fixed;inset:0;z-index:-1;"></div>
             <div style="font-size:0.7rem;color:#ef9a9a;font-weight:bold;
                         text-align:center;margin-bottom:7px;">❤️ Vote strength</div>
             <div style="text-align:center;font-size:1rem;font-weight:bold;
@@ -2686,12 +2658,6 @@ const CreatureCardComponent = {
                      border:1px solid #6a2020;color:#ef9a9a;font-size:0.75rem;
                      border-radius:5px;padding:4px 0;cursor:pointer;"
             >Confirm {{ votePct }}%</button>
-            <button
-              @click.stop="votePickerOpen = false; $nextTick(() => $refs.cardVoteAnchor?.focus())"
-              style="margin-top:4px;width:100%;background:transparent;
-                     border:1px solid #333;color:#555;font-size:0.68rem;
-                     border-radius:5px;padding:3px 0;cursor:pointer;"
-            >Cancel</button>
           </div>
         </div>
 

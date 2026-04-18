@@ -1251,12 +1251,6 @@ const WearPanelComponent = {
 
       <!-- Header toggle -->
       <div @click="expanded=!expanded"
-        @keydown.enter.prevent="expanded=!expanded"
-        @keydown.space.prevent="expanded=!expanded"
-        role="button"
-        tabindex="0"
-        :aria-expanded="String(expanded)"
-        aria-controls="wear-panel-body"
         style="display:flex;align-items:center;justify-content:space-between;
                cursor:pointer;padding:10px 14px;border-radius:8px;
                background:#0a0a1a;border:1px solid #1a1a3a;user-select:none;">
@@ -1278,7 +1272,6 @@ const WearPanelComponent = {
       </div>
 
       <div v-if="expanded"
-        id="wear-panel-body"
         style="border:1px solid #1a1a3a;border-top:none;border-radius:0 0 8px 8px;
                background:#08080f;padding:14px;">
 
@@ -1733,12 +1726,6 @@ const AccessoryItemView = {
         <!-- Owner transfer panel -->
         <div v-if="isOwner" style="max-width:480px;margin:0 auto 16px;">
           <div @click="transferExpanded = !transferExpanded"
-            @keydown.enter.prevent="transferExpanded = !transferExpanded"
-            @keydown.space.prevent="transferExpanded = !transferExpanded"
-            role="button"
-            tabindex="0"
-            :aria-expanded="String(transferExpanded)"
-            aria-controls="transfer-panel-body"
             style="display:flex;align-items:center;justify-content:space-between;
                    cursor:pointer;padding:10px 14px;border-radius:8px;
                    background:#0a0a12;border:1px solid #1a1a2e;user-select:none;">
@@ -1759,7 +1746,6 @@ const AccessoryItemView = {
           </div>
 
           <div v-if="transferExpanded"
-            id="transfer-panel-body"
             style="border:1px solid #1a1a2e;border-top:none;border-radius:0 0 8px 8px;
                    background:#08080f;padding:14px;">
             <div v-if="pendingOffer"
