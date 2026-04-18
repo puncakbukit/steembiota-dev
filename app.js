@@ -1256,10 +1256,10 @@ const HomeView = {
   watch: {
     age(v)        { if (this.genome) this.unicodeArt = buildUnicodeArt(this.genome, v, this.feedState, this.facingRight, "standing"); },
     feedState(fs) { if (this.genome) this.unicodeArt = buildUnicodeArt(this.genome, this.age, fs, this.facingRight, "standing"); },
-    filterGenus()  { this.listPage = 1; },
-    filterSex()    { this.listPage = 1; },
-    filterAgeOp()  { this.listPage = 1; },
-    filterAgeVal() { this.listPage = 1; }
+    filterGenus()  { this.listPage = 1; this._scrollToList(); },
+    filterSex()    { this.listPage = 1; this._scrollToList(); },
+    filterAgeOp()  { this.listPage = 1; this._scrollToList(); },
+    filterAgeVal() { this.listPage = 1; this._scrollToList(); }
   },
   methods: {
     async loadCreatureList() {
@@ -1268,6 +1268,8 @@ const HomeView = {
       if (cachedRaw) {
         this.allCreatures = parseSteembiotaPosts(cachedRaw);
         this.listLoading = false;
+        // Prefetch social data for the first page from cache too
+        this._prefetchSocial(this.allCreatures.slice(0, PAGE_SIZE));
       } else {
         this.listLoading = true;
       }
@@ -1277,10 +1279,31 @@ const HomeView = {
         const safeRaw = Array.isArray(raw) ? raw : [];
         this.allCreatures = parseSteembiotaPosts(safeRaw);
         writeListCache(cacheKey, safeRaw);
+        // Prefetch social data for the first page — non-blocking, best-effort.
+        // Cards will use the prefetched data via props, avoiding per-card RPC calls.
+        this._prefetchSocial(this.allCreatures.slice(0, PAGE_SIZE));
       } catch (e) {
         if (!cachedRaw) this.listError = e.message || "Failed to load creatures.";
       }
       this.listLoading = false;
+    },
+    // Prefetch votes + rebloggers for a slice of creature cards in parallel.
+    // Results are stored directly on the creature object so the template can
+    // pass them as props — cards skip their own per-card fetchVotes/fetchRebloggers.
+    _prefetchSocial(creatures) {
+      for (const c of creatures) {
+        Promise.all([
+          fetchVotes(c.author, c.permlink),
+          fetchRebloggers(c.author, c.permlink)
+        ]).then(([v, r]) => {
+          c.prefetchedVotes      = v;
+          c.prefetchedRebloggers = r;
+        }).catch(() => {});
+      }
+    },
+    // Scroll the creature list heading into view after a filter change.
+    _scrollToList() {
+      this.$nextTick(() => this.$refs.listSection?.scrollIntoView({ behavior: "smooth", block: "start" }));
     },
     createFounder() {
       if (!this.username) { this.notify("Please log in first.", "error"); return; }
@@ -1378,7 +1401,7 @@ const HomeView = {
       <hr/>
 
       <!-- ── All Creatures ── -->
-      <h3 style="color:#a5d6a7;margin:18px 0 12px;font-size:1rem;letter-spacing:0.04em;">
+      <h3 ref="listSection" style="color:#a5d6a7;margin:18px 0 12px;font-size:1rem;letter-spacing:0.04em;">
         🌿 All Creatures
         <span v-if="!listLoading && !listError" style="font-size:0.75rem;color:#555;font-weight:normal;margin-left:8px;">
           ({{ filteredCreatures.length }}{{ filteredCreatures.length !== allCreatures.length ? ' of ' + allCreatures.length : '' }} total)
@@ -1447,7 +1470,12 @@ const HomeView = {
             :key="c.author + '/' + c.permlink"
             style="position:relative;"
           >
-            <creature-card-component :post="c" :username="username"></creature-card-component>
+            <creature-card-component
+              :post="c"
+              :username="username"
+              :prefetched-votes="c.prefetchedVotes || null"
+              :prefetched-rebloggers="c.prefetchedRebloggers || null"
+            ></creature-card-component>
             <div
               v-if="c.effectiveOwner && c.effectiveOwner !== c.author"
               style="position:absolute;bottom:6px;left:6px;
@@ -1499,8 +1527,12 @@ const AboutView = {
         .replace(/`([^`]+)`/g, "<code style='background:#0a0a0a;padding:1px 5px;border-radius:3px;font-size:0.88em;color:#80deea;'>$1</code>")
         .replace(/\*\*([^*]+)\*\*/g, "<strong style='color:#eee;'>$1</strong>")
         .replace(/\*([^*]+)\*/g, "<em>$1</em>")
-        .replace(/\[([^\]]+)\]\(([^)]+)\)/g,
-          '<a href="$2" target="_blank" rel="noopener" style="color:#80deea;">$1</a>');
+        .replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_, text, url) => {
+          // Block javascript: and data: URIs — only allow http/https/relative URLs.
+          const safe = /^https?:\/\//i.test(url.trim()) || /^\//.test(url.trim());
+          const href = safe ? url.trim() : "#";
+          return `<a href="${href}" target="_blank" rel="noopener" style="color:#80deea;">${text}</a>`;
+        });
 
       const lines   = md.split("\n");
       const out     = [];
@@ -2024,10 +2056,13 @@ const CreatureView = {
   },
   created() {
     this._ticker = setInterval(() => { this.now = new Date(); }, 60000);
+    this._onKeydown = (e) => { if (e.key === "Escape" && this.votePickerOpen) this.votePickerOpen = false; };
+    document.addEventListener("keydown", this._onKeydown);
     this.loadCreature();
   },
   beforeUnmount() {
     clearInterval(this._ticker);
+    document.removeEventListener("keydown", this._onKeydown);
   },
   computed: {
     sexLabel()      { return this.genome ? (this.genome.SX === 0 ? "♂ Male" : "♀ Female") : ""; },
@@ -2568,8 +2603,17 @@ const CreatureView = {
             right:  window.innerWidth  - r.right
           };
         }
+        this.votePickerOpen = true;
+        // Move focus into the popover so keyboard users can operate it immediately.
+        this.$nextTick(() => {
+          const el = this.$refs.votePopover;
+          if (el) (el.querySelector("input") || el.querySelector("button"))?.focus();
+        });
+      } else {
+        this.votePickerOpen = false;
+        // Return focus to the anchor button so keyboard position is not lost.
+        this.$nextTick(() => this.$refs.voteAnchorBtn?.focus());
       }
-      this.votePickerOpen = !this.votePickerOpen;
     },
 
     submitVote() {
@@ -2806,6 +2850,10 @@ const CreatureView = {
               <teleport to="body">
                 <div
                   v-if="votePickerOpen"
+                  ref="votePopover"
+                  role="dialog"
+                  aria-modal="true"
+                  aria-label="Upvote strength"
                   :style="{
                     position: 'fixed',
                     bottom: votePickerPos.bottom + 'px',
@@ -2815,12 +2863,6 @@ const CreatureView = {
                     boxShadow: '0 4px 16px rgba(0,0,0,0.8)'
                   }"
                 >
-                  <!-- Close on outside click -->
-                  <div
-                    @click.stop="votePickerOpen = false"
-                    style="position:fixed;inset:0;z-index:-1;"
-                  ></div>
-
                   <div style="font-size:0.72rem;color:#ef9a9a;font-weight:bold;
                               margin-bottom:8px;text-align:center;letter-spacing:0.05em;">
                     ❤️ Upvote strength
@@ -2845,6 +2887,12 @@ const CreatureView = {
                            border:1px solid #6a2020;color:#ef9a9a;font-size:0.78rem;
                            border-radius:5px;padding:4px 0;cursor:pointer;"
                   >Confirm {{ votePct }}% upvote</button>
+                  <button
+                    @click.stop="votePickerOpen = false; $nextTick(() => $refs.voteAnchorBtn?.focus())"
+                    style="margin-top:4px;width:100%;background:transparent;
+                           border:1px solid #333;color:#555;font-size:0.72rem;
+                           border-radius:5px;padding:3px 0;cursor:pointer;"
+                  >Cancel</button>
                 </div>
               </teleport>
             </div>
@@ -3428,24 +3476,20 @@ const NotificationsView = {
         transfer_offer: "🤝"
       }[type] || "📢";
     },
-    label(n) {
-      const clink = `/#/@${n.creatureAuthor}/${n.creaturePermlink}`;
-      const cname = n.creatureName || n.creatureAuthor;
+    // Returns plain-text parts so the template renders them with {{ }}
+    // (Vue auto-escapes), eliminating the XSS risk from blockchain-sourced strings.
+    labelParts(n) {
+      const actor = String(n.actor || "");
+      const cname = String(n.creatureName || n.creatureAuthor || "");
+      const food  = String(n.extra?.food || "food");
       switch (n.type) {
-        case "feed":
-          return `@${n.actor} fed <strong>${cname}</strong> (${n.extra?.food || "food"})`;
-        case "play":
-          return `@${n.actor} played with <strong>${cname}</strong>`;
-        case "walk":
-          return `@${n.actor} walked <strong>${cname}</strong>`;
-        case "birth":
-          return `@${n.actor} bred an offspring from <strong>${cname}</strong>`;
-        case "breed":
-          return `@${n.actor} used <strong>${cname}</strong>'s lineage to breed a new creature`;
-        case "transfer_offer":
-          return `@${n.actor} is offering you ownership of <strong>${cname}</strong>`;
-        default:
-          return `@${n.actor} interacted with <strong>${cname}</strong>`;
+        case "feed":           return { prefix: `@${actor} fed`, name: cname, suffix: `(${food})` };
+        case "play":           return { prefix: `@${actor} played with`, name: cname, suffix: "" };
+        case "walk":           return { prefix: `@${actor} walked`, name: cname, suffix: "" };
+        case "birth":          return { prefix: `@${actor} bred an offspring from`, name: cname, suffix: "" };
+        case "breed":          return { prefix: `@${actor} used`, name: cname, suffix: "'s lineage to breed a new creature" };
+        case "transfer_offer": return { prefix: `@${actor} is offering you ownership of`, name: cname, suffix: "" };
+        default:               return { prefix: `@${actor} interacted with`, name: cname, suffix: "" };
       }
     },
     timeAgo(ts) {
@@ -3566,7 +3610,11 @@ const NotificationsView = {
             </div>
             <!-- Body -->
             <div style="flex:1;min-width:0;">
-              <div style="font-size:0.84rem;color:#ccc;line-height:1.4;" v-html="label(n)"></div>
+              <div style="font-size:0.84rem;color:#ccc;line-height:1.4;">
+                {{ labelParts(n).prefix }}
+                <strong>{{ labelParts(n).name }}</strong>
+                {{ labelParts(n).suffix }}
+              </div>
               <div style="display:flex;gap:12px;align-items:center;margin-top:5px;flex-wrap:wrap;">
                 <span style="font-size:0.72rem;color:#444;">{{ timeAgo(n.ts) }}</span>
                 <router-link
@@ -3840,8 +3888,18 @@ const App = {
         >{{ notifBadgeCount }}</span>
       </router-link>
 
-      <a v-if="!username" href="#" @click.prevent="showLoginForm = !showLoginForm">Login</a>
-      <a v-else           href="#" @click.prevent="logout">Logout (@{{ username }})</a>
+      <button
+        v-if="!username"
+        @click="showLoginForm = !showLoginForm"
+        style="background:none;border:none;cursor:pointer;color:#66bb6a;font-weight:bold;
+               font-family:monospace;font-size:inherit;padding:0;margin:0 10px;"
+      >Login</button>
+      <button
+        v-else
+        @click="logout"
+        style="background:none;border:none;cursor:pointer;color:#66bb6a;font-weight:bold;
+               font-family:monospace;font-size:inherit;padding:0;margin:0 10px;"
+      >Logout (@{{ username }})</button>
     </nav>
 
     <!-- Inline login form -->
@@ -3872,6 +3930,17 @@ const App = {
       :type="notification.type"
       @dismiss="dismissNotification"
     ></app-notification-component>
+
+    <!-- Visually-hidden live region: announces badge changes to screen readers -->
+    <div
+      aria-live="polite"
+      aria-atomic="true"
+      style="position:absolute;left:-9999px;width:1px;height:1px;overflow:hidden;"
+    >
+      <span v-if="notifBadgeCount > 0">
+        {{ notifBadgeCount }} pending notification{{ notifBadgeCount > 1 ? "s" : "" }}
+      </span>
+    </div>
 
     <!-- Global profile banner — logged-in user, or @steembiota as fallback -->
     <global-profile-banner-component
