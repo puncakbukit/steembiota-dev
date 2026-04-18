@@ -2793,6 +2793,9 @@ const CreatureView = {
           @notify="(msg,type) => notify(msg,type)"
           @feed-state-updated="onFeedStateUpdated"
           @activity-state-updated="onActivityStateUpdated"
+          @optimistic-feed="reactionTrigger++"
+          @optimistic-play="reactionTrigger++"
+          @optimistic-walk="reactionTrigger++"
         ></activity-panel-component>
          </div>
 

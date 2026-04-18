@@ -669,13 +669,12 @@ const CreatureCanvasComponent = {
       const canvas = this.$refs.canvas;
       const rect   = canvas.getBoundingClientRect();
 
-      // Click position in CSS pixels → canvas pixels.
-      const scaleX = canvas.width  / rect.width;
-      const scaleY = canvas.height / rect.height;
-      const clickX = (event.clientX - rect.left) * scaleX;
-      const clickY = (event.clientY - rect.top)  * scaleY;
+      // With DPR scaling the CSS size equals rect dimensions, so no scaling needed.
+      // We work entirely in CSS pixels (same coordinate space as draw()).
+      const clickX = event.clientX - rect.left;
+      const clickY = event.clientY - rect.top;
 
-      const W = canvas.width, H = canvas.height;
+      const W = this.canvasW, H = this.canvasH;
 
       // Creature's current centre in canvas coordinates.
       const isMoving = this._behavState === "walk" || this._behavState === "run"
@@ -1658,7 +1657,23 @@ buildPhenotype(genome, age, feedState) {
       const canvas = this.$refs.canvas;
       if (!canvas || !this.genome) return;
       const ctx = canvas.getContext("2d");
-      const W = canvas.width, H = canvas.height;
+
+      // ── Retina / HiDPI support ──────────────────────────────
+      // Scale the backing store by devicePixelRatio while keeping
+      // the CSS display size constant.  We track the dpr we last
+      // applied so we only reset when it actually changes (e.g.
+      // the user moves the window between monitors).
+      const dpr = window.devicePixelRatio || 1;
+      const cssW = this.canvasW;
+      const cssH = this.canvasH;
+      if (canvas._sb_dpr !== dpr) {
+        canvas.width  = Math.round(cssW * dpr);
+        canvas.height = Math.round(cssH * dpr);
+        canvas._sb_dpr = dpr;
+      }
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // reset + apply DPR scale
+
+      const W = cssW, H = cssH;    // all drawing code uses CSS-pixel coords
       ctx.clearRect(0, 0, W, H);
 
       const g = this.genome;
@@ -2403,7 +2418,7 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
   ctx.restore();
 }
   },
-  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent;outline:none;user-select:none;" @click="onCanvasClick"></canvas>`
+  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'" @click="onCanvasClick"></canvas>`
 };
 
 // ---- CreatureCardComponent ----
@@ -2619,7 +2634,9 @@ const CreatureCardComponent = {
 };
 
 // ---- GenomeTableComponent ----
-// Renders the genome key/value pairs in a styled table.
+// Renders genome genes as labelled visual histograms.
+// Continuous genes (0–9999) show a bar + position label.
+// Discrete genes (Sex, MUT) show a badge.
 const GenomeTableComponent = {
   name: "GenomeTableComponent",
   props: {
@@ -2629,31 +2646,163 @@ const GenomeTableComponent = {
     sexLabel() {
       return this.genome.SX === 0 ? "♂ Male" : "♀ Female";
     },
-    rows() {
+    // Genes that map to a 0–9999 scale and get bar histograms
+    barGenes() {
       const g = this.genome;
       return [
-        { key: "Genus",             value: generateGenusName(g.GEN) + " (GEN " + g.GEN + ")" },
-        { key: "Sex",               value: this.sexLabel },
-        { key: "Morphology",        value: g.MOR },
-        { key: "Appendage Seed",    value: g.APP },
-        { key: "Ornamentation",     value: g.ORN },
-        { key: "Colour (hue°)",     value: g.CLR },
-        { key: "Lifespan",          value: g.LIF },
-        { key: "Fertility start",   value: g.FRT_START },
-        { key: "Fertility end",     value: g.FRT_END },
-        { key: "Mutation tendency", value: g.MUT !== undefined ? g.MUT : "—" },
+        {
+          key: "MOR", label: "Morphology",
+          value: g.MOR, min: 0, max: 9999,
+          desc: this._morphDesc(g.MOR),
+          color: "#66bb6a",
+          title: "Controls body shape: short/round → long/thin"
+        },
+        {
+          key: "APP", label: "Appendages",
+          value: g.APP, min: 0, max: 9999,
+          desc: this._appDesc(g.APP),
+          color: "#80cbc4",
+          title: "Seeds limb count, ear style, tail type"
+        },
+        {
+          key: "ORN", label: "Ornamentation",
+          value: g.ORN, min: 0, max: 9999,
+          desc: this._ornDesc(g.ORN),
+          color: "#ce93d8",
+          title: "Controls glows, mane, ribbons, orb nodes"
+        },
+        {
+          key: "CLR", label: "Colour (hue°)",
+          value: g.CLR, min: 0, max: 9999,
+          desc: this._clrDesc(g.CLR),
+          color: this._hueColor(g.CLR),
+          title: "Base hue mapped from 0–9999 → 0–359°"
+        },
+      ];
+    },
+    // Lifespan / fertility use their own natural scales
+    lifespanGenes() {
+      const g = this.genome;
+      return [
+        {
+          key: "LIF", label: "Lifespan",
+          value: g.LIF, min: 80, max: 200,
+          desc: g.LIF + " days",
+          color: "#ef9a9a",
+          title: "Maximum age in days"
+        },
+        {
+          key: "FRT_START", label: "Fertility start",
+          value: g.FRT_START, min: 0, max: g.LIF || 160,
+          desc: "day " + g.FRT_START,
+          color: "#ffe082",
+          title: "Age (days) when fertile period begins"
+        },
+        {
+          key: "FRT_END", label: "Fertility end",
+          value: g.FRT_END, min: 0, max: g.LIF || 160,
+          desc: "day " + g.FRT_END,
+          color: "#ffe082",
+          title: "Age (days) when fertile period ends"
+        },
       ];
     }
   },
+  methods: {
+    pct(value, min, max) {
+      return Math.max(0, Math.min(100, ((value - min) / (max - min)) * 100));
+    },
+    _morphDesc(v) {
+      if (v < 1500) return "Compact";
+      if (v < 3500) return "Stocky";
+      if (v < 6500) return "Average";
+      if (v < 8500) return "Lean";
+      return "Elongated";
+    },
+    _appDesc(v) {
+      if (v < 2000) return "Minimal";
+      if (v < 5000) return "Moderate";
+      if (v < 8000) return "Complex";
+      return "Elaborate";
+    },
+    _ornDesc(v) {
+      if (v < 1500) return "Plain";
+      if (v < 4000) return "Subtle";
+      if (v < 7000) return "Vivid";
+      if (v < 9000) return "Radiant";
+      return "Spectacular";
+    },
+    _clrDesc(v) {
+      const hue = Math.round((v / 9999) * 359);
+      const names = [
+        [15,  "Red"],  [45,  "Orange"], [70,  "Yellow"],
+        [150, "Green"],[190, "Cyan"],   [250, "Blue"],
+        [290, "Violet"],[330,"Magenta"],[360, "Red"],
+      ];
+      for (const [limit, name] of names) if (hue <= limit) return name + " " + hue + "°";
+      return hue + "°";
+    },
+    _hueColor(v) {
+      const hue = Math.round((v / 9999) * 359);
+      return `hsl(${hue},70%,60%)`;
+    },
+    mutLabel(v) {
+      if (v === undefined || v === null) return "—";
+      const labels = ["Frozen","Stable","Low","Moderate","High","Volatile"];
+      return labels[Math.min(v, 5)] || v;
+    },
+    mutColor(v) {
+      const colors = ["#90caf9","#a5d6a7","#c8e6c9","#ffe082","#ffb74d","#ff8a80"];
+      return colors[Math.min(v, 5)] || "#888";
+    }
+  },
   template: `
-    <table class="sb-genome-table">
-      <tbody>
-        <tr v-for="row in rows" :key="row.key">
-          <td class="sb-genome-key">{{ row.key }}</td>
-          <td class="sb-genome-val">{{ row.value }}</td>
-        </tr>
-      </tbody>
-    </table>
+    <div class="sb-genome-hist">
+
+      <!-- Header row: fixed labels -->
+      <div class="sb-genome-fixed-row">
+        <span class="sb-genome-key">Genus</span>
+        <span class="sb-genome-val">{{ generateGenusName ? generateGenusName(genome.GEN) : genome.GEN }} <span class="sb-genome-dim">(GEN {{ genome.GEN }})</span></span>
+      </div>
+      <div class="sb-genome-fixed-row">
+        <span class="sb-genome-key">Sex</span>
+        <span class="sb-genome-val" :style="{ color: genome.SX === 0 ? '#90caf9' : '#f48fb1' }">{{ sexLabel }}</span>
+      </div>
+
+      <!-- Bar genes: MOR APP ORN CLR -->
+      <div v-for="g in barGenes" :key="g.key" class="sb-genome-bar-row" :title="g.title">
+        <div class="sb-genome-bar-label">
+          <span class="sb-genome-key">{{ g.label }}</span>
+          <span class="sb-genome-bar-desc" :style="{ color: g.color }">{{ g.desc }}</span>
+        </div>
+        <div class="sb-genome-bar-track">
+          <div class="sb-genome-bar-fill" :style="{ width: pct(g.value, g.min, g.max) + '%', background: g.color }"></div>
+          <span class="sb-genome-bar-num">{{ g.value }}</span>
+        </div>
+      </div>
+
+      <!-- Lifespan / fertility bars -->
+      <div class="sb-genome-section-label">Lifecycle</div>
+      <div v-for="g in lifespanGenes" :key="g.key" class="sb-genome-bar-row" :title="g.title">
+        <div class="sb-genome-bar-label">
+          <span class="sb-genome-key">{{ g.label }}</span>
+          <span class="sb-genome-bar-desc" :style="{ color: g.color }">{{ g.desc }}</span>
+        </div>
+        <div class="sb-genome-bar-track">
+          <div class="sb-genome-bar-fill" :style="{ width: pct(g.value, g.min, g.max) + '%', background: g.color }"></div>
+          <span class="sb-genome-bar-num">{{ g.value }}</span>
+        </div>
+      </div>
+
+      <!-- Mutation: discrete badge -->
+      <div class="sb-genome-fixed-row">
+        <span class="sb-genome-key">Mutation</span>
+        <span class="sb-genome-mut-badge" :style="{ color: mutColor(genome.MUT), borderColor: mutColor(genome.MUT) }">
+          {{ genome.MUT !== undefined ? genome.MUT : '—' }} · {{ mutLabel(genome.MUT) }}
+        </span>
+      </div>
+
+    </div>
   `
 };
 
@@ -2853,6 +3002,12 @@ const ActivityPanelComponent = {
       if (!this.canFeed) return;
       if (!window.steem_keychain) { this.$emit("notify", "Steem Keychain is not installed.", "error"); return; }
       this.publishingFeed = true;
+
+      // ── Optimistic UI: start the eat animation immediately when Keychain
+      //    opens (i.e. the user is about to sign).  The creature visually
+      //    reacts right away; the block-confirmation is just bookkeeping.
+      this.$emit("optimistic-feed");
+
       publishFeed(
         this.username,
         this.creatureAuthor,
@@ -2882,6 +3037,8 @@ const ActivityPanelComponent = {
             const foodLabel = { nectar: "Nectar", fruit: "Fruit", crystal: "Crystal" }[this.foodType] || this.foodType;
             this.$emit("notify", "🍃 Fed " + this.creatureName + " with " + foodLabel + "!", "success");
           } else {
+            // Transaction failed — roll back the optimistic state flags
+            this.alreadyFedToday = false;
             this.$emit("notify", "Feed failed: " + (response.message || "Unknown error"), "error");
           }
         }
@@ -2939,17 +3096,23 @@ const ActivityPanelComponent = {
       if (!this.canPlay) return;
       if (!window.steem_keychain) { this.$emit("notify", "Steem Keychain is not installed.", "error"); return; }
       this.publishingPlay = true;
+
+      // Optimistic: update UI & trigger creature animation immediately.
+      this.alreadyPlayedToday = true;
+      this._optimisticUpdate("play");
+      this.$emit("optimistic-play");
+
       publishPlay(
         this.username, this.creatureAuthor, this.creaturePermlink,
         this.creatureName, this.unicodeArt,
         (response) => {
           this.publishingPlay = false;
           if (response.success) {
-            this.alreadyPlayedToday = true;
             if (typeof invalidateCreatureCache === "function") invalidateCreatureCache(this.creatureAuthor, this.creaturePermlink);
-            this._optimisticUpdate("play");
             this.$emit("notify", "🎮 Played with " + this.creatureName + "! Mood improved.", "success");
           } else {
+            // Rollback
+            this.alreadyPlayedToday = false;
             this.$emit("notify", "Play failed: " + (response.message || "Unknown error"), "error");
           }
         }
@@ -2960,16 +3123,22 @@ const ActivityPanelComponent = {
       if (!this.canWalk) return;
       if (!window.steem_keychain) { this.$emit("notify", "Steem Keychain is not installed.", "error"); return; }
       this.publishingWalk = true;
+
+      // Optimistic: update UI & trigger creature animation immediately.
+      this.alreadyWalkedToday = true;
+      this._optimisticUpdate("walk");
+      this.$emit("optimistic-walk");
+
       publishWalk(
         this.username, this.creatureAuthor, this.creaturePermlink,
         this.creatureName, this.unicodeArt,
         (response) => {
           this.publishingWalk = false;
           if (response.success) {
-            this.alreadyWalkedToday = true;
-            this._optimisticUpdate("walk");
             this.$emit("notify", "🦮 Took " + this.creatureName + " for a walk! Vitality improved.", "success");
           } else {
+            // Rollback
+            this.alreadyWalkedToday = false;
             this.$emit("notify", "Walk failed: " + (response.message || "Unknown error"), "error");
           }
         }

@@ -9,6 +9,11 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SteemBiota — Immutable Evolution</title>
 
+  <!-- Typography: Inter for prose, keep system monospace for data/labels -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+
   <!-- steem-js -->
   <script src="https://cdn.jsdelivr.net/npm/@steemit/steem-js@0.8.0/dist/steem.min.js"></script>
 
@@ -24,18 +29,76 @@
      * All layout classes are prefixed with `sb-` to avoid conflicts.
      * ============================================================ */
 
+    /* ── Design tokens ── */
+    :root {
+      /* Typography */
+      --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+      --font-mono: 'Fira Mono', 'Cascadia Code', 'Consolas', monospace;
+
+      /* Colour palette */
+      --clr-bg:       #111;
+      --clr-surface:  #1a1a1a;
+      --clr-border:   #252525;
+      --clr-text:     #eee;
+      --clr-muted:    #888;
+      --clr-green:    #66bb6a;
+      --clr-green-dk: #2e7d32;
+      --clr-green-lt: #a5d6a7;
+    }
+
     /* ── Reset & base ── */
     *, *::before, *::after { box-sizing: border-box; }
     body {
-      font-family: monospace;
+      /* Base = sans-serif for readability; monospace applied selectively */
+      font-family: var(--font-sans);
       text-align: center;
-      background: #111;
-      color: #eee;
+      background: var(--clr-bg);
+      color: var(--clr-text);
       margin: 0;
       padding: 0;
+      font-size: 15px;
+      line-height: 1.5;
     }
 
-    h1 { margin: 20px 0 8px; font-size: 1.6rem; }
+    /* Data/Label elements keep monospace for the "hacker/scientist" feel */
+    .sb-mono,
+    code, pre,
+    .sb-card-name, .sb-card-row, .sb-card-row-sm,
+    .sb-stat-bar-header, .sb-genome-summary,
+    .sb-level-badge, .sb-level-xp, .sb-level-rank,
+    .sb-banner-handle,
+    .sb-mm-name, .sb-mm-author, .sb-mm-mut, .sb-mm-lif,
+    .sb-breed-status, .sb-sex-badge-abs,
+    .sb-provenance-badge,
+    .sb-worn-item-name,
+    .sb-closet-search,
+    .sb-activity-summary,
+    nav a,
+    input[type="text"], input[type="number"],
+    button {
+      font-family: var(--font-mono);
+    }
+
+    /* Long-form prose elements use sans-serif */
+    .sb-doc-view,
+    .sb-doc-view p, .sb-doc-view li, .sb-doc-view h1,
+    .sb-doc-view h2, .sb-doc-view h3, .sb-doc-view h4,
+    .notification,
+    .keychain-notice,
+    .sb-panel-hint,
+    .sb-transfer-offer-body,
+    .sb-activity-card-desc,
+    .sb-activity-card-tomorrow,
+    .sb-banner-about,
+    .sb-profile-about,
+    .sb-empty, .sb-empty-padded,
+    .sb-mm-disclaimer, .sb-mm-permit, .sb-mm-confirm,
+    .sb-breed-error,
+    .sb-phantom-label, .sb-phantom-note {
+      font-family: var(--font-sans);
+    }
+
+    h1 { margin: 20px 0 8px; font-size: 1.6rem; font-family: var(--font-mono); }
 
     /* ── Buttons ── */
     button {
@@ -46,8 +109,9 @@
       cursor: pointer;
       background-color: #2e7d32;
       color: white;
-      font-size: 14px;
-      font-family: monospace;
+      font-size: 13px;
+      font-family: var(--font-mono);
+      letter-spacing: 0.01em;
     }
     button:hover    { opacity: 0.9; }
     button:disabled { opacity: 0.4; cursor: not-allowed; }
@@ -58,10 +122,10 @@
       padding: 7px 10px;
       border-radius: 6px;
       border: 1px solid #444;
-      font-size: 14px;
+      font-size: 13px;
       background: #222;
       color: #eee;
-      font-family: monospace;
+      font-family: var(--font-mono);
     }
 
     hr { margin: 24px 0; border: none; border-top: 1px solid #333; }
@@ -99,10 +163,12 @@
       align-items: center;
       justify-content: space-between;
       margin: 10px auto;
-      padding: 10px 14px;
+      padding: 11px 16px;
       border-radius: 6px;
       max-width: 640px;
       font-size: 14px;
+      font-family: var(--font-sans);
+      line-height: 1.45;
       gap: 10px;
     }
     .notification.error   { background: #3b0000; border: 1px solid #b71c1c; color: #ff8a80; }
@@ -407,11 +473,107 @@
     .sb-max-rank     { font-size: 0.7rem; color: #66bb6a; margin-top: 4px; }
     .sb-activity-summary { font-size: 0.68rem; color: #444; margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
-    /* ── Genome table ── */
-    .sb-genome-table { margin: 12px auto; border-collapse: collapse; font-size: 13px; color: #ccc; }
-    .sb-genome-table td { padding: 3px 12px; }
-    .sb-genome-key { text-align: right; color: #888; }
-    .sb-genome-val { text-align: left; color: #eee; font-weight: bold; }
+    /* ── Genome histogram (GenomeTableComponent) ── */
+    .sb-genome-hist {
+      margin: 12px auto;
+      max-width: 440px;
+      font-size: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    /* Fixed (non-bar) rows */
+    .sb-genome-fixed-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 8px;
+      border-radius: 5px;
+      background: #151515;
+    }
+
+    /* Section separator */
+    .sb-genome-section-label {
+      font-family: var(--font-mono, monospace);
+      font-size: 10px;
+      color: #444;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      margin-top: 4px;
+      padding-left: 8px;
+    }
+
+    /* Bar rows */
+    .sb-genome-bar-row {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      padding: 6px 8px;
+      border-radius: 5px;
+      background: #151515;
+      cursor: default;
+    }
+    .sb-genome-bar-row:hover { background: #1c1c1c; }
+
+    .sb-genome-bar-label {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .sb-genome-bar-desc {
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      font-weight: bold;
+    }
+    .sb-genome-bar-track {
+      position: relative;
+      height: 6px;
+      background: #252525;
+      border-radius: 3px;
+      overflow: visible;
+    }
+    .sb-genome-bar-fill {
+      height: 100%;
+      border-radius: 3px;
+      transition: width 0.35s ease;
+      min-width: 2px;
+    }
+    .sb-genome-bar-num {
+      position: absolute;
+      right: 0;
+      top: -14px;
+      font-family: var(--font-mono, monospace);
+      font-size: 10px;
+      color: #555;
+    }
+
+    /* Shared key/val styles (used in both old table and new hist) */
+    .sb-genome-key {
+      color: #666;
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+    .sb-genome-val {
+      color: #ccc;
+      font-family: var(--font-mono, monospace);
+      font-size: 12px;
+      font-weight: bold;
+    }
+    .sb-genome-dim { color: #444; font-weight: normal; }
+
+    /* Mutation badge */
+    .sb-genome-mut-badge {
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      font-weight: bold;
+      border: 1px solid;
+      border-radius: 4px;
+      padding: 1px 7px;
+    }
 
     /* ── Creature grid ── */
     .sb-creature-grid {
