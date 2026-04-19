@@ -323,6 +323,68 @@ function removeCacheByPrefix(prefix) {
 
 function invalidateGlobalListCaches() {
   removeCacheByPrefix("steembiota:list:");
+  // Also clear the IDB list cache (Fix 5a).
+  openSBDB().then(db => {
+    try {
+      const tx = db.transaction("list_cache", "readwrite");
+      tx.objectStore("list_cache").clear();
+    } catch {}
+  }).catch(() => {});
+}
+
+// Fix 5b: Surgically update a single item's effectiveOwner in the cached list
+// instead of nuking everything. Avoids a full re-fetch after a transfer accept.
+async function patchListCacheOwner(author, permlink, newOwner) {
+  const cacheKey = "steembiota:list:creatures:v1";
+  try {
+    const raw = await readListDB(cacheKey).catch(() => null)
+             || readListCache(cacheKey);
+    if (!Array.isArray(raw)) return;
+    let changed = false;
+    for (const p of raw) {
+      if (p.author === author && p.permlink === permlink) {
+        // Raw posts don't have effectiveOwner, but we annotate it here so
+        // parseSteembiotaPosts can surface the transferred badge immediately.
+        p._effectiveOwner = newOwner;
+        changed = true;
+        break;
+      }
+    }
+    if (changed) {
+      writeListDB(cacheKey, raw).catch(() => writeListCache(cacheKey, raw));
+    }
+  } catch { /* non-fatal */ }
+}
+
+// Fix 5b: Surgical owned-list patch — remove from previous owner's cache and
+// add to new owner's cache without forcing a full re-fetch.
+function patchOwnedCacheTransfer(postData, fromUser, toUser) {
+  const fromKey = `steembiota:owned:creatures:${String(fromUser || "").toLowerCase()}:v2`;
+  const toKey   = `steembiota:owned:creatures:${String(toUser  || "").toLowerCase()}:v2`;
+  try {
+    // Remove from sender's cache
+    const fromList = readOwnedProfileCache(fromKey);
+    if (Array.isArray(fromList)) {
+      const pruned = fromList.filter(
+        c => !(c.author === postData.author && c.permlink === postData.permlink)
+      );
+      writeOwnedProfileCache(fromKey, pruned);
+    }
+  } catch {}
+  try {
+    // Add to recipient's cache with updated effectiveOwner
+    const toList = readOwnedProfileCache(toKey);
+    if (Array.isArray(toList)) {
+      // Avoid duplicates
+      const exists = toList.some(
+        c => c.author === postData.author && c.permlink === postData.permlink
+      );
+      if (!exists) {
+        const updated = { ...postData, effectiveOwner: toUser };
+        writeOwnedProfileCache(toKey, [updated, ...toList]);
+      }
+    }
+  } catch {}
 }
 
 function invalidateOwnedCachesForUser(user) {
@@ -791,12 +853,40 @@ function unicodeGridSize(pct) {
   return 24; // fossil
 }
 
-// ---- Mirror a single unicode art line (reverses char order) ----
+// ---- Mirror a single unicode art line ----
 // Used to flip the creature to face right instead of left.
+// A naive reverse breaks directional characters (brackets, slashes, ↄ/c curl).
+// We first swap each character via mirrorMap, then reverse the sequence.
+const MIRROR_MAP = {
+  '(':  ')',  ')':  '(',
+  '[':  ']',  ']':  '[',
+  '{':  '}',  '}':  '{',
+  '<':  '>',  '>':  '<',
+  '/':  '\\', '\\': '/',
+  '╔':  '╗',  '╗':  '╔',
+  '╚':  '╝',  '╝':  '╚',
+  '╠':  '╣',  '╣':  '╠',
+  '╒':  '╕',  '╕':  '╒',
+  '╘':  '╛',  '╛':  '╘',
+  '╞':  '╡',  '╡':  '╞',
+  '╭':  '╮',  '╮':  '╭',
+  '╰':  '╯',  '╯':  '╰',
+  '⌐':  '¬',  '¬':  '⌐',
+  'ↄ':  'c',  'c':  'ↄ',   // sleeping-pose tail curl
+  '↑':  '↑',                // vertical arrows are symmetric
+  '↓':  '↓',
+  '←':  '→',  '→':  '←',
+  // Box-drawing verticals are symmetric — no swap needed
+  '│':  '│',  '║':  '║',
+  '╨':  '╨',  '╤':  '╤',
+};
+
 function mirrorUnicodeLine(line) {
-  // Split on grapheme boundaries as best we can in plain JS.
-  // We use the spread operator which handles most multi-byte Unicode correctly.
-  return [...line].reverse().join("");
+  // Split on grapheme boundaries (spread handles most multi-byte Unicode).
+  return [...line]
+    .map(ch => MIRROR_MAP[ch] ?? ch)
+    .reverse()
+    .join("");
 }
 
 // ---- Main builder ----
@@ -1263,20 +1353,23 @@ const HomeView = {
   },
   methods: {
     async loadCreatureList() {
+      // Fix 5a: use IndexedDB for the creature list so it's not evicted by
+      // other dApps sharing the same github.io localStorage quota.
       const cacheKey  = "steembiota:list:creatures:v1";
-      const cachedRaw = readListCache(cacheKey);
+      const cachedRaw = await readListDB(cacheKey).catch(() => readListCache(cacheKey));
       if (cachedRaw) {
         this.allCreatures = parseSteembiotaPosts(cachedRaw);
         this.listLoading = false;
       } else {
         this.listLoading = true;
       }
-      this.listError   = "";
+      this.listError = "";
       try {
         const raw = await fetchPostsByTag("steembiota", 100);
         const safeRaw = Array.isArray(raw) ? raw : [];
         this.allCreatures = parseSteembiotaPosts(safeRaw);
-        writeListCache(cacheKey, safeRaw);
+        // Persist to IDB (and keep localStorage as fallback via writeListCache).
+        writeListDB(cacheKey, safeRaw).catch(() => writeListCache(cacheKey, safeRaw));
       } catch (e) {
         if (!cachedRaw) this.listError = e.message || "Failed to load creatures.";
       }
@@ -2483,12 +2576,32 @@ const CreatureView = {
       this.permitState = newPermitState;
     },
     onTransferUpdated(newTransferState) {
+      const prevOwner = this.effectiveOwner;
       this.transferState  = newTransferState;
       this.effectiveOwner = newTransferState.effectiveOwner;
-      invalidateGlobalListCaches();
-      invalidateOwnedCachesForUser(this.username);
+
+      // Fix 5b: use targeted cache patching instead of nuking everything.
+      // Only nuke if we can't determine who the previous owner was.
+      if (prevOwner && newTransferState.effectiveOwner) {
+        // Patch the global list so the transferred badge updates immediately.
+        patchListCacheOwner(this.author, this.permlink, newTransferState.effectiveOwner);
+        // Move the item between owned-creature caches surgically.
+        const postData = {
+          author: this.author, permlink: this.permlink,
+          name: this.name, genome: this.genome,
+          age: this.postAge, created: this._postCreated || ""
+        };
+        patchOwnedCacheTransfer(postData, prevOwner, newTransferState.effectiveOwner);
+        // Still clear notifications since those are cheap to re-fetch.
+        removeCacheByPrefix(`steembiota:notifications:${String(this.username).toLowerCase()}:`);
+      } else {
+        // Fallback: full invalidation when owner history is unknown.
+        invalidateGlobalListCaches();
+        invalidateOwnedCachesForUser(this.username);
+      }
       invalidateCreatureCache(this.author, this.permlink);
-      // Void pre-transfer permits when ownership changes
+
+      // Void pre-transfer permits when ownership changes.
       this.permitState = parseBreedPermitsWithTransfer(
         [],   // optimistic — full reload will reconcile on next visit
         newTransferState.effectiveOwner,
@@ -3346,10 +3459,10 @@ const LeaderboardView = {
                 }">{{ entry.icon }} {{ entry.rank }}</span>
               </div>
 
-              <!-- XP bar -->
+              <!-- XP bar — logarithmic scale so new players aren't stuck at 1% -->
               <div style="margin-top:5px;background:#1a1a1a;border-radius:4px;height:5px;overflow:hidden;max-width:360px;">
                 <div :style="{
-                  width: Math.round((entry.xp / topXp) * 100) + '%',
+                  width: Math.round(Math.log1p(entry.xp) / Math.log1p(topXp) * 100) + '%',
                   height: '100%',
                   background: 'linear-gradient(90deg,#2e7d32,#66bb6a)',
                   borderRadius: '4px'
@@ -3480,9 +3593,16 @@ const NotificationsView = {
           delete accepting[key];
           this.accepting = accepting;
           if (res.success) {
-            invalidateGlobalListCaches();
-            invalidateOwnedCachesForUser(this.username);
+            // Fix 5b: surgically add the transferred creature to the new owner's
+            // profile cache rather than wiping everything and forcing a re-fetch.
+            const postData = {
+              author: n.creatureAuthor, permlink: n.creaturePermlink,
+              name: n.creatureName, genome: null, age: 0, created: ""
+            };
+            patchOwnedCacheTransfer(postData, n.actor, this.username);
+            patchListCacheOwner(n.creatureAuthor, n.creaturePermlink, this.username);
             invalidateCreatureCache(n.creatureAuthor, n.creaturePermlink);
+            removeCacheByPrefix(`steembiota:notifications:${String(this.username).toLowerCase()}:`);
             this.notify(`✅ You now own ${n.creatureName}! Visit your profile to see it.`, "success");
             // Remove this offer from the list
             this.notifications = this.notifications.filter(

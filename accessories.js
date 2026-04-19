@@ -1090,6 +1090,12 @@ const WearPanelComponent = {
 
     hasPermission() {
       if (!this.username) return false;
+      // Owner always has permission — guard against stale isAccOwner prop.
+      const normUser = String(this.username).trim().toLowerCase();
+      if (this.permissions?.owner &&
+          normUser === String(this.permissions.owner).trim().toLowerCase()) {
+        return true;
+      }
       return isWearPermitted(this.permissions, this.username);
     },
 
@@ -1435,6 +1441,9 @@ const AccessoryItemView = {
       urlCopied:         false,
       // Wear permissions (v2: per-user grants + public domain)
       permissions: { isPublic: false, grantedUsers: new Set(), pendingRequests: new Map() },
+      // Force-unequip ("Panic Reset") — populated after load when owner checks worn state
+      wornByCreatureKey: null,   // "author/permlink" of the creature currently wearing it
+      forceUnequipping:  false,
     };
   },
 
@@ -1543,7 +1552,79 @@ const AccessoryItemView = {
       }
       this.loading = false;
 
-      if (!this.loadError) this.loadSocial();
+      if (!this.loadError) {
+        this.loadSocial();
+        // If the logged-in user is the owner, check whether this accessory is
+        // stuck on a phantom (tombstoned) creature so we can offer a Force Unequip.
+        if (this.isOwner) this.checkWornByPhantom();
+      }
+    },
+
+    // Checks if this accessory is equipped on a creature that no longer exists
+    // (a "phantom" — post was deleted). If so, exposes the Force Unequip button.
+    async checkWornByPhantom() {
+      if (!this.username) return;
+      try {
+        // Scan the owner's creatures for a wear_on event pointing at this accessory.
+        const owned = await fetchCreaturesOwnedBy(this.username, 100);
+        const targetKey = `${String(this.author).toLowerCase()}/${String(this.permlink).toLowerCase()}`;
+        for (const c of owned) {
+          const wearings = Array.isArray(c.wearings) ? c.wearings
+            : (c.wearing ? [c.wearing] : []);
+          const wearing = wearings.find(w => {
+            const k = `${String(w.accAuthor || "").toLowerCase()}/${String(w.accPermlink || "").toLowerCase()}`;
+            return k === targetKey;
+          });
+          if (wearing) {
+            this.wornByCreatureKey = `${c.author}/${c.permlink}`;
+            return;
+          }
+        }
+        // Also try a direct blockchain scan for wear_on replies on this acc post
+        const replies = await fetchAllReplies(this.author, this.permlink).catch(() => []);
+        for (const r of replies) {
+          let m = {}; try { m = JSON.parse(r.json_metadata || "{}"); } catch {}
+          if (m.steembiota?.type === "wear_on") {
+            const cKey = `${m.steembiota.creature?.author}/${m.steembiota.creature?.permlink}`;
+            if (cKey && cKey !== "/") {
+              // Verify if creature is phantom
+              const post = await fetchPost(
+                m.steembiota.creature.author,
+                m.steembiota.creature.permlink
+              ).catch(() => null);
+              if (!post || isPhantomPost(post)) {
+                this.wornByCreatureKey = cKey;
+                return;
+              }
+            }
+          }
+        }
+      } catch { /* best-effort */ }
+    },
+
+    async forceUnequip() {
+      if (!this.wornByCreatureKey || !window.steem_keychain) return;
+      const [creatureAuthor, creaturePermlink] = this.wornByCreatureKey.split("/");
+      if (!creatureAuthor || !creaturePermlink) return;
+      this.forceUnequipping = true;
+      publishWearOff(
+        this.username,
+        creatureAuthor,
+        creaturePermlink,
+        creatureAuthor,   // creature name unknown (phantom), use author as fallback
+        this.author,
+        this.permlink,
+        this.accName,
+        (res) => {
+          this.forceUnequipping = false;
+          if (res.success) {
+            this.wornByCreatureKey = null;
+            this.notify("✅ Accessory force-unequipped. It is now free to use.", "success");
+          } else {
+            this.notify("Force unequip failed: " + (res.message || "Unknown error"), "error");
+          }
+        }
+      );
     },
 
     async loadSocial() {
@@ -1789,6 +1870,26 @@ const AccessoryItemView = {
               </div>
             </template>
           </div>
+        </div>
+
+        <!-- Force Unequip ("Panic Reset") — shown to owner when accessory is stuck on a phantom creature -->
+        <div v-if="isOwner && wornByCreatureKey"
+          style="max-width:480px;margin:0 auto 16px;padding:14px 16px;border-radius:8px;
+                 background:#1a0a00;border:1px solid #7a3a00;">
+          <div style="font-size:0.88rem;font-weight:bold;color:#ffb74d;margin-bottom:8px;">
+            ⚠️ Accessory Locked on Phantom Creature
+          </div>
+          <p style="font-size:0.78rem;color:#888;margin:0 0 12px;line-height:1.5;">
+            This accessory is equipped on
+            <router-link :to="'/@' + wornByCreatureKey.replace('/', '/')"
+              style="color:#ffb74d;">@{{ wornByCreatureKey }}</router-link>,
+            which appears to be a phantom (deleted post). You cannot visit that page to
+            remove it normally. Use Force Unequip to free this accessory.
+          </p>
+          <button @click="forceUnequip" :disabled="forceUnequipping"
+            style="background:#3a1400;color:#ffb74d;border:1px solid #7a3a00;font-size:0.82rem;padding:6px 16px;">
+            {{ forceUnequipping ? "Publishing…" : "🔓 Force Unequip" }}
+          </button>
         </div>
 
         <!-- Wear permissions panel — visible to all logged-in users -->

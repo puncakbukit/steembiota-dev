@@ -669,10 +669,15 @@ const CreatureCanvasComponent = {
       const canvas = this.$refs.canvas;
       const rect   = canvas.getBoundingClientRect();
 
-      // With DPR scaling the CSS size equals rect dimensions, so no scaling needed.
-      // We work entirely in CSS pixels (same coordinate space as draw()).
-      const clickX = event.clientX - rect.left;
-      const clickY = event.clientY - rect.top;
+      // Translate from viewport pixels to CSS pixels within the canvas element,
+      // then scale to the canvas's logical coordinate space (which may differ from
+      // rect dimensions on high-DPI / pinch-zoomed viewports).
+      // rect.width/height reflect the CSS rendered size; canvas.width/height is
+      // the actual drawing buffer size (set to canvasW/canvasH, i.e. 400×320).
+      const scaleX = canvas.width  / (rect.width  || canvas.width);
+      const scaleY = canvas.height / (rect.height || canvas.height);
+      const clickX = (event.clientX - rect.left) * scaleX;
+      const clickY = (event.clientY - rect.top)  * scaleY;
 
       const W = this.canvasW, H = this.canvasH;
 
@@ -2596,11 +2601,14 @@ const CreatureCardComponent = {
             </button>
             <span v-else style="color:#ef5350;font-size:0.66rem;" title="You upvoted this">✓</span>
           </template>
-          <div v-if="votePickerOpen" class="sb-vote-popover">
+          <!-- Fix 6: @click.stop on the popover container prevents the router-link
+               from navigating when the user interacts with any part of the picker. -->
+          <div v-if="votePickerOpen" class="sb-vote-popover" @click.stop>
             <div @click.stop="votePickerOpen = false" style="position:fixed;inset:0;z-index:-1;"></div>
             <div class="sb-vote-popover-title">❤️ Vote strength</div>
             <div class="sb-vote-popover-pct">{{ votePct }}%</div>
             <input type="range" v-model.number="votePct" min="1" max="100" step="1"
+                   @click.stop
                    style="width:100%;accent-color:#ef5350;cursor:pointer;" />
             <div class="sb-vote-popover-labels"><span>1%</span><span>100%</span></div>
             <button @click.stop="submitVote" class="sb-vote-confirm-btn">Confirm {{ votePct }}%</button>
@@ -3287,10 +3295,13 @@ const BreedingPanelComponent = {
       customTitle: "",
       _facingRight: false,
 
-      // NEW: Matchmaker state
+      // Matchmaker state
       partners: [],
       searchingPartners: false,
-      pendingPartner: null   // partner awaiting user confirmation (fix #9)
+      pendingPartner: null,
+      // Early kinship preview (fix 3b): set when urlB is filled and valid
+      kinshipPreview: null,   // null | "checking" | "ok" | { error: string }
+      _kinshipTimer:  null,
     };
   },
   watch: {
@@ -3299,7 +3310,30 @@ const BreedingPanelComponent = {
       if (val?.url) this.urlA = val.url;
       this.partners       = [];
       this.pendingPartner = null;
-    }
+    },
+    // Fix 3b: trigger early kinship check as soon as Parent B URL looks complete.
+    urlB(val) {
+      this.kinshipPreview = null;
+      clearTimeout(this._kinshipTimer);
+      const trimmed = val.trim();
+      // Only bother if the URL has the @author/permlink shape.
+      if (!trimmed || !/@[a-z0-9.-]+\/[a-z0-9-]+/i.test(trimmed)) return;
+      // Debounce 800 ms so we don't fire on every keystroke.
+      this._kinshipTimer = setTimeout(async () => {
+        if (!this.urlA) return;
+        this.kinshipPreview = "checking";
+        try {
+          const [resA, resB] = await Promise.all([
+            loadGenomeFromPost(this.urlA.trim()),
+            loadGenomeFromPost(trimmed),
+          ]);
+          await checkBreedingCompatibility(resA, resB);
+          this.kinshipPreview = "ok";
+        } catch (e) {
+          this.kinshipPreview = { error: e.message || String(e) };
+        }
+      }, 800);
+    },
   },
   computed: {
     sexLabel() {
@@ -3338,30 +3372,39 @@ const BreedingPanelComponent = {
       this.partners       = [];
       this.pendingPartner = null;
       try {
-        // Fix #1: lockedA now carries genome/author/permlink — these are real values.
         const targetGEN  = this.lockedA.genome.GEN;
         const targetSex  = this.lockedA.genome.SX === 0 ? 1 : 0;
         const selfKey    = this.lockedA.author + "/" + this.lockedA.permlink;
 
-        const raw    = await fetchPostsByTag("steembiota", 100);
+        // Fetch up to 200 posts (two pages) so the matchmaker covers more history.
+        const page1 = await fetchPostsByTag("steembiota", 100);
+        let raw = Array.isArray(page1) ? [...page1] : [];
+        if (raw.length === 100) {
+          const last  = raw[raw.length - 1];
+          const page2 = await fetchPostsByTagPaged("steembiota", 100, last.author, last.permlink);
+          if (Array.isArray(page2)) raw = raw.concat(page2.slice(1));
+        }
+
+        // Supplement with any previously-seen creatures stored in the localStorage
+        // list cache. This lets the matchmaker surface older rare-genus creatures
+        // that have fallen outside the 200-post live query window.
+        try {
+          const cached = readListCache("steembiota:list:creatures:v1");
+          if (Array.isArray(cached)) {
+            const liveKeys = new Set(raw.map(p => p.author + "/" + p.permlink));
+            for (const p of cached) {
+              if (!liveKeys.has(p.author + "/" + p.permlink)) raw.push(p);
+            }
+          }
+        } catch { /* non-fatal */ }
+
         const parsed = parseSteembiotaPosts(raw);
 
-        // Fix #2: fertility window — use base FRT_START/FRT_END as a conservative
-        // filter (feed/play boosts are not available from tag-scan data, but
-        // breedCreatures() will apply the full check with boosts before committing).
         const isFertile = (c) => {
           const g = c.genome;
           return c.age >= g.FRT_START && c.age < g.FRT_END && c.age < g.LIF;
         };
 
-        // Fix #3: exclude duplicates and phantoms.
-        // Fix #4: kinship is too expensive to pre-check (needs N ancestry walks);
-        //         breedCreatures() enforces it fully — partners may still show a
-        //         relative, but the breed step will block it with a clear message.
-        // Fix #5: permit check — owner is always allowed; for non-owners we can
-        //         only do a shallow check here because full permit parsing needs
-        //         fetchAllReplies per post. We flag the card as "permit required"
-        //         and let breedCreatures() give the definitive answer.
         const candidates = parsed.filter(c =>
           c.genome.GEN === targetGEN &&
           c.genome.SX  === targetSex &&
@@ -3371,15 +3414,14 @@ const BreedingPanelComponent = {
           isFertile(c)
         ).slice(0, 5);
 
-        // Annotate each candidate with a shallow permit hint.
         const user = this.username;
         this.partners = candidates.map(c => ({
           ...c,
-          _permitOwned: !user || user === c.author  // owner always free; others: unknown until breed
+          _permitOwned: !user || user === c.author
         }));
 
         if (this.partners.length === 0) {
-          this.$emit("notify", "No compatible partners found in the recent history.", "info");
+          this.$emit("notify", "No compatible partners found in recent history or cached posts.", "info");
         }
       } catch (e) {
         console.error("findPartners:", e);
@@ -3491,8 +3533,16 @@ const BreedingPanelComponent = {
         checkPermit(resB, "Parent B");
 
         // ---- Kinship check ----
-        this.loadStatus = "Checking ancestry and family relationships…";
-        await checkBreedingCompatibility(resA, resB);
+        // Already run at preview time (urlB watcher). Re-run here only if the
+        // preview result was skipped or came back "ok" — avoids 20+ RPC calls
+        // blocking the Breed button when we already have a good answer.
+        if (!this.kinshipPreview || this.kinshipPreview === "checking") {
+          this.loadStatus = "Checking ancestry and family relationships…";
+          await checkBreedingCompatibility(resA, resB);
+        } else if (this.kinshipPreview && this.kinshipPreview.error) {
+          throw new Error(this.kinshipPreview.error);
+        }
+        this.loadStatus = "";
 
         // ---- Breed ----
         this.loadStatus = "";
@@ -3658,6 +3708,19 @@ const BreedingPanelComponent = {
           <!-- Parent B -->
           <div class="sb-parent-input-wrap">
             <input v-model="urlB" type="text" placeholder="Parent B — Steem post URL" class="sb-input-full" />
+            <!-- Fix 3b: early kinship preview shown inline under the URL field -->
+            <div v-if="kinshipPreview === 'checking'"
+              style="font-size:0.75rem;color:#888;margin-top:4px;">
+              🔬 Checking kinship…
+            </div>
+            <div v-else-if="kinshipPreview === 'ok'"
+              style="font-size:0.75rem;color:#66bb6a;margin-top:4px;">
+              ✅ No kinship conflicts — compatible pair.
+            </div>
+            <div v-else-if="kinshipPreview && kinshipPreview.error"
+              style="font-size:0.75rem;color:#ff8a80;margin-top:4px;">
+              ⚠ {{ kinshipPreview.error }}
+            </div>
             <span v-if="genomeB" class="sb-sex-badge-abs" :class="genomeB.SX === 0 ? 'sb-sex-male' : 'sb-sex-female'">{{ parentBSex }}</span>
           </div>
 

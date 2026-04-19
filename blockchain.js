@@ -2553,7 +2553,8 @@ function norm(s) {
 const DB_NAME = "SteemBiotaDB";
 const DB_VERSION = 2; // Incremented for new store
 const STORE_CREATURES = "creature_pages";
-const STORE_ANCESTRY = "ancestry_cache"; // NEW
+const STORE_ANCESTRY  = "ancestry_cache";
+const STORE_LISTS     = "list_cache";     // Fix 5a: replaces localStorage for large list data
 
 function openSBDB() {
   return new Promise((resolve, reject) => {
@@ -2569,6 +2570,10 @@ function openSBDB() {
       // NEW: ancestry cache store
       if (!db.objectStoreNames.contains(STORE_ANCESTRY)) {
         db.createObjectStore(STORE_ANCESTRY, { keyPath: "id" });
+      }
+      // Fix 5a: list cache store (replaces brittle localStorage for large arrays)
+      if (!db.objectStoreNames.contains(STORE_LISTS)) {
+        db.createObjectStore(STORE_LISTS, { keyPath: "id" });
       }
     };
 
@@ -2612,6 +2617,49 @@ async function readAncestryDB(key) {
     });
   } catch {
     return null;
+  }
+}
+
+// ============================================================
+// FIX 5a: IndexedDB LIST CACHE HELPERS
+// Stores the allCreatures raw post array in IDB instead of localStorage
+// so it doesn't get evicted when the domain quota is shared with other dApps.
+// ============================================================
+
+async function writeListDB(key, data, ttlMs = 5 * 60 * 1000) {
+  try {
+    const db = await openSBDB();
+    const tx = db.transaction(STORE_LISTS, "readwrite");
+    tx.objectStore(STORE_LISTS).put({
+      id: key,
+      savedAt: Date.now(),
+      expiresAt: Date.now() + ttlMs,
+      data
+    });
+  } catch (err) {
+    console.warn("IDB list write error:", err);
+    // Graceful fallback: try localStorage via the existing _safeSet helper.
+    try { writeListCache(key, data); } catch {}
+  }
+}
+
+async function readListDB(key) {
+  try {
+    const db = await openSBDB();
+    return new Promise((resolve) => {
+      const tx = db.transaction(STORE_LISTS, "readonly");
+      const req = tx.objectStore(STORE_LISTS).get(key);
+      req.onsuccess = () => {
+        const rec = req.result;
+        if (!rec || !Array.isArray(rec.data)) return resolve(null);
+        if (Date.now() > rec.expiresAt) return resolve(null);
+        resolve(rec.data);
+      };
+      req.onerror = () => resolve(null);
+    });
+  } catch {
+    // Graceful fallback to localStorage.
+    return readListCache(key);
   }
 }
 
