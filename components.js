@@ -2447,6 +2447,7 @@ const CreatureCardComponent = {
       votingInProgress:  false,
       resteemInProgress: false,
       votePickerOpen:    false,
+      votePickerBelow:   false,   // true when card is near top of viewport; popover opens downward
       votePct:           100     // chosen upvote percentage
     };
   },
@@ -2519,6 +2520,10 @@ const CreatureCardComponent = {
     toggleVotePicker(e) {
       e.preventDefault(); e.stopPropagation();
       if (!this.username || !window.steem_keychain || this.hasVoted) return;
+      // If the button is within 200px of the top of the viewport, open the popover
+      // downward so it isn't clipped by the navigation bar or browser chrome.
+      const rect = e.currentTarget.getBoundingClientRect();
+      this.votePickerBelow = rect.top < 200;
       this.votePickerOpen = !this.votePickerOpen;
     },
     submitVote(e) {
@@ -2603,7 +2608,7 @@ const CreatureCardComponent = {
           </template>
           <!-- Fix 6: @click.stop on the popover container prevents the router-link
                from navigating when the user interacts with any part of the picker. -->
-          <div v-if="votePickerOpen" class="sb-vote-popover" @click.stop>
+          <div v-if="votePickerOpen" :class="['sb-vote-popover', votePickerBelow ? 'sb-vote-popover-below' : '']" @click.stop>
             <div @click.stop="votePickerOpen = false" style="position:fixed;inset:0;z-index:-1;"></div>
             <div class="sb-vote-popover-title">❤️ Vote strength</div>
             <div class="sb-vote-popover-pct">{{ votePct }}%</div>

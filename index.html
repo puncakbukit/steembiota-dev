@@ -297,6 +297,12 @@
       z-index: 300;
       box-shadow: 0 4px 18px rgba(0,0,0,0.8);
     }
+    /* When the card is near the top of the viewport, open the popover downward
+       so it isn't clipped by the browser chrome or sticky navigation bar. */
+    .sb-vote-popover-below {
+      bottom: auto;
+      top: calc(100% + 6px);
+    }
     .sb-vote-popover-title {
       font-size: 0.7rem;
       color: #ef9a9a;
@@ -691,7 +697,7 @@
     .sb-mm-cards     { margin-top: 10px; display: flex; gap: 8px; overflow-x: auto; padding-bottom: 10px; }
     .sb-mm-card { flex: 0 0 148px; border-radius: 8px; padding: 8px; cursor: pointer; font-size: 11px; transition: all 0.15s; }
     .sb-mm-card-default  { background: #0a1a1a; border: 1px solid #2e7d32; }
-    .sb-mm-card-selected { background: #0d2d1a; border: 1px solid #66bb6a; outline: 2px solid #66bb6a; }
+    .sb-mm-card-selected { background: #2a1500; border: 2px solid #ffb74d; box-shadow: 0 0 0 3px rgba(255,183,77,0.22), 0 2px 12px rgba(255,183,77,0.15); outline: none; }
     .sb-mm-card-name-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: 3px; }
     .sb-mm-name   { font-weight: bold; color: #a5d6a7; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 90px; }
     .sb-mm-author { color: #555; margin-bottom: 5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -700,7 +706,7 @@
     .sb-mm-mut      { color: #80cbc4; }
     .sb-mm-lif      { color: #666; }
     .sb-mm-permit   { margin-top: 4px; color: #ffe082; font-size: 10px; }
-    .sb-mm-confirm  { margin-top: 5px; padding: 4px 0; border-top: 1px solid #2e7d32; color: #66bb6a; font-size: 10px; font-weight: bold; }
+    .sb-mm-confirm  { margin-top: 6px; padding: 5px 0 3px; border-top: 1px solid #ffb74d; color: #ffb74d; font-size: 10px; font-weight: bold; text-align: center; letter-spacing: 0.02em; }
     .sb-mm-disclaimer { font-size: 10px; color: #444; margin-top: 4px; font-style: italic; }
 
     /* ── Collapsible panels (Permits, Transfer) ── */

@@ -1554,40 +1554,30 @@ const AccessoryItemView = {
 
       if (!this.loadError) {
         this.loadSocial();
-        // If the logged-in user is the owner, check whether this accessory is
-        // stuck on a phantom (tombstoned) creature so we can offer a Force Unequip.
-        if (this.isOwner) this.checkWornByPhantom();
+        // Check whether this accessory is stuck on a phantom creature so we can
+        // offer a Force Unequip. Must be triggered for the effective owner of
+        // the accessory, regardless of who originally published the post.
+        if (this.username && this.username === this.effectiveOwner) this.checkWornByPhantom();
       }
     },
 
     // Checks if this accessory is equipped on a creature that no longer exists
     // (a "phantom" — post was deleted). If so, exposes the Force Unequip button.
+    //
+    // Fix: We exclusively use a direct scan of wear_on replies on the accessory
+    // post itself.  The previous approach scanned fetchCreaturesOwnedBy(username)
+    // which only finds creatures currently owned by the logged-in user — missing
+    // any phantom creature that was owned by a *previous* owner before a transfer.
+    // The reply scan is authoritative regardless of who held the creature.
     async checkWornByPhantom() {
       if (!this.username) return;
       try {
-        // Scan the owner's creatures for a wear_on event pointing at this accessory.
-        const owned = await fetchCreaturesOwnedBy(this.username, 100);
-        const targetKey = `${String(this.author).toLowerCase()}/${String(this.permlink).toLowerCase()}`;
-        for (const c of owned) {
-          const wearings = Array.isArray(c.wearings) ? c.wearings
-            : (c.wearing ? [c.wearing] : []);
-          const wearing = wearings.find(w => {
-            const k = `${String(w.accAuthor || "").toLowerCase()}/${String(w.accPermlink || "").toLowerCase()}`;
-            return k === targetKey;
-          });
-          if (wearing) {
-            this.wornByCreatureKey = `${c.author}/${c.permlink}`;
-            return;
-          }
-        }
-        // Also try a direct blockchain scan for wear_on replies on this acc post
         const replies = await fetchAllReplies(this.author, this.permlink).catch(() => []);
         for (const r of replies) {
           let m = {}; try { m = JSON.parse(r.json_metadata || "{}"); } catch {}
           if (m.steembiota?.type === "wear_on") {
             const cKey = `${m.steembiota.creature?.author}/${m.steembiota.creature?.permlink}`;
             if (cKey && cKey !== "/") {
-              // Verify if creature is phantom
               const post = await fetchPost(
                 m.steembiota.creature.author,
                 m.steembiota.creature.permlink

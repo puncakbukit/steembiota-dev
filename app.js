@@ -2099,6 +2099,8 @@ const CreatureView = {
       wearing:             null,
       // Equipped accessories — newest first
       wearings:            [],
+      // Incremented each time loadCreature() starts; used to cancel stale background fetches.
+      _loadGeneration:     0,
     };
   },
   created() {
@@ -2261,6 +2263,11 @@ const CreatureView = {
     },    
 
     async loadCreature() {
+  // Increment generation so any in-flight background fetch from a previous
+  // navigation can detect it is stale and bail out before writing to this.wearings.
+  this._loadGeneration++;
+  const _thisGen = this._loadGeneration;
+
   this.loading   = true;
   this.loadError = null;
 
@@ -2343,6 +2350,10 @@ const CreatureView = {
 
     // Background accessory fetch
     fetchCreatureWearings(author, permlink, replies).then(async ws => {
+      // Guard: if the user navigated to a different creature while this was
+      // in-flight, _loadGeneration will have been incremented — discard results.
+      if (_thisGen !== this._loadGeneration) return;
+
       if (!ws || (ws.length === 0 && this.wearings.length > 0)) {
         if (!ws) return;
       }
@@ -3315,12 +3326,28 @@ const LeaderboardView = {
           .map(p => `${p.author}/${p.permlink}`)
       );
 
-      // Fetch each author's feed replies AND account votes in parallel.
-      // Comments: up to 100 recent; voters: up to ~1000 recent votes from Steem API.
+      // Fetch each author's feed replies AND account votes with bounded concurrency.
+      // Previously used Promise.allSettled which fires all requests simultaneously;
+      // with 20 authors that could produce 40+ concurrent RPC calls and hit rate limits.
+      // _throttledMap(concurrency=3) keeps at most 3 in-flight at a time per batch.
       const authors = basePassed.map(e => e.author);
-      const [commentResults, voteResults] = await Promise.all([
-        Promise.allSettled(authors.map(a => fetchUserComments(a, 100))),
-        Promise.allSettled(authors.map(a => fetchAccountVotes(a))),
+      const commentResults = [];
+      const voteResults    = [];
+      await Promise.all([
+        _throttledMap(authors, 3, async (a) => {
+          try {
+            commentResults.push({ status: "fulfilled", value: await fetchUserComments(a, 100) });
+          } catch (err) {
+            commentResults.push({ status: "rejected", reason: err });
+          }
+        }),
+        _throttledMap(authors, 3, async (a) => {
+          try {
+            voteResults.push({ status: "fulfilled", value: await fetchAccountVotes(a) });
+          } catch (err) {
+            voteResults.push({ status: "rejected", reason: err });
+          }
+        }),
       ]);
 
       // Count feed replies per author
