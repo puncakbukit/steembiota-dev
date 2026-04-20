@@ -1749,7 +1749,9 @@ buildPhenotype(genome, age, feedState) {
       //
       // We still call setTransform() here to reset any accumulated CTM from the
       // previous frame before painting — this is cheap and correct.
-      const dpr = this._dpr || window.devicePixelRatio || 1;
+      const dpr  = this._dpr || window.devicePixelRatio || 1;
+      const cssW = this.canvasW;
+      const cssH = this.canvasH;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // reset CTM + apply DPR scale
 
       const W = cssW, H = cssH;    // all drawing code uses CSS-pixel coords
