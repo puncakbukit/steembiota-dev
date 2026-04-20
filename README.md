@@ -116,6 +116,18 @@ If a post is deleted on Steem (`delete_comment` op), the API returns the post wi
 
 Every creature is rendered procedurally from its genome on a 400×320 HTML5 Canvas (configurable via `canvasW`/`canvasH` props — the Upload preview uses 200×180). The same genome always produces the same base visual. Three sources of per-load variation are layered on top: random facing direction, random pose, and live expression driven by game state.
 
+### Performance: Viewport-Aware Rendering
+
+On pages with large creature grids (Home, Profile), each creature canvas runs its own `requestAnimationFrame` loop at up to 60 fps. To prevent battery drain and scroll jank on mobile, `CreatureCanvasComponent` uses an **`IntersectionObserver`** to pause the rAF loop for any canvas that has scrolled out of the visible viewport and resume it immediately when it scrolls back in. Only canvases that are actually on screen consume CPU and GPU resources. The observer is torn down in `beforeUnmount()` alongside the `ResizeObserver`.
+
+### Ghost Navigation Protection
+
+`CreatureView` watches `$route.params.permlink` in addition to loading data in `created()`. When a user navigates from one creature to another via a kinship link, browser back/forward, or any other in-app navigation that reuses the same component instance, the watcher fires and reloads the creature explicitly. Without this, Vue Router's component reuse would leave stale content on screen while the URL updated.
+
+### Canvas Sizing and DPR
+
+Canvas backing-store dimensions are calculated once in `mounted()` via `_applyDpr()` and only recalculated when the CSS size or `devicePixelRatio` actually changes (monitored by a `ResizeObserver`). This prevents the browser from re-initialising the backing buffer on every frame — a significant source of CPU and memory overhead on high-DPR displays and during pinch-zoom.
+
 ### Phenotype Derivation (`buildPhenotype`)
 
 All renderable traits are derived in a single `buildPhenotype(genome, age, feedState)` call before any drawing occurs. Three seeded mulberry32 PRNGs are instantiated — one per seed gene — and consumed in a fixed order so the mapping from genome integer to visual output is always identical:
@@ -155,7 +167,7 @@ Body scale and ornament visibility evolve continuously through the lifecycle:
 8. **Chest marking** — radial gradient spot clipped to the torso ellipse; present when `hasChestMark` and `ornamentScale > 0.2`.
 9. **Body pattern** — spots (10 circles) or dapple (5 ellipses) clipped to torso; present when `patternType > 0` and `patternOpacity > 0.1`.
 10. **Worn wings accessory** — composited from an off-screen canvas before neck so the torso occludes wing roots.
-11. **Necklace underlay** — composited before neck/head so creature geometry naturally occludes the top arc.
+11. **Necklace underlay** — composited before neck/head so creature geometry naturally occludes the top arc. Rendering uses `destination-over` compositing against the already-drawn body rather than re-drawing the neck bezier geometry. This eliminates visible seams and "ghost edges" that appeared on creatures with extreme MOR values when the repainted neck path did not align perfectly with the original.
 12. **Neck** — bezier quad fill connecting torso to head, angle driven by `neckAngle` pose transform.
 13. **Mane wisps** — 7 short angled strokes along the neck/back ridge; drawn when `hasMane` and `ornamentScale > 0.2`.
 14. **Head** — radial gradient circle.
@@ -228,6 +240,13 @@ Expressions are derived from live game state (`feedState` + `activityState`) and
 
 Play mood adds up to +25% to the effective health score before expression selection (`boosted = min(health + moodPct * 0.25, 1.0)`). Expressions only appear from Toddler stage onward (`pct >= 0.05`).
 
+### Anticipation Pose
+
+When a Steem Keychain popup opens for a Feed, Play, or Walk transaction, the creature immediately switches to the **alert** pose and expression as a visual cue that a transaction is pending. This anticipation pose is cleared as soon as the Keychain response arrives:
+
+- **On success** — the full celebratory reaction animation plays (see below), pre-empting the anticipation pose.
+- **On rejection or failure** — the pose is cleared immediately and the autonomous behaviour loop resumes. The creature does not stay frozen waiting for the 12-second timeout.
+
 ### Reaction Animation
 
 Whenever a creature is successfully fed, played with, or walked, the canvas plays a short reaction sequence. The creature cycles through four fixed pose+expression pairs — Standing/Alert → Alert/Alert → Playful/Excited → Sitting/Happy — repeated 2 or 3 times at random (chosen per trigger), with each step lasting 2000–3000 ms at random. The autonomous behaviour loop is paused for the duration (velocities zeroed, position preserved). After the sequence finishes, both `animPose` and `animExpression` are cleared and autonomous behaviour resumes. Any in-progress animation is cancelled and restarted cleanly if another interaction fires while it is running.
@@ -236,9 +255,11 @@ Whenever a creature is successfully fed, played with, or walked, the canvas play
 
 Clicking the canvas triggers a hit test against the body ellipse using the standard ellipse equation `(dx/a)² + (dy/b)² ≤ 1`. A hit on the body fires a **poke reaction** — a short 1.2–1.5 s flash through three moods cycling in order: Surprised (alert/alert), Happy (playful/happy), Grumpy (sitting/hungry). A click on empty canvas space triggers **walk-to**: the creature walks directly toward the clicked point at 40 px/s using a delta-time loop, arriving within 6 px before returning to idle.
 
+**Mobile tap dead-zone:** taps that land within 1.5× the body ellipse radius of the creature's current centre are treated as missed pokes rather than walk-to commands. Without this guard, the creature's bobbing motion between the draw call and the touch event causes edge taps to be misclassified as empty-space clicks, making the creature walk away from the user's finger just as they try to interact with it.
+
 ### Autonomous Behaviour
 
-Beyond static posing, the creature canvas runs a continuous movement loop (`requestAnimationFrame`) for all non-fossil creatures:
+Beyond static posing, the creature canvas runs a continuous movement loop (`requestAnimationFrame`) for all non-fossil creatures. The loop is automatically suspended by the `IntersectionObserver` when the canvas is off-screen (see Performance section above).
 
 - **Idle** — creature stands still; transitions to walk/run/jump/sleep after a random delay (staggered 0–3 s on mount to avoid lockstep on multi-creature pages).
 - **Walk** — horizontal + vertical velocity; leg cycle at 2.5 Hz; body bob at 1.1 Hz amplitude 5 px.
@@ -248,6 +269,11 @@ Beyond static posing, the creature canvas runs a continuous movement loop (`requ
 - **Walk-to** — directed walk toward a canvas-offset target (from canvas click); arrives within 6 px then idles.
 
 Edge bounce: the creature flips facing direction and reverses velocity when it reaches ±38% of canvas width or height. Position is persisted in `sessionStorage` keyed on `sb_pos_{GEN}_{MOR}` so the creature remembers where it was between route changes within the same browsing session.
+
+### Accessibility
+
+- **Screen reader support for Unicode art** — the `<pre>` unicode art block has `aria-hidden="true"` so screen readers skip the raw box-drawing characters. A visually-hidden `<span>` immediately following it provides a concise text summary: creature name, sex, lifecycle stage, and health state.
+- **Focus management** — when navigating from a creature grid to a creature detail page, keyboard focus is shifted programmatically to the creature name heading (`<h2 data-focus-target>`). This uses `tabindex="-1"` so the heading is focusable without entering the natural tab order. Screen-reader users hear the creature name announced immediately on arrival rather than being left at the originating link or document body.
 
 ---
 
@@ -279,6 +305,7 @@ SteemBiota supports procedurally generated, on-chain **accessories** in addition
 - Published accessories are regular Steem posts with `json_metadata.steembiota.type = "accessory"`.
 - Accessories support the same transfer offer / accept / cancel ownership flow as creatures.
 - Accessory item pages live at `/#/acc/@author/permlink`.
+- Navigating directly between two accessory pages (via notifications or browser back/forward) always reloads the correct accessory data, because `AccessoryItemView` watches `$route.params.permlink` in addition to loading on `created()`.
 
 ### Accessory templates
 
@@ -341,6 +368,13 @@ The creature post is the source of truth for current equip state. For each acces
 - Owners can paste an accessory URL or pick from a "closet" (owned accessories) to equip.
 - The app checks permission before equipping, and prevents equipping if that accessory is already worn by another creature.
 - If permission is revoked after equipping, the accessory remains visible as **permission lapsed** until removed.
+- **Closet pagination** — the closet renders at most 20 accessories at a time with a "Load More" button. Each `AccessoryCanvasComponent` allocates a GPU-backed canvas; rendering hundreds simultaneously causes GPU memory exhaustion and severe jank on mobile.
+- **Ghost accessory state** — all transient equip-panel UI (URL input, preview, search query, visible count) is reset automatically when the user navigates from one creature to another, so state from a previous creature's panel never bleeds through.
+- **Fossil blind-spot** — the equip form is hidden when a creature is a fossil, but the Remove button remains visible so owners can retrieve accessories from fossilised creatures.
+- **Wear exclusivity** — before equipping, the app checks the accessory post's own reply history (not the current owner's creature list) to determine whether the accessory is already worn. This catches the case where an accessory is still logically worn by a creature that was transferred to a different user — preventing two creatures from wearing the same accessory simultaneously.
+- **Post-transfer lock-out ("Panic Reset")** — after receiving an accessory via transfer, the new owner may find it is still equipped on a creature they don't own (or a phantom creature whose post was deleted). The accessory page detects both conditions and surfaces a **🚨 Force Unequip** button, letting the new owner publish a `wear_off` reply and reclaim the accessory without needing access to the other creature's page.
+- **Public domain confirmation** — the "Make Public" (`wear_public`) action is guarded by a browser confirmation dialog that explains the consequences: any user who equips the accessory while it is public retains that equip even if the owner later reverts to private mode. This prevents accidental irreversible broadcasts.
+- **Layer reorder** — when multiple accessories are worn simultaneously, the owner can reorder their draw layers using ▲/▼ controls in the equip panel. Items later in the list are drawn on top.
 
 ---
 
@@ -422,6 +456,8 @@ All of the following must be true:
 
 Each gene is inherited from one parent chosen at random (50/50), then potentially mutated. Mutation probability per gene = 1% × (1 + MUT_A + MUT_B). Breeding is deterministic: the same two parents always produce the same child, using a seeded PRNG (mulberry32) keyed on both parent genomes.
 
+The breed nonce incorporates the logged-in username and a random integer in addition to the parent URLs and a millisecond timestamp. This ensures that two different users breeding the same parents produce different children, and that two rapid clicks from the same user within the same millisecond produce different genomes and permlinks rather than identical duplicates.
+
 ### Speciation
 
 There is a 0.5% chance per breeding event that the child's GEN mutates to an entirely new value, creating a new genus. Speciated offspring cannot breed with their parents' genus.
@@ -437,6 +473,14 @@ SteemBiota walks the blockchain ancestry graph before allowing a breed. A creatu
 5. Its own and its partner's siblings' children and all descendants downward
 
 The check is entirely client-side using BFS ancestry traversal (up to 12 generations). If blocked, the UI names the specific relationship that prevents breeding.
+
+**Early kinship preview** — as soon as Parent B's URL is typed and resolves to a valid `@author/permlink` shape, a background kinship check begins automatically (debounced 800 ms). An inline result appears below the URL field — ✅ No kinship conflicts or ⚠ followed by the specific blocking relationship — before the user clicks Breed. This prevents the Breed button from triggering a full compatibility check only to immediately fail with a kinship error, avoiding wasted RPC calls and user confusion.
+
+**Kinship deadlock prevention** — the Breed button is disabled while a background kinship check is already running. Without this guard, clicking Breed during the 800 ms debounce window triggers a second full ancestor walk, doubling RPC load and creating a race condition where `loadStatus` can be overwritten mid-flight.
+
+### Publish Offspring — Race Condition Protection
+
+The **📡 Publish Offspring** button is protected against double-spend. The publishing lock is set synchronously as the very first step when the button is clicked — before any guards or async operations. Subsequent clicks are silently dropped. While a Keychain request is in-flight, a full-panel **"Transaction Pending…"** overlay covers the breed section, blocking all further interaction until the new creature's page loads on success (or the error state is shown on failure).
 
 ---
 
@@ -466,7 +510,7 @@ The Breeding Matchmaker simplifies the process of finding compatible mates for y
     *   **Opposite Sex:** If your creature is Male, it looks for Females, and vice-versa.
     *   **Fertility Check:** Only displays creatures currently within their fertile window (accounting for age and lifespan).
     *   **Health & Lifecycle:** Prioritizes living creatures over fossils and filters out "Phantoms" (deleted posts).
-3.  **Two-Step Confirmation:** To prevent accidental breeding, the UI requires a "Stage and Confirm" workflow. Click a partner once to view their stats, and click again to initiate the on-chain breeding process.
+3.  **Two-Step Confirmation:** To prevent accidental breeding, the UI requires a "Stage and Confirm" workflow. Click a partner once to stage them (their card highlights and shows a "Tap again to breed ✓" prompt); click the same card a second time to initiate the on-chain breeding process. Clicking a different card replaces the staged partner without breeding.
 
 ---
 
@@ -492,7 +536,9 @@ The app does not convert pixels directly into creature art. Instead it extracts 
 | `litVariance` | Variance of per-pixel lightness values — proxy for contrast and fur texture | `ORN` (30% weight) |
 | `edgeDensity` | Fraction of pixels with Sobel gradient magnitude > 0.18 (computed on a greyscale luminance matrix) | `APP` (linear map); `ORN` (70% weight) |
 | `colourfulness` | Fraction of opaque pixels with saturation > 12% | `ORN` (40% weight) |
-| `aspectRatio` | Width ÷ height of the non-near-white silhouette bounding box (pixels with lightness < 90%); falls back to original image W/H if detection fails | `MOR` |
+| `aspectRatio` | Width ÷ height of the non-near-white silhouette bounding box (pixels with lightness < 90%); falls back to original image W/H if the silhouette covers less than 5% of the canvas area | `MOR` |
+
+**Low-contrast detection.** If the detected silhouette bounding box covers less than 5% of the canvas area (e.g. a white animal on a white background), `aspectRatio` falls back to the full image dimensions and a **⚠ Low contrast detected** warning banner is shown in the preview step, prompting the user to re-upload with a darker background. The genome is still generated and published normally — only the body-shape accuracy is reduced in this case.
 
 **Step 3 — Genome fitting.** Each statistic is mapped to one or more genome genes:
 
@@ -508,7 +554,9 @@ The app does not convert pixels directly into creature art. Instead it extracts 
 | `SX` | Random | `floor(random() × 2)`. |
 | `MUT` | Random | `floor(random() × 3)`. |
 
-### Reroll
+### URL Parsing Robustness
+
+All Steem URL inputs throughout the app (breeding parent fields, accessory equip field, and the URL parser used when loading genomes) strip hidden Unicode characters — zero-width spaces (U+200B–U+200D) and the BOM (U+FEFF) — that some Steem frontends inject into copied URLs. The parser also ignores trailing query parameters and fragments (e.g. `?node=...`, `#top`) that steemit.com and other frontends append to share URLs. Previously, any URL with a suffix caused a hard "Cannot parse Steem URL" error even for perfectly valid creature links.
 
 Because `APP` and `ORN` include random jitter, and `GEN` is drawn randomly among valid palette-matching integers, clicking **🎲 Reroll** re-runs `imageToGenome()` on the cached `HTMLImageElement` and produces a different creature that still shares the same colour family and body proportions as the source image.
 
@@ -524,7 +572,7 @@ The resulting genome is published as a standard `type: "founder"` creature post 
 
 1. **Pick** — drag-and-drop zone or file browser (JPG, PNG, GIF, WebP); optional genus pre-override
 2. **Analyse** — brief spinner while the browser downsamples and runs pixel stats + genome fitting
-3. **Preview** — side-by-side: source image left, generated creature canvas (200×180) right; stats table showing each detected trait and its genome mapping; editable post title; genus override; **🎲 Reroll**, **🌿 Publish Creature**, and **✕ Start over** buttons
+3. **Preview** — side-by-side: source image left, generated creature canvas (200×180) right; stats table showing each detected trait and its genome mapping; low-contrast warning if applicable; editable post title; genus override; **🎲 Reroll**, **🌿 Publish Creature**, and **✕ Start over** buttons
 4. **Published** — on success, navigates directly to the new creature's page
 
 ---
@@ -558,6 +606,8 @@ When a creature has been transferred, the creature page shows a 🤝 "Owned by @
 - Only the named recipient may accept.
 - Permits issued before a completed transfer are voided automatically (`permitsValidFrom` timestamp).
 - Transfer history is stored on-chain and displayed in the Transfer panel's history log.
+- When checking whether a pending offer has been cancelled, only `transfer_cancel` replies with a timestamp **strictly after** the offer's timestamp are considered. This prevents an old cancellation from hiding a newer valid offer by the same owner.
+- **Recipient account verification** — before publishing a `transfer_offer`, the app calls `getAccounts` to verify the recipient username exists on Steem. A typo (e.g. `@hibbit` instead of `@hubbit`) would otherwise leave the creature permanently stuck in "Pending Transfer" state until the owner manually cancels. The verification adds ~100 ms but prevents this entire class of stuck-creature bugs.
 
 ---
 
@@ -679,9 +729,36 @@ Breeding an offspring is worth **5× more XP than a founder** because it require
 
 The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetches up to 200 creature posts via cursor-based pagination (Steem's API hard-limits responses to 100 posts per call), then fetches each author's recent comment history and account vote history in parallel. All six XP sources — founders, offspring, feeds given, upvotes cast, genera contributed, and speciation events — are included in the ranking. Comment history is fetched up to a limit of 100; account votes up to the last ~1000 as returned by the Steem API. Very prolific feeders or voters may be slightly under-counted, but this keeps leaderboard load time reasonable. The breakdown line beneath each entry shows 🌱 founders · 🐣 offspring · 🍯 feeds (if any) · ❤️ upvotes (if any) · 🔬 genera, and ⚡ speciation events.
 
+**Rate-limit protection** — RPC calls for each author's comment and vote data are made with a concurrency limit of 3 in-flight requests at a time (via `_throttledMap`). Previously, `Promise.allSettled` fired all 20 authors' requests simultaneously (up to 40+ concurrent RPC calls), reliably hitting the public node's rate limit and causing the leaderboard to hang or show a load error halfway through.
+
+**Per-author XP caching** — each author's comment and vote data is cached individually for 24 hours. On revisits the leaderboard can reconstruct itself entirely from cache without any RPC calls, eliminating the 429 errors that previously triggered on every page load. The overall leaderboard TTL was raised from 15 minutes to 24 hours for the same reason.
+
+**Partial-result retry** — when some authors' XP data fails to load (typically due to a rate-limit on the public RPC node), a partial-result banner is shown and a **Retry** button appears. Clicking it re-fetches only the failed authors at a reduced concurrency of 2. Authors whose data was already successfully fetched and cached are not re-requested.
+
 ---
 
-## Creature Grid Filters
+## Caching
+
+SteemBiota caches blockchain data client-side to reduce RPC load and improve perceived performance. All caches are keyed under `steembiota:*` in localStorage or IndexedDB.
+
+| Cache | Storage | TTL | Scope |
+|---|---|---|---|
+| Creature list (Home grid) | IndexedDB | 5 min | Global |
+| Creature page | IndexedDB | 10 min | Per creature |
+| Ancestry graph | IndexedDB | persistent | Per creature |
+| Profile owned creatures | localStorage | 30 min | Per user |
+| Profile owned accessories | localStorage | 30 min | Per user |
+| Notifications | localStorage | 60 s | Per user |
+| Leaderboard | localStorage | 24 h | Global |
+| Per-author XP detail | localStorage | 24 h | Per author |
+
+**IndexedDB for the creature list** — the global creature list was moved from localStorage to IndexedDB so it is not evicted by other dApps sharing the same `github.io` localStorage quota. localStorage remains a fallback if IndexedDB is unavailable.
+
+**Global invalidation stamp** — `invalidateGlobalListCaches()` writes a version timestamp to `steembiota:global:version`. Every `readListCache()` call compares this stamp against the entry's `savedAt`. Any cache entry written before the most recent invalidation event (e.g. a completed transfer) is treated as stale immediately, regardless of its own TTL. This ensures the "All Creatures" grid never shows a stale owner after a transfer.
+
+**Surgical cache patching** — after a successful ownership transfer, only the affected item's `effectiveOwner` field is patched in the creature list cache and both owners' profile caches, instead of evicting all caches and forcing a full re-fetch. The previous owner's cache has the entry removed; the new owner's cache has the updated entry prepended.
+
+**localStorage quota eviction** — on `QuotaExceededError`, the oldest `steembiota:*` entries are evicted one by one (sorted by `savedAt`) until the write succeeds or all entries are exhausted. A warning is logged if space cannot be recovered.
 
 Both the Home page and individual Profile pages include a filter bar above the creature grid:
 
@@ -689,7 +766,7 @@ Both the Home page and individual Profile pages include a filter bar above the c
 - **Sex** — filter by Male / Female
 - **Age** — filter by age in days using `<`, `=`, or `>` operators with a numeric input
 
-Filters can be combined and are cleared individually. Pagination resets automatically when a filter changes.
+Filters can be combined and are cleared individually. Pagination resets to page 1 automatically whenever any filter changes — preventing the case where a user on a high page number applies a narrow filter and sees an empty grid even though results exist on page 1.
 
 ---
 
@@ -864,6 +941,12 @@ Derived from the post title: lowercased, whitespace becomes hyphens, non-alphanu
 **Anti-dumping ownership** — Transfers require the recipient's explicit on-chain acceptance. Creatures cannot be forced on unwilling users.
 
 **Opt-in breeding** — Creatures are closed to external breeding by default. Owners must explicitly grant named permits, preventing unsolicited use of their creatures as parents.
+
+**Mobile-first interactions** — Hover effects on creature cards are restricted to devices that support true hover (via `@media (hover: hover)`), preventing "sticky" highlight borders on touch screens after a tap. Canvas tap hit-testing includes a dead-zone around the creature body to compensate for bobbing motion between draw and touch events.
+
+**Defensive caching** — Multi-tier caching (IndexedDB → localStorage → live fetch) with global invalidation stamps, surgical patching after transfers, and quota-exceeded eviction ensures the UI stays responsive and consistent across slow connections and shared-origin storage constraints.
+
+**Resilient URL parsing** — All Steem URL inputs strip zero-width Unicode characters and tolerate trailing query parameters and fragments, so URLs copied from any Steem frontend work without user intervention.
 
 ---
 
