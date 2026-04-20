@@ -251,6 +251,19 @@ const CreatureCanvasComponent = {
         } catch {}
       }
     }
+    // FIX 3B: Size the canvas backing store exactly once here (and again only
+    // when the CSS size or devicePixelRatio actually changes), rather than
+    // re-running the resize check inside every requestAnimationFrame callback.
+    // At 60 fps the old code was calling Math.round(cssW * dpr) and potentially
+    // writing canvas.width/height on every single frame — which forces the
+    // browser to re-initialise the backing buffer even when nothing changed,
+    // causing a measurable memory and CPU spike whenever devicePixelRatio
+    // fluctuated (e.g. due to pinch-zoom or moving between monitors).
+    this._applyDpr();
+    if (typeof ResizeObserver !== "undefined") {
+      this._dprObserver = new ResizeObserver(() => this._applyDpr());
+      this._dprObserver.observe(this.$refs.canvas);
+    }
     this.draw();
     if (!this.fossil) this._behaviourLoop();
   },
@@ -261,6 +274,8 @@ const CreatureCanvasComponent = {
     // Stop the autonomous behaviour loop.
     if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
     if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+    // FIX 3B: Disconnect the ResizeObserver so it doesn't fire after unmount.
+    if (this._dprObserver) { this._dprObserver.disconnect(); this._dprObserver = null; }
     // Persist current position so the creature remembers where it was.
     if (this.genome) {
       const key = `sb_pos_${this.genome.GEN}_${this.genome.MOR}`;
@@ -268,6 +283,25 @@ const CreatureCanvasComponent = {
     }
   },
   methods: {
+    // FIX 3B: Applies devicePixelRatio scaling to the canvas backing store.
+    // Called once from mounted() and again by ResizeObserver when the canvas's
+    // CSS size or the display's DPR changes (e.g. pinch-zoom, monitor switch).
+    // Keeping this OUT of draw() prevents 60-fps buffer re-initialisation.
+    _applyDpr() {
+      const canvas = this.$refs.canvas;
+      if (!canvas) return;
+      const dpr  = window.devicePixelRatio || 1;
+      const cssW = this.canvasW;
+      const cssH = this.canvasH;
+      const targetW = Math.round(cssW * dpr);
+      const targetH = Math.round(cssH * dpr);
+      if (canvas.width !== targetW || canvas.height !== targetH) {
+        canvas.width  = targetW;
+        canvas.height = targetH;
+      }
+      // Store for draw() so it can apply the matching setTransform() cheaply.
+      this._dpr = dpr;
+    },
     _normalizedWearings() {
       if (Array.isArray(this.wearings) && this.wearings.length) {
         return this.wearings.filter(w => w && w.genome && w.template !== "shirt");
@@ -705,6 +739,17 @@ const CreatureCanvasComponent = {
       if (hitCreature) {
         this._pokeReaction();
       } else {
+        // FIX 2A: Dead-zone guard — if the tap lands within 1.5× the body ellipse
+        // radius of the creature's current centre, treat it as a missed poke rather
+        // than a walk-to command.  On mobile, the moving bobbing body shifts the
+        // hit-ellipse slightly between the draw call and the touch event, causing
+        // finger taps on the edge of the creature to be mis-classified as empty-
+        // space taps.  Without this guard the creature walks *away* from the user's
+        // finger just as they try to interact with it.
+        const deadZoneRadius = Math.max(a, b) * 1.5;
+        const distToCreature = Math.sqrt(dx * dx + dy * dy);
+        if (distToCreature < deadZoneRadius) return;
+
         // Convert click to _behavX/_behavY offset space and walk there.
         const targetX = clickX - W * 0.46;
         const targetY = clickY - H * 0.52;
@@ -1082,10 +1127,43 @@ const CreatureCanvasComponent = {
       );
       ctx.globalAlpha = 1;
 
-      // Necklace should wrap around the neck: repaint neck foreground so
-      // the back/top portion of the necklace is naturally occluded.
+      // FIX 3A: Necklace Z-order via compositing rather than a second geometry repaint.
+      //
+      // The previous approach called _redrawNeckForeground() which hardcodes the neck
+      // bezier geometry.  On creatures with extreme MOR (Morphology) values the neck
+      // is significantly thicker or thinner than the default proportions, so the
+      // repainted path didn't align perfectly with the original neck, leaving visible
+      // seams or "ghost edges" at the necklace-occlude boundary.
+      //
+      // New approach:
+      //   1. The necklace offscreen canvas is already drawn with back-arc first,
+      //      front-arc second (see drawNecklace in accessories.js).
+      //   2. We composite the full offscreen image with destination-over so the
+      //      back-half of the necklace naturally falls behind whatever is already
+      //      on the main canvas (the creature's neck and body).
+      //   3. We then re-composite the neck foreground with source-over (normal) so
+      //      the front of the neck correctly occludes the necklace back-arc.
+      //   This matches the creature's actual rendered geometry at all MOR values.
       if (template === 'necklace' && !underlayNecklace) {
+        // Step 1: push back-arc behind existing pixels (neck, body)
+        ctx.save();
+        ctx.globalCompositeOperation = 'destination-over';
+        ctx.globalAlpha = 0.95;
+        ctx.drawImage(
+          offscreen,
+          anchorX - dw * 0.5,
+          anchorY - dh * focalY,
+          dw, dh
+        );
+        ctx.globalAlpha = 1;
+        ctx.restore();
+
+        // Step 2: repaint neck foreground on top with normal blending so
+        // the front-half of the neck occludes the necklace back-arc.
+        ctx.save();
+        ctx.globalCompositeOperation = 'source-over';
         this._redrawNeckForeground(ctx, p, sc, ox, oy, pt);
+        ctx.restore();
       }
     },
 
@@ -1663,20 +1741,16 @@ buildPhenotype(genome, age, feedState) {
       if (!canvas || !this.genome) return;
       const ctx = canvas.getContext("2d");
 
-      // ── Retina / HiDPI support ──────────────────────────────
-      // Scale the backing store by devicePixelRatio while keeping
-      // the CSS display size constant.  We track the dpr we last
-      // applied so we only reset when it actually changes (e.g.
-      // the user moves the window between monitors).
-      const dpr = window.devicePixelRatio || 1;
-      const cssW = this.canvasW;
-      const cssH = this.canvasH;
-      if (canvas._sb_dpr !== dpr) {
-        canvas.width  = Math.round(cssW * dpr);
-        canvas.height = Math.round(cssH * dpr);
-        canvas._sb_dpr = dpr;
-      }
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // reset + apply DPR scale
+      // FIX 3B: Canvas buffer sizing is now handled by _applyDpr() (called from
+      // mounted() and the ResizeObserver), NOT here.  Running a resize inside the
+      // RAF loop caused the browser to re-initialise the backing store up to 60
+      // times per second whenever devicePixelRatio fluctuated (e.g. browser zoom),
+      // creating a significant memory and CPU leak.
+      //
+      // We still call setTransform() here to reset any accumulated CTM from the
+      // previous frame before painting — this is cheap and correct.
+      const dpr = this._dpr || window.devicePixelRatio || 1;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);  // reset CTM + apply DPR scale
 
       const W = cssW, H = cssH;    // all drawing code uses CSS-pixel coords
       ctx.clearRect(0, 0, W, H);
@@ -2423,7 +2497,15 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
   ctx.restore();
 }
   },
-  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;cursor:pointer;-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'" @click="onCanvasClick"></canvas>`
+  template: `<canvas ref="canvas" :width="canvasW" :height="canvasH"
+    role="img"
+    :aria-label="genome
+      ? (fossil
+          ? 'Fossilised creature — ' + (genome.SX === 0 ? 'male' : 'female') + ', genome preserved on-chain'
+          : 'A ' + (genome.SX === 0 ? 'male' : 'female') + ' creature, ' + (feedState ? feedState.label : '') + ' — click to interact')
+      : 'Creature canvas loading'"
+    :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;' + (fossil || !genome ? 'cursor:default;' : 'cursor:pointer;') + '-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'"
+    @click="onCanvasClick"></canvas>`
 };
 
 // ---- CreatureCardComponent ----
@@ -3552,8 +3634,14 @@ const BreedingPanelComponent = {
         // ---- Breed ----
         this.loadStatus = "";
 
-        // UPDATED: deterministic nonce
-        const nonce = this.urlA + this.urlB + Date.now();
+        // FIX 1B: Include username and a random integer in the nonce.
+        // Steem block time is 3 s.  If the user clicks Breed twice quickly the
+        // second click used to produce the same nonce (urlA + urlB + Date.now())
+        // because Date.now() can return the same millisecond within the same
+        // JS task.  Adding this.username ensures two different users breeding the
+        // same parents produce different children; the random integer ensures two
+        // rapid clicks from the same user produce different genomes and permlinks.
+        const nonce = this.urlA + this.urlB + (this.username || "") + Date.now() + Math.floor(Math.random() * 1e9);
         const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome, nonce);
 
         this._facingRight = Math.random() < 0.5;

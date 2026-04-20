@@ -2516,31 +2516,45 @@ async function fetchCreatureWearing(creatureAuthor, creaturePermlink, creatureRe
  * Checks if ANY creature owned by the user is already wearing this specific accessory.
  * Returns the name of the creature if found, otherwise null.
  */
+// FIX 1A: Authoritative exclusivity check via the accessory's OWN reply history.
+//
+// The previous implementation scanned creatures currently owned by `username`,
+// which missed accessories still on-chain as "worn" by a creature that had been
+// transferred to another user.  After a transfer the old user's closet would
+// show the accessory as free — letting two creatures wear it simultaneously.
+//
+// The correct source of truth is the accessory post's reply thread: every
+// wear_on event is recorded there regardless of who currently owns the creature.
+// We walk the replies in chronological order; the last unmatched wear_on wins.
+// A wear_off closes the most recent wear_on.  The function returns the wearing
+// creature's display key (e.g. "author/permlink") or null if the item is free.
 async function findCreatureWearingAccessory(username, accAuthor, accPermlink) {
-  // Use the cached owned creatures list (which now contains 'wearing' arrays)
-  // This avoids re-fetching replies for every single creature.
-  const cacheKey = `steembiota:owned:creatures:${String(username).toLowerCase()}:v2`;
-  let owned = readOwnedProfileCache(cacheKey);
-  
-  if (!owned) {
-    // Fallback if cache is empty (legacy behavior path)
-    owned = await fetchCreaturesOwnedBy(username);
+  // username parameter is kept for call-site compatibility but is no longer
+  // used to filter — the scan is global across all owners.
+  void username;
+
+  let replies = [];
+  try {
+    replies = await fetchAllReplies(accAuthor, accPermlink);
+  } catch {
+    return null; // network failure → optimistic: allow equip attempt
   }
 
-  const targetKey = norm(`${accAuthor}/${accPermlink}`);
-
-  for (const c of owned) {
-    if (!c.wearing) continue;
-
-    const isWearing = c.wearing.some(w => 
-      norm(`${w.accAuthor}/${w.accPermlink}`) === targetKey
-    );
-    
-    if (isWearing) {
-      return (c.meta && c.meta.name) ? c.meta.name : c.post.author;
+  // Walk in chronological order (fetchAllReplies returns oldest-first).
+  let activeCreatureKey = null;
+  for (const r of replies) {
+    let m = {};
+    try { m = JSON.parse(r.json_metadata || "{}"); } catch {}
+    const type = m.steembiota?.type;
+    if (type === "wear_on") {
+      const ca = m.steembiota.creature?.author   || "";
+      const cp = m.steembiota.creature?.permlink || "";
+      if (ca && cp) activeCreatureKey = `${ca}/${cp}`;
+    } else if (type === "wear_off") {
+      activeCreatureKey = null;
     }
   }
-  return null;
+  return activeCreatureKey; // null = not worn
 }
 
 function norm(s) {

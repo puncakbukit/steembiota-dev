@@ -1208,6 +1208,18 @@ const WearPanelComponent = {
     async setPublic() {
       if (!window.steem_keychain) return;
 
+      // FIX 2B: Guard this irreversible on-chain action with a confirmation dialog.
+      // Once an accessory is public, any user who has already equipped it retains
+      // that equip — making it private again does not auto-remove those wears.
+      // The owner deserves a clear, explicit warning before broadcasting.
+      const confirmed = window.confirm(
+        `Make "${this.accName}" public domain?\n\n` +
+        "Once public, ANYONE can equip this accessory without your approval.\n" +
+        "Existing wearers are not affected if you later make it private again.\n\n" +
+        "This action is recorded on-chain and cannot be fully undone."
+      );
+      if (!confirmed) return;
+
       this.publishing = true;
 
       publishWearPublic(

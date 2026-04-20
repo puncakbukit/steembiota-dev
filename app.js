@@ -186,7 +186,10 @@ const PAGE_SIZE = 15;
 const LIST_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 const OWNED_PROFILE_CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes (profile ownership scans are expensive)
 const CREATURE_PAGE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
-const LEADERBOARD_CACHE_TTL_MS = 15 * 60 * 1000; // 15 minutes (fetch is expensive: 2N RPC calls per author)
+const LEADERBOARD_CACHE_TTL_MS = 24 * 60 * 60 * 1000; // FIX 5: 24 hours (was 15 min). The leaderboard
+// makes ~40–60 RPC calls (2 per author × 20 authors) and public Steem nodes aggressively rate-limit
+// repeated identical requests from the same IP.  A 24h TTL means a full re-fetch happens at most once
+// per day per browser session, dramatically reducing 429 errors while still reflecting daily ranking changes.
 const NOTIFICATIONS_CACHE_TTL_MS = 60 * 1000; // 60 seconds
 const ACCESSORY_PAGE_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -197,6 +200,14 @@ function readListCache(key) {
     const parsed = JSON.parse(raw);
     if (!parsed || !Array.isArray(parsed.data) || typeof parsed.savedAt !== "number") return null;
     if ((Date.now() - parsed.savedAt) > LIST_CACHE_TTL_MS) return null;
+    // FIX 1C: Honour the global invalidation stamp written by invalidateGlobalListCaches().
+    // If a transfer (or any other invalidation event) occurred after this cache
+    // entry was written, treat the entry as stale immediately instead of waiting
+    // for the 5-minute TTL to expire naturally.
+    try {
+      const globalVersion = parseInt(localStorage.getItem("steembiota:global:version") || "0", 10);
+      if (globalVersion > parsed.savedAt) return null;
+    } catch {}
     return parsed.data;
   } catch {
     return null;
@@ -323,6 +334,12 @@ function removeCacheByPrefix(prefix) {
 
 function invalidateGlobalListCaches() {
   removeCacheByPrefix("steembiota:list:");
+  // FIX 1C: Bump a global version stamp. readListCache() compares this stamp
+  // against each entry's savedAt, so ANY cached list written before this
+  // moment is treated as stale — even if its own TTL hasn't expired yet.
+  // This ensures the global "All Creatures" view doesn't show a stale owner
+  // after a transfer, regardless of which cache key it reads from.
+  try { localStorage.setItem("steembiota:global:version", String(Date.now())); } catch {}
   // Also clear the IDB list cache (Fix 5a).
   openSBDB().then(db => {
     try {
@@ -2107,6 +2124,18 @@ const CreatureView = {
     this._ticker = setInterval(() => { this.now = new Date(); }, 60000);
     this.loadCreature();
   },
+  mounted() {
+    // FIX 4B: Shift focus to the creature name heading when this view mounts.
+    // Without this, navigating from the Home grid to a Creature page leaves
+    // focus on the originating link (or resets it to the document body),
+    // so screen-reader users don't know which creature just loaded.
+    // tabindex="-1" on the <h2> allows programmatic focus without adding it
+    // to the natural tab order — see the template for the matching attribute.
+    this.$nextTick(() => {
+      const heading = this.$el && this.$el.querySelector("[data-focus-target]");
+      if (heading) heading.focus();
+    });
+  },
   beforeUnmount() {
     clearInterval(this._ticker);
   },
@@ -2776,7 +2805,7 @@ const CreatureView = {
 
         <!-- Identity header -->
         <div style="margin-bottom:12px;">
-          <div class="sb-creature-preview-name">🧬 {{ name }}</div>
+          <div class="sb-creature-preview-name" data-focus-target tabindex="-1" style="outline:none;">🧬 {{ name }}</div>
           <div class="sb-creature-preview-sex">
             {{ sexLabel }}
             <span style="color:#444;margin:0 6px;">·</span>
@@ -3330,20 +3359,60 @@ const LeaderboardView = {
       // Previously used Promise.allSettled which fires all requests simultaneously;
       // with 20 authors that could produce 40+ concurrent RPC calls and hit rate limits.
       // _throttledMap(concurrency=3) keeps at most 3 in-flight at a time per batch.
+      //
+      // FIX 5: Each author's comment and vote data is cached individually for 24 h
+      // under its own key.  On re-visits the leaderboard can reconstruct itself
+      // entirely from cache without any RPC calls, preventing 429 errors that were
+      // causing the leaderboard to hang or show loadError halfway through.
+      const XP_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
+
+      function readUserXpCache(username, field) {
+        try {
+          const key = `steembiota:xp:${String(username).toLowerCase()}:${field}:v1`;
+          const raw = localStorage.getItem(key);
+          if (!raw) return null;
+          const p = JSON.parse(raw);
+          if (!p || typeof p.savedAt !== "number") return null;
+          if ((Date.now() - p.savedAt) > XP_DETAIL_TTL_MS) return null;
+          return p.data;
+        } catch { return null; }
+      }
+
+      function writeUserXpCache(username, field, data) {
+        try {
+          const key = `steembiota:xp:${String(username).toLowerCase()}:${field}:v1`;
+          localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+        } catch { /* quota — non-fatal */ }
+      }
+
       const authors = basePassed.map(e => e.author);
       const commentResults = [];
       const voteResults    = [];
       await Promise.all([
         _throttledMap(authors, 3, async (a) => {
+          const cached = readUserXpCache(a, "comments");
+          if (cached) {
+            commentResults.push({ status: "fulfilled", value: cached });
+            return;
+          }
           try {
-            commentResults.push({ status: "fulfilled", value: await fetchUserComments(a, 100) });
+            const value = await fetchUserComments(a, 100);
+            writeUserXpCache(a, "comments", value);
+            commentResults.push({ status: "fulfilled", value });
           } catch (err) {
             commentResults.push({ status: "rejected", reason: err });
           }
         }),
         _throttledMap(authors, 3, async (a) => {
+          const cached = readUserXpCache(a, "votes");
+          if (cached) {
+            voteResults.push({ status: "fulfilled", value: cached });
+            return;
+          }
           try {
-            voteResults.push({ status: "fulfilled", value: await fetchAccountVotes(a) });
+            const value = await fetchAccountVotes(a);
+            writeUserXpCache(a, "votes", value);
+            voteResults.push({ status: "fulfilled", value });
           } catch (err) {
             voteResults.push({ status: "rejected", reason: err });
           }
