@@ -2084,7 +2084,8 @@ const CreatureView = {
       permitState:   null,   // { grantees: Set<username> } from parseBreedPermits
       effectiveOwner: null,  // current owner (may differ from post.author after transfers)
       transferState:  null,  // { effectiveOwner, transferHistory, pendingOffer, permitsValidFrom }
-      reactionTrigger: 0,
+      reactionTrigger:  0,
+      anticipateTrigger: 0,   // FIX 2: incremented on optimistic-anticipate (Keychain open)
       creatureType:  null,   // "founder" | "offspring"
       speciated:     false,  // true if offspring caused a genus split
       mutated:       false,  // true if offspring had a mutation
@@ -2123,6 +2124,17 @@ const CreatureView = {
   created() {
     this._ticker = setInterval(() => { this.now = new Date(); }, 60000);
     this.loadCreature();
+  },
+  // FIX 1: Ghost Navigation — Vue Router reuses the same component instance
+  // when navigating between routes sharing the same component (e.g. /@a/post1
+  // → /@a/post2).  created() only fires on first mount, so clicking a Child or
+  // Sibling in the Kinship Panel changed the URL but left stale content on screen.
+  // The watcher detects the permlink change and reloads the creature explicitly.
+  watch: {
+    '$route.params.permlink': {
+      handler() { this.loadCreature(); },
+      immediate: false
+    }
   },
   mounted() {
     // FIX 4B: Shift focus to the creature name heading when this view mounts.
@@ -2649,6 +2661,10 @@ const CreatureView = {
       );
     },
     onActivityStateUpdated(as) { this.activityState = as; this.reactionTrigger++; },
+    // FIX 2: Increment anticipateTrigger (not reactionTrigger) when Keychain opens.
+    // The canvas component plays a short "alert" hold pose instead of the full
+    // celebration animation, preventing the false-success state on rejection.
+    onOptimisticAnticipate()   { this.anticipateTrigger++; },
     onFacingResolved(dir)  { this.facingRight = dir; },
     onPoseResolved(pose)   { this.currentPose = pose; },
 
@@ -2892,6 +2908,7 @@ const CreatureView = {
         <creature-canvas-component :genome="genome" :age="postAge" :fossil="fossil" :feed-state="feedState"
           :activity-state="activityState"
           :reaction-trigger="reactionTrigger"
+          :anticipate-trigger="anticipateTrigger"
           :wearing="wearing"
           :wearings="wearings"
           @facing-resolved="onFacingResolved"
@@ -2946,6 +2963,7 @@ const CreatureView = {
           @notify="(msg,type) => notify(msg,type)"
           @feed-state-updated="onFeedStateUpdated"
           @activity-state-updated="onActivityStateUpdated"
+          @optimistic-anticipate="onOptimisticAnticipate"
           @optimistic-feed="reactionTrigger++"
           @optimistic-play="reactionTrigger++"
           @optimistic-walk="reactionTrigger++"
@@ -3306,10 +3324,12 @@ const LeaderboardView = {
   components: { LoadingSpinnerComponent },
   data() {
     return {
-      entries:   [],   // sorted leaderboard rows with profile data merged
-      loading:   true,
-      loadError: "",
-      topXp:     1     // used to scale XP bars
+      entries:      [],   // sorted leaderboard rows with profile data merged
+      loading:      true,
+      loadError:    "",
+      topXp:        1,    // used to scale XP bars
+      retrying:     false,           // FIX 6: true while a retry fetch is in progress
+      failedAuthors: [],             // FIX 6: authors whose XP fetch failed — enables Retry button
     };
   },
   async created() {
@@ -3388,6 +3408,9 @@ const LeaderboardView = {
       const authors = basePassed.map(e => e.author);
       const commentResults = [];
       const voteResults    = [];
+      // FIX 6: Track which authors failed so the Retry button can resume only them.
+      const failedCommentAuthors = new Set();
+      const failedVoteAuthors    = new Set();
       await Promise.all([
         _throttledMap(authors, 3, async (a) => {
           const cached = readUserXpCache(a, "comments");
@@ -3401,6 +3424,7 @@ const LeaderboardView = {
             commentResults.push({ status: "fulfilled", value });
           } catch (err) {
             commentResults.push({ status: "rejected", reason: err });
+            failedCommentAuthors.add(a);
           }
         }),
         _throttledMap(authors, 3, async (a) => {
@@ -3415,9 +3439,14 @@ const LeaderboardView = {
             voteResults.push({ status: "fulfilled", value });
           } catch (err) {
             voteResults.push({ status: "rejected", reason: err });
+            failedVoteAuthors.add(a);
           }
         }),
       ]);
+      // Expose any authors that failed at least one fetch — the Retry button will
+      // re-attempt exactly these authors rather than the full corpus.
+      const allFailed = [...new Set([...failedCommentAuthors, ...failedVoteAuthors])];
+      this.failedAuthors = allFailed;
 
       // Count feed replies per author
       const feedsByAuthor = {};
@@ -3480,7 +3509,98 @@ const LeaderboardView = {
         "Wanderer":     "#555"
       };
       return colors[rankTitle] || "#555";
-    }
+    },
+
+    // FIX 6: Retry only the authors whose XP data failed to load (typically due
+    // to a 429 rate-limit on the public node).  Successfully fetched authors are
+    // already cached, so this is a minimal, targeted re-fetch rather than a full
+    // reload of the entire leaderboard.
+    async retryFailedAuthors() {
+      if (!this.failedAuthors.length || this.retrying) return;
+      this.retrying  = true;
+      this.loadError = "";
+      try {
+        const XP_DETAIL_TTL_MS = 24 * 60 * 60 * 1000;
+        function readUserXpCache(username, field) {
+          try {
+            const key = `steembiota:xp:${String(username).toLowerCase()}:${field}:v1`;
+            const raw = localStorage.getItem(key);
+            if (!raw) return null;
+            const p = JSON.parse(raw);
+            if (!p || typeof p.savedAt !== "number") return null;
+            if ((Date.now() - p.savedAt) > XP_DETAIL_TTL_MS) return null;
+            return p.data;
+          } catch { return null; }
+        }
+        function writeUserXpCache(username, field, data) {
+          try {
+            const key = `steembiota:xp:${String(username).toLowerCase()}:${field}:v1`;
+            localStorage.setItem(key, JSON.stringify({ savedAt: Date.now(), data }));
+          } catch {}
+        }
+        const retryAuthors      = [...this.failedAuthors];
+        const commentResults    = [];
+        const voteResults       = [];
+        const stillFailedAuthors = new Set();
+        await Promise.all([
+          _throttledMap(retryAuthors, 2, async (a) => {
+            try {
+              const value = await fetchUserComments(a, 100);
+              writeUserXpCache(a, "comments", value);
+              commentResults.push({ author: a, status: "fulfilled", value });
+            } catch {
+              commentResults.push({ author: a, status: "rejected" });
+              stillFailedAuthors.add(a);
+            }
+          }),
+          _throttledMap(retryAuthors, 2, async (a) => {
+            try {
+              const value = await fetchAccountVotes(a);
+              writeUserXpCache(a, "votes", value);
+              voteResults.push({ author: a, status: "fulfilled", value });
+            } catch {
+              voteResults.push({ author: a, status: "rejected" });
+              stillFailedAuthors.add(a);
+            }
+          }),
+        ]);
+        // Merge newly-fetched XP into existing entries.
+        const feedsByAuthor    = {};
+        const upvotesByAuthor  = {};
+        commentResults.forEach(({ author: a, status, value }) => {
+          if (status !== "fulfilled") return;
+          let count = 0;
+          for (const c of (value || [])) {
+            let meta = {}; try { meta = JSON.parse(c.json_metadata || "{}"); } catch {}
+            if (meta.steembiota?.type === "feed") count++;
+          }
+          if (count > 0) feedsByAuthor[a] = count;
+        });
+        // Build the creature permlink set from cached entry data.
+        const creaturePermlinks = new Set(
+          this.entries.map(e => `${e.author}/${e.permlink}`).filter(Boolean)
+        );
+        voteResults.forEach(({ author: a, status, value }) => {
+          if (status !== "fulfilled") return;
+          const count = (value || [])
+            .filter(v => creaturePermlinks.has(`${v.author}/${v.permlink}`))
+            .length;
+          if (count > 0) upvotesByAuthor[a] = count;
+        });
+        // Patch the affected entries in place.
+        this.entries = this.entries.map(e => {
+          if (!retryAuthors.includes(e.author)) return e;
+          const extraFeed    = feedsByAuthor[e.author]   || 0;
+          const extraUpvote  = upvotesByAuthor[e.author] || 0;
+          return { ...e, xp: e.xp + extraFeed * 5 + extraUpvote * 2 };
+        }).sort((a, b) => b.xp - a.xp);
+        this.topXp        = Math.max(1, this.entries[0]?.xp ?? 1);
+        this.failedAuthors = [...stillFailedAuthors];
+      } catch (e) {
+        this.loadError = "Retry failed: " + (e.message || "Unknown error");
+      }
+      this.retrying = false;
+    },
   },
   template: `
     <div style="margin-top:20px;padding:0 16px 40px;">
@@ -3489,11 +3609,33 @@ const LeaderboardView = {
         Ranked by XP from founders, offspring, feeds given, upvotes cast, genera contributed &amp; speciation events.
       </p>
 
-      <loading-spinner-component v-if="loading"></loading-spinner-component>
-      <div v-else-if="loadError" style="color:#ff8a80;font-size:13px;">⚠ {{ loadError }}</div>
+      <loading-spinner-component v-if="loading || retrying"></loading-spinner-component>
+      <div v-else-if="loadError" style="color:#ff8a80;font-size:13px;">
+        ⚠ {{ loadError }}
+        <button v-if="failedAuthors.length"
+          @click="retryFailedAuthors"
+          style="margin-left:10px;background:#1a0a00;color:#ffb74d;border:1px solid #7a3a00;
+                 font-size:12px;padding:4px 12px;border-radius:6px;cursor:pointer;">
+          🔄 Retry ({{ failedAuthors.length }} pending)
+        </button>
+      </div>
       <div v-else-if="entries.length === 0" style="color:#555;font-size:13px;">No activity on-chain yet.</div>
 
-      <div v-else style="max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:10px;">
+      <!-- FIX 6: Partial-result banner — shown when some XP data failed to load
+           but we already have a cached / partial leaderboard to display. -->
+      <div v-if="!loading && !retrying && failedAuthors.length && entries.length"
+        style="margin-bottom:14px;padding:10px 14px;border-radius:8px;max-width:700px;margin:0 auto 14px;
+               background:#1a1000;border:1px solid #7a5800;color:#ffe082;font-size:12px;display:flex;align-items:center;gap:10px;">
+        <span>⚠ XP data for {{ failedAuthors.length }} author{{ failedAuthors.length === 1 ? "" : "s" }} could not be loaded (rate limit). Rankings may be incomplete.</span>
+        <button @click="retryFailedAuthors"
+          style="flex-shrink:0;background:#2a1f00;color:#ffe082;border:1px solid #7a5800;
+                 font-size:12px;padding:4px 12px;border-radius:6px;cursor:pointer;white-space:nowrap;">
+          🔄 Retry
+        </button>
+      </div>
+
+      <div v-if="!loading && !retrying && !loadError && entries.length > 0"
+        style="max-width:700px;margin:0 auto;display:flex;flex-direction:column;gap:10px;">
         <router-link
           v-for="(entry, idx) in entries"
           :key="entry.author"

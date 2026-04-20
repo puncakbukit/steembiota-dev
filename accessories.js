@@ -1454,7 +1454,8 @@ const AccessoryItemView = {
       // Wear permissions (v2: per-user grants + public domain)
       permissions: { isPublic: false, grantedUsers: new Set(), pendingRequests: new Map() },
       // Force-unequip ("Panic Reset") — populated after load when owner checks worn state
-      wornByCreatureKey: null,   // "author/permlink" of the creature currently wearing it
+      wornByCreatureKey:     null,   // "author/permlink" of the creature currently wearing it
+      wornByCreatureIsPhantom: false, // true = post deleted; false = owned by a different user
       forceUnequipping:  false,
     };
   },
@@ -1573,8 +1574,11 @@ const AccessoryItemView = {
       }
     },
 
-    // Checks if this accessory is equipped on a creature that no longer exists
-    // (a "phantom" — post was deleted). If so, exposes the Force Unequip button.
+    // Checks if this accessory is equipped on a creature that either no longer exists
+    // (a "phantom" — post was deleted) OR belongs to a different user than the current
+    // accessory owner (cross-owner transfer lock). In both cases the accessory owner
+    // cannot navigate to the creature page to remove it normally, so we expose the
+    // Force Unequip ("Panic Reset") button.
     //
     // Fix: We exclusively use a direct scan of wear_on replies on the accessory
     // post itself.  The previous approach scanned fetchCreaturesOwnedBy(username)
@@ -1594,8 +1598,16 @@ const AccessoryItemView = {
                 m.steembiota.creature.author,
                 m.steembiota.creature.permlink
               ).catch(() => null);
-              if (!post || isPhantomPost(post)) {
-                this.wornByCreatureKey = cKey;
+              // FIX 7: Two conditions that lock the new owner out of their accessory:
+              //   1. Phantom — the creature post was deleted entirely.
+              //   2. Alien owner — the accessory is still logically worn by a creature
+              //      that belongs to a *different* user (previous owner before transfer).
+              //      The new accessory owner cannot visit that page to click "Remove."
+              const isPhantom    = !post || isPhantomPost(post);
+              const isAlienOwner = !isPhantom && (post.author !== this.effectiveOwner);
+              if (isPhantom || isAlienOwner) {
+                this.wornByCreatureKey      = cKey;
+                this.wornByCreatureIsPhantom = isPhantom;
                 return;
               }
             }
@@ -1874,19 +1886,29 @@ const AccessoryItemView = {
           </div>
         </div>
 
-        <!-- Force Unequip ("Panic Reset") — shown to owner when accessory is stuck on a phantom creature -->
+        <!-- Force Unequip ("Panic Reset") — shown to accessory owner when the item
+             is stuck on either a phantom (deleted) creature OR a creature that now
+             belongs to a different user after a transfer. Both cases prevent the
+             owner from visiting the creature page to click "Remove" normally. -->
         <div v-if="isOwner && wornByCreatureKey"
           style="max-width:480px;margin:0 auto 16px;padding:14px 16px;border-radius:8px;
                  background:#1a0a00;border:1px solid #7a3a00;">
           <div style="font-size:0.88rem;font-weight:bold;color:#ffb74d;margin-bottom:8px;">
-            ⚠️ Accessory Locked on Phantom Creature
+            ⚠️ {{ wornByCreatureIsPhantom ? 'Accessory Locked on Phantom Creature' : 'Accessory Locked on Another User\'s Creature' }}
           </div>
           <p style="font-size:0.78rem;color:#888;margin:0 0 12px;line-height:1.5;">
             This accessory is equipped on
             <router-link :to="'/@' + wornByCreatureKey.replace('/', '/')"
-              style="color:#ffb74d;">@{{ wornByCreatureKey }}</router-link>,
-            which appears to be a phantom (deleted post). You cannot visit that page to
-            remove it normally. Use Force Unequip to free this accessory.
+              style="color:#ffb74d;">@{{ wornByCreatureKey }}</router-link>.
+            <template v-if="wornByCreatureIsPhantom">
+              That creature appears to be a phantom (deleted post), so you cannot
+              visit its page to remove the accessory normally.
+            </template>
+            <template v-else>
+              That creature belongs to a different user. As the accessory owner you
+              cannot visit their creature page to click Remove.
+            </template>
+            Use Force Unequip to free this accessory and return it to your inventory.
           </p>
           <button @click="forceUnequip" :disabled="forceUnequipping"
             style="background:#3a1400;color:#ffb74d;border:1px solid #7a3a00;font-size:0.82rem;padding:6px 16px;">

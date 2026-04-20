@@ -33,7 +33,7 @@ const AppNotificationComponent = {
     }
   },
   template: `
-    <div v-if="message" :class="notifClass" role="alert">
+    <div v-if="message" :class="notifClass" role="alert" aria-live="polite" aria-atomic="true">
       <span>{{ icon }} {{ message }}</span>
       <button
         @click="$emit('dismiss')"
@@ -163,7 +163,12 @@ const CreatureCanvasComponent = {
     fossil:          { type: Boolean, default: false },
     feedState:       { type: Object,  default: null  },
     activityState:   { type: Object,  default: null  },
-    reactionTrigger: { type: Number,  default: 0     },
+    reactionTrigger:  { type: Number,  default: 0     },
+    // anticipateTrigger fires a short single "alert" pose to signal that a
+    // transaction is pending (Keychain open) without committing to the full
+    // success animation.  Incremented by the parent when optimistic-anticipate
+    // is received; reactionTrigger is incremented only on confirmed success.
+    anticipateTrigger: { type: Number,  default: 0     },
     canvasW:         { type: Number,  default: 400   },
     canvasH:         { type: Number,  default: 320   },
     // Accessory being worn — { template, genome } or null
@@ -233,7 +238,10 @@ const CreatureCanvasComponent = {
     activityState()    { this.$nextTick(() => this.draw()); },
     wearing()          { this.$nextTick(() => this.draw()); },
     wearings()         { this.$nextTick(() => this.draw()); },
-    reactionTrigger(v) { if (v > 0) this._startReaction(); }
+    reactionTrigger(v)   { if (v > 0) this._startReaction(); },
+    // FIX 2: Watch the lightweight anticipation trigger separately.
+    // This fires when Keychain opens (transaction pending) — not on success.
+    anticipateTrigger(v) { if (v > 0) this._startAnticipation(); },
   },
   mounted() {
     this.$emit("facing-resolved", this.facingRight);
@@ -318,6 +326,38 @@ const CreatureCanvasComponent = {
     // If called while already animating, restarts cleanly.
     // Pauses autonomous behaviour for the duration.
     // ----------------------------------------------------------
+    // FIX 2: Lightweight anticipation animation — triggered when Keychain opens
+    // (transaction pending).  Holds the "alert" pose for up to 12 s then returns
+    // to idle.  If the transaction succeeds, _startReaction() will pre-empt this
+    // by cancelling _animTimers and playing the full celebration sequence.
+    _startAnticipation() {
+      // Cancel any in-progress animation (including a previous anticipation).
+      this._animTimers.forEach(id => clearTimeout(id));
+      this._animTimers = [];
+      if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
+      if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+      this._behavVX    = 0;
+      this._behavVY    = 0;
+      this._behavState = "idle";
+
+      // Hold the alert pose while waiting for the Keychain response.
+      // Cap at 12 s — roughly the Keychain timeout — then return to idle.
+      this.animPose       = "alert";
+      this.animExpression = "alert";
+      this.draw();
+
+      const restId = setTimeout(() => {
+        // Only clean up if we're still in anticipation (not superseded by _startReaction).
+        if (this.animPose === "alert" && this.animExpression === "alert") {
+          this.animPose       = null;
+          this.animExpression = null;
+          this.draw();
+          if (!this.fossil) this._behaviourLoop();
+        }
+      }, 12000);
+      this._animTimers.push(restId);
+    },
+
     _startReaction() {
       // Cancel any in-progress animation.
       this._animTimers.forEach(id => clearTimeout(id));
@@ -2996,7 +3036,7 @@ const ActivityPanelComponent = {
     ctxAlreadyFed:         { type: Boolean, default: false },
     initialActivityState:  { type: Object,  default: null }
   },
-  emits: ["notify", "feed-state-updated", "activity-state-updated"],
+  emits: ["notify", "feed-state-updated", "activity-state-updated", "optimistic-feed", "optimistic-play", "optimistic-walk", "optimistic-anticipate"],
   data() {
     return {
       // Feed state
@@ -3100,10 +3140,16 @@ const ActivityPanelComponent = {
       if (!window.steem_keychain) { this.$emit("notify", "Steem Keychain is not installed.", "error"); return; }
       this.publishingFeed = true;
 
-      // ── Optimistic UI: start the eat animation immediately when Keychain
-      //    opens (i.e. the user is about to sign).  The creature visually
-      //    reacts right away; the block-confirmation is just bookkeeping.
-      this.$emit("optimistic-feed");
+      // FIX 2: Interaction Deadlock / Race Condition.
+      // Previously "optimistic-feed" fired the full "Thriving" reaction animation
+      // the instant Keychain opened — before the transaction was confirmed.
+      // If the user rejected or the network failed, the creature was stuck in the
+      // happy animation for ~10 seconds, creating a false-success state.
+      //
+      // Fix: emit "optimistic-anticipate" now (triggers a neutral "alert" pose),
+      // and emit "optimistic-feed" (the full Thriving sequence) only inside the
+      // if (response.success) callback below.
+      this.$emit("optimistic-anticipate");
 
       publishFeed(
         this.username,
@@ -3131,6 +3177,8 @@ const ActivityPanelComponent = {
             this.alreadyFedToday = true;
             if (typeof invalidateCreatureCache === "function") invalidateCreatureCache(this.creatureAuthor, this.creaturePermlink);
             this.$emit("feed-state-updated", this.feedState);
+            // Now confirmed on-chain: trigger the full celebratory Thriving animation.
+            this.$emit("optimistic-feed");
             const foodLabel = { nectar: "Nectar", fruit: "Fruit", crystal: "Crystal" }[this.foodType] || this.foodType;
             this.$emit("notify", "🍃 Fed " + this.creatureName + " with " + foodLabel + "!", "success");
           } else {

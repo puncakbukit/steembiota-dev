@@ -165,10 +165,22 @@ function analysePixels(data, imgW, imgH) {
   }
   const silW = Math.max(1, maxX - minX);
   const silH = Math.max(1, maxY - minY);
-  // Use original image aspect ratio as fallback if silhouette detection fails
-  const aspectRatio = (minX < maxX && minY < maxY)
-    ? silW / silH
-    : imgW / imgH;
+
+  // FIX 5: Low-contrast guard.
+  // A plain bounds check (minX < maxX) is not enough — a white cat on a white
+  // background may produce a bounding box of only a handful of shadow pixels,
+  // technically non-empty but covering < 5 % of the canvas area. In that case
+  // silW/silH is effectively 1.0 (square) regardless of the actual creature shape.
+  //
+  // Two-tier fallback:
+  //   1. If the box is empty → use raw image aspect ratio (pre-existing behaviour).
+  //   2. If the box is non-empty but occupies < 5 % of the canvas → same fallback
+  //      AND set lowContrast=true so the caller can notify the user.
+  const boxValid   = minX < maxX && minY < maxY;
+  const silArea    = silW * silH;
+  const canvasArea = SAMPLE_SIZE * SAMPLE_SIZE;
+  const lowContrast = !boxValid || (silArea / canvasArea < 0.05);
+  const aspectRatio = lowContrast ? (imgW / imgH) : (silW / silH);
 
   // --- Edge density (Sobel, lightness channel) ---
   // Build a greyscale matrix from lits
@@ -192,7 +204,7 @@ function analysePixels(data, imgW, imgH) {
   }
   const edgeDensity = edgeCount / ((S - 2) * (S - 2));
 
-  return { dominantHue, meanSat, meanLit, litVariance, aspectRatio, edgeDensity, colourfulness };
+  return { dominantHue, meanSat, meanLit, litVariance, aspectRatio, edgeDensity, colourfulness, lowContrast };
 }
 
 // ============================================================
@@ -432,10 +444,11 @@ data() {
     step:          "pick",
 
     // Image state
-    imageFile:     null,
-    imageDataUrl:  null,    // for <img> preview
-    imageEl:       null,    // decoded HTMLImageElement
-    analysisError: "",
+    imageFile:          null,
+    imageDataUrl:       null,    // for <img> preview
+    imageEl:            null,    // decoded HTMLImageElement
+    analysisError:      "",
+    lowContrastWarning: false,   // true when silhouette < 5% of canvas (white-on-white)
 
     // Derived genome + render inputs
     genome:        null,
@@ -507,12 +520,13 @@ methods: {
   // Core analysis pipeline
   // ----------------------------------------------------------
   async startAnalysis(file) {
-    this.rerollIndex  = 0; // NEW: reset reroll index
-    this.imageFile    = file;
-    this.analysisError = "";
-    this.genome       = null;
-    this.imageStats   = null;
-    this.step         = "analyse";
+    this.rerollIndex        = 0; // NEW: reset reroll index
+    this.imageFile          = file;
+    this.analysisError      = "";
+    this.lowContrastWarning = false;
+    this.genome             = null;
+    this.imageStats         = null;
+    this.step               = "analyse";
 
     // Show image preview immediately
     const reader = new FileReader();
@@ -529,6 +543,10 @@ methods: {
       const data   = samplePixels(img);
       const stats  = analysePixels(data, img.naturalWidth, img.naturalHeight);
       this.imageStats = stats;
+
+      // FIX 5: Notify user when silhouette detection fell back to full-image
+      // proportions due to low contrast (e.g. white cat on white background).
+      if (stats.lowContrast) this.lowContrastWarning = true;
 
       // UPDATED: pass rerollIndex
       const genome = imageToGenome(img, this.rerollIndex);
@@ -744,6 +762,18 @@ methods: {
              STEP 3: PREVIEW & PUBLISH
         ══════════════════════════════════════════════════════ -->
         <div v-else-if="step === 'preview' && genome">
+
+          <!-- FIX 5: Low-contrast warning — shown when the silhouette detector
+               fell back to full-image proportions because the subject blends
+               into the background (e.g. white cat on white background). -->
+          <div v-if="lowContrastWarning"
+            style="margin-bottom:14px;padding:10px 14px;border-radius:8px;
+                   background:#2a1f00;border:1px solid #7a5800;color:#ffe082;font-size:13px;">
+            ⚠ Low contrast detected — your creature's outline was hard to distinguish
+            from the background, so the body shape was inferred from the full image
+            proportions instead. For the best results, try uploading a photo with a
+            plain dark or coloured background.
+          </div>
 
           <!-- Two-column layout: image | creature canvas -->
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px;align-items:start;">
