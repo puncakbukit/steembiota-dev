@@ -90,11 +90,15 @@ function maybeSpeciate(rng, gen) {
 
 // Parse a Steem post URL into { author, permlink }.
 // Handles steemit.com and plain author/permlink strings.
+// FIX 5 (Zero-Width Space Trap): Strip hidden Unicode characters (zero-width
+// spaces U+200B–U+200D, BOM U+FEFF) that some Steem front-ends inject into
+// copied URLs, and relax the regex to ignore trailing query params or fragments
+// (e.g. ?node=..., #top).  The old \s*$ anchor rejected any URL with a suffix,
+// throwing "Cannot parse Steem URL" for perfectly valid creature links.
+// The new regex finds the FIRST @author/permlink occurrence in the string.
 function parseSteemUrl(url) {
-  url = url.trim();
-  // Match https://steemit.com/category/@author/permlink
-  // or    https://steemit.com/@author/permlink
-  const m = url.match(/@([a-z0-9.-]+)\/([a-z0-9-]+)\s*$/i);
+  url = url.trim().replace(/[\u200B-\u200D\uFEFF]/g, '');
+  const m = url.match(/@([a-z0-9.-]+)\/([a-z0-9-]+)/i);
   if (!m) throw new Error("Cannot parse Steem URL: " + url);
   return { author: m[1], permlink: m[2] };
 }
@@ -2938,6 +2942,8 @@ const CreatureView = {
          <div v-show="activeTab === 'interact'">
 
         <!-- ── Worn Accessories + Equip Panel ── -->
+        <!-- FIX 6: Pass :fossil so the panel can suppress the Equip form
+             while still allowing accessory retrieval on fossilised creatures. -->
         <equip-panel-component
           :username="username"
           :creature-author="author"
@@ -2945,6 +2951,7 @@ const CreatureView = {
           :creature-name="name"
           :wearings="wearings"
           :is-owner="isOwner"
+          :fossil="fossil"
           @notify="(msg,type) => notify(msg,type)"
           @wearings-updated="ws => { wearings = ws; wearing = ws[0] || null; }"
         ></equip-panel-component>
@@ -3035,7 +3042,22 @@ const CreatureView = {
 
         <!-- Unicode render -->
         <h3 class="sb-section-title">Unicode Render</h3>
-        <pre :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
+        <!-- FIX 7 (A11y): Screen readers interpret the box-drawing characters in
+             unicodeArt as a chaotic stream of glyph names ("Box Drawings Light
+             Vertical…").  aria-hidden suppresses that, while the following
+             visually-hidden <span> provides a concise text summary instead. -->
+        <pre
+          aria-hidden="true"
+          :key="(currentPose || 'standing') + '_' + (feedState ? feedState.healthPct : 0)"
+          :style="fossil ? { color:'#444', opacity:'0.6' } : {}"
+        >{{ unicodeArt }}</pre>
+        <span class="sb-sr-only">
+          Unicode art of {{ name }}.
+          {{ sexLabel }},
+          {{ lifecycleStage ? lifecycleStage.name : '' }},
+          {{ fossil ? 'fossilised — genome preserved on-chain'
+             : feedState ? feedState.label : 'health unknown' }}.
+        </span>
 
         <!-- Genome table -->
         <h3 class="sb-section-title">Genome</h3>

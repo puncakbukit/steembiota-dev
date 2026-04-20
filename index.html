@@ -208,7 +208,13 @@
       transition: border-color 0.18s;
       position: relative;
     }
-    .sb-card:hover { border-color: #2e7d32; }
+    /* FIX 9 (Mobile Hover): Restrict hover border effects to real pointer devices.
+       On touch screens, :hover "sticks" after a tap and the border stays highlighted
+       as the user scrolls, making the grid look messy. @media (hover: hover) ensures
+       these rules only fire when the primary input is a fine pointer (mouse/trackpad). */
+    @media (hover: hover) {
+      .sb-card:hover { border-color: #2e7d32; }
+    }
 
     .sb-card-name {
       font-size: 0.82rem;
@@ -534,7 +540,11 @@
     }
     .sb-genome-bar-track {
       position: relative;
-      height: 6px;
+      /* FIX 7 (A11y): Increased from 6px to 10px. At 6px the MOR (green) and
+         APP (teal) bars are nearly indistinguishable for users with colour-vision
+         deficiency or on low-contrast displays. 10px provides enough surface area
+         for the colour to read clearly while still feeling compact. */
+      height: 10px;
       background: #252525;
       border-radius: 3px;
       overflow: visible;
@@ -555,6 +565,19 @@
     }
 
     /* Shared key/val styles (used in both old table and new hist) */
+    /* FIX 7 (A11y): Visually-hidden utility — readable by screen readers but
+       invisible on screen. Used to annotate canvas/pre elements with a text
+       description without disrupting the visual layout. */
+    .sb-sr-only {
+      position: absolute;
+      width: 1px; height: 1px;
+      padding: 0; margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
     .sb-genome-key {
       color: #666;
       font-family: var(--font-mono, monospace);
@@ -813,7 +836,9 @@
 
     /* ── Accessory cards ── */
     .sb-acc-card { background: #111; border: 1px solid #222; border-radius: 10px; padding: 10px; text-align: center; cursor: pointer; transition: border-color 0.18s; }
-    .sb-acc-card:hover { border-color: #6a1b9a; }
+    @media (hover: hover) {
+      .sb-acc-card:hover { border-color: #6a1b9a; }
+    }
     .sb-acc-name { font-size: 0.82rem; font-weight: bold; color: #ce93d8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 5px; }
 
     /* ── Leaderboard / Upload wrappers ── */
