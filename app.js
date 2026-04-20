@@ -2669,6 +2669,21 @@ const CreatureView = {
     // The canvas component plays a short "alert" hold pose instead of the full
     // celebration animation, preventing the false-success state on rejection.
     onOptimisticAnticipate()   { this.anticipateTrigger++; },
+    // BUG 6 FIX: When a Keychain popup is rejected by the user, immediately
+    // clear the "alert" anticipation pose so the creature doesn't stay frozen.
+    // We reach into the canvas component via $refs and reset its anim state directly.
+    onCancelAnticipate() {
+      const canvas = this.$refs.creatureCanvas;
+      if (canvas) {
+        canvas.animPose       = null;
+        canvas.animExpression = null;
+        // Cancel any pending 12-second timeout that would have cleared it anyway.
+        canvas._animTimers.forEach(id => clearTimeout(id));
+        canvas._animTimers = [];
+        canvas.draw();
+        if (!canvas.fossil) canvas._behaviourLoop();
+      }
+    },
     onFacingResolved(dir)  { this.facingRight = dir; },
     onPoseResolved(pose)   { this.currentPose = pose; },
 
@@ -2909,7 +2924,7 @@ const CreatureView = {
         </div>
 
         <!-- Canvas render -->
-        <creature-canvas-component :genome="genome" :age="postAge" :fossil="fossil" :feed-state="feedState"
+        <creature-canvas-component ref="creatureCanvas" :genome="genome" :age="postAge" :fossil="fossil" :feed-state="feedState"
           :activity-state="activityState"
           :reaction-trigger="reactionTrigger"
           :anticipate-trigger="anticipateTrigger"
@@ -2971,6 +2986,7 @@ const CreatureView = {
           @feed-state-updated="onFeedStateUpdated"
           @activity-state-updated="onActivityStateUpdated"
           @optimistic-anticipate="onOptimisticAnticipate"
+          @cancel-anticipate="onCancelAnticipate"
           @optimistic-feed="reactionTrigger++"
           @optimistic-play="reactionTrigger++"
           @optimistic-walk="reactionTrigger++"

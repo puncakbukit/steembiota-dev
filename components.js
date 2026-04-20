@@ -273,7 +273,29 @@ const CreatureCanvasComponent = {
       this._dprObserver.observe(this.$refs.canvas);
     }
     this.draw();
-    if (!this.fossil) this._behaviourLoop();
+    if (!this.fossil) {
+      // BUG 1 FIX: Use IntersectionObserver to pause the rAF loop when the
+      // canvas is scrolled out of view, preventing battery drain and jank on
+      // large grids with 15–20 active canvases.
+      if (typeof IntersectionObserver !== "undefined") {
+        this._intersectionObserver = new IntersectionObserver((entries) => {
+          const isVisible = entries[0].isIntersecting;
+          if (isVisible) {
+            // Scrolled back into view — resume behaviour loop if it was running.
+            if (!this._rafId && this._behavState && this._behavState !== "idle") {
+              this._startRaf();
+            } else if (!this._rafId) {
+              this._behaviourLoop();
+            }
+          } else {
+            // Scrolled out of view — cancel rAF to save CPU/GPU.
+            if (this._rafId) { cancelAnimationFrame(this._rafId); this._rafId = null; }
+          }
+        }, { threshold: 0 });
+        this._intersectionObserver.observe(this.$refs.canvas);
+      }
+      this._behaviourLoop();
+    }
   },
   beforeUnmount() {
     // Cancel any pending animation timers to avoid drawing on a detached canvas.
@@ -282,6 +304,8 @@ const CreatureCanvasComponent = {
     // Stop the autonomous behaviour loop.
     if (this._rafId)      { cancelAnimationFrame(this._rafId); this._rafId = null; }
     if (this._behavTimer) { clearTimeout(this._behavTimer);    this._behavTimer = null; }
+    // BUG 1 FIX: Disconnect the IntersectionObserver.
+    if (this._intersectionObserver) { this._intersectionObserver.disconnect(); this._intersectionObserver = null; }
     // FIX 3B: Disconnect the ResizeObserver so it doesn't fire after unmount.
     if (this._dprObserver) { this._dprObserver.disconnect(); this._dprObserver = null; }
     // Persist current position so the creature remembers where it was.
@@ -3036,7 +3060,7 @@ const ActivityPanelComponent = {
     ctxAlreadyFed:         { type: Boolean, default: false },
     initialActivityState:  { type: Object,  default: null }
   },
-  emits: ["notify", "feed-state-updated", "activity-state-updated", "optimistic-feed", "optimistic-play", "optimistic-walk", "optimistic-anticipate"],
+  emits: ["notify", "feed-state-updated", "activity-state-updated", "optimistic-feed", "optimistic-play", "optimistic-walk", "optimistic-anticipate", "cancel-anticipate"],
   data() {
     return {
       // Feed state
@@ -3182,8 +3206,11 @@ const ActivityPanelComponent = {
             const foodLabel = { nectar: "Nectar", fruit: "Fruit", crystal: "Crystal" }[this.foodType] || this.foodType;
             this.$emit("notify", "🍃 Fed " + this.creatureName + " with " + foodLabel + "!", "success");
           } else {
-            // Transaction failed — roll back the optimistic state flags
+            // Transaction failed — roll back the optimistic state flags.
+            // BUG 6 FIX: Also cancel the anticipation pose so the creature
+            // doesn't stay stuck in "alert" until the 12-second timeout fires.
             this.alreadyFedToday = false;
+            this.$emit("cancel-anticipate");
             this.$emit("notify", "Feed failed: " + (response.message || "Unknown error"), "error");
           }
         }
@@ -3257,7 +3284,9 @@ const ActivityPanelComponent = {
             this.$emit("notify", "🎮 Played with " + this.creatureName + "! Mood improved.", "success");
           } else {
             // Rollback
+            // BUG 6 FIX: Cancel the anticipation pose on rejection.
             this.alreadyPlayedToday = false;
+            this.$emit("cancel-anticipate");
             this.$emit("notify", "Play failed: " + (response.message || "Unknown error"), "error");
           }
         }
@@ -3283,7 +3312,9 @@ const ActivityPanelComponent = {
             this.$emit("notify", "🦮 Took " + this.creatureName + " for a walk! Vitality improved.", "success");
           } else {
             // Rollback
+            // BUG 6 FIX: Cancel the anticipation pose on rejection.
             this.alreadyWalkedToday = false;
+            this.$emit("cancel-anticipate");
             this.$emit("notify", "Walk failed: " + (response.message || "Unknown error"), "error");
           }
         }
@@ -3712,15 +3743,24 @@ const BreedingPanelComponent = {
     },
 
     async publishChild() {
+      // BUG 3 FIX: Set publishing = true BEFORE any guard checks so that a
+      // double-click or a race between the click handler and Keychain's async
+      // response cannot dispatch two identical posts.  The flag is set
+      // synchronously on the very first call — subsequent clicks hit the guard
+      // below and return immediately.
+      if (this.publishing) return;
+      this.publishing = true;
+
       if (!this.username) {
         this.$emit("notify", "Please log in first.", "error");
+        this.publishing = false;
         return;
       }
       if (!window.steem_keychain) {
         this.$emit("notify", "Steem Keychain is not installed.", "error");
+        this.publishing = false;
         return;
       }
-      this.publishing = true;
       publishOffspring(
         this.username,
         this.childGenome,
@@ -3904,6 +3944,17 @@ const BreedingPanelComponent = {
             <button @click="publishChild" :disabled="publishing || !username" class="sb-btn-blue">
               {{ publishing ? "Publishing…" : "📡 Publish Offspring to Steem" }}
             </button>
+          </div>
+          <!-- BUG 3 FIX: Full-panel overlay while Keychain request is in-flight.
+               Prevents any further interaction (including double-clicks on the
+               Publish button) until the route changes on success. -->
+          <div v-if="publishing"
+            style="position:absolute;inset:0;z-index:10;border-radius:10px;
+                   background:rgba(0,0,0,0.65);display:flex;flex-direction:column;
+                   align-items:center;justify-content:center;gap:10px;">
+            <div style="font-size:1.5rem;">⏳</div>
+            <div style="color:#a5d6a7;font-weight:bold;font-size:0.95rem;">Transaction Pending…</div>
+            <div style="color:#888;font-size:0.8rem;">Please confirm in Steem Keychain</div>
           </div>
         </div>
       </template>

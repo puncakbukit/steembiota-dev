@@ -1462,6 +1462,15 @@ const AccessoryItemView = {
 
   created() { this.loadAccessory(); },
 
+  // BUG 2 FIX: Watch for route param changes so navigating between two
+  // accessory pages (e.g. via notifications or browser back/forward) reloads
+  // the data instead of displaying the previous accessory under the new URL.
+  // Vue reuses the component instance on same-route navigation, so created()
+  // alone is not enough.
+  watch: {
+    '$route.params.permlink'() { this.loadAccessory(); }
+  },
+
   computed: {
     isOwner() {
       return !!(this.username && this.effectiveOwner &&
