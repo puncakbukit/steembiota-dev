@@ -274,6 +274,8 @@ Edge bounce: the creature flips facing direction and reverses velocity when it r
 
 - **Screen reader support for Unicode art** — the `<pre>` unicode art block has `aria-hidden="true"` so screen readers skip the raw box-drawing characters. A visually-hidden `<span>` immediately following it provides a concise text summary: creature name, sex, lifecycle stage, and health state.
 - **Focus management** — when navigating from a creature grid to a creature detail page, keyboard focus is shifted programmatically to the creature name heading (`<h2 data-focus-target>`). This uses `tabindex="-1"` so the heading is focusable without entering the natural tab order. Screen-reader users hear the creature name announced immediately on arrival rather than being left at the originating link or document body.
+- **Genome bar height** — the genome visualisation bars were increased from 6 px to 10 px. At 6 px the MOR (green) and APP (teal) bars were nearly indistinguishable for users with colour-vision deficiency or on low-contrast displays. 10 px provides enough surface area for the colour to read clearly while remaining compact.
+- **Visually-hidden utility class** — a `.sb-sr-only` CSS class (1×1 px, clipped, off-screen margin) is used wherever a text alternative must be provided for non-text content without disrupting the visual layout.
 
 ---
 
@@ -511,6 +513,7 @@ The Breeding Matchmaker simplifies the process of finding compatible mates for y
     *   **Fertility Check:** Only displays creatures currently within their fertile window (accounting for age and lifespan).
     *   **Health & Lifecycle:** Prioritizes living creatures over fossils and filters out "Phantoms" (deleted posts).
 3.  **Two-Step Confirmation:** To prevent accidental breeding, the UI requires a "Stage and Confirm" workflow. Click a partner once to stage them (their card highlights and shows a "Tap again to breed ✓" prompt); click the same card a second time to initiate the on-chain breeding process. Clicking a different card replaces the staged partner without breeding.
+4.  **Reset / Try Again** — the **↩ Try Different Partner** button cleanly resets the full child preview (genome, art, name, breed info, custom title, Parent B URL, and any staged partner), returning the panel to the matchmaker or manual-entry state without requiring a page reload.
 
 ---
 
@@ -557,6 +560,8 @@ The app does not convert pixels directly into creature art. Instead it extracts 
 ### URL Parsing Robustness
 
 All Steem URL inputs throughout the app (breeding parent fields, accessory equip field, and the URL parser used when loading genomes) strip hidden Unicode characters — zero-width spaces (U+200B–U+200D) and the BOM (U+FEFF) — that some Steem frontends inject into copied URLs. The parser also ignores trailing query parameters and fragments (e.g. `?node=...`, `#top`) that steemit.com and other frontends append to share URLs. Previously, any URL with a suffix caused a hard "Cannot parse Steem URL" error even for perfectly valid creature links.
+
+### Reroll
 
 Because `APP` and `ORN` include random jitter, and `GEN` is drawn randomly among valid palette-matching integers, clicking **🎲 Reroll** re-runs `imageToGenome()` on the cached `HTMLImageElement` and produces a different creature that still shares the same colour family and body proportions as the source image.
 
