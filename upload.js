@@ -618,6 +618,27 @@ methods: {
     this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
   },
 
+  // FIX 4 — Genus-only redraw: apply the genus override (or remove it) without
+  // touching rerollIndex.  Called when the user edits the Genus field in the
+  // preview step.  This lets the user lock in a specific genus while keeping the
+  // image-matched shape and colours they were happy with — only GEN changes.
+  applyGenusOnly() {
+    if (!this.imageEl || !this.genome) return;
+    if (!this.genusInputValid) return;
+    const genome = { ...this.genome };
+    if (this.genusInput !== "") {
+      genome.GEN = Number(this.genusInput);
+    } else {
+      // Blank input: restore the genome's original GEN from the image analysis
+      // (re-derive without touching rerollIndex).
+      const fresh = imageToGenome(this.imageEl, this.rerollIndex);
+      genome.GEN  = fresh.GEN;
+    }
+    this.genome      = genome;
+    this.unicodeArt  = buildUnicodeArt(genome, 0, null, this.facingRight, "standing");
+    this.customTitle = buildDefaultTitle(generateFullName(genome), new Date());
+  },
+
   // ----------------------------------------------------------
   // Publish
   // ----------------------------------------------------------
@@ -897,8 +918,10 @@ methods: {
               min="0" max="999" step="1"
               placeholder="auto"
               style="width:80px;font-size:13px;padding:5px 8px;"
-              @change="reroll"
+              @change="applyGenusOnly"
             />
+            <!-- FIX 4 — Genus change no longer calls reroll(), so the rerollIndex is
+                 not incremented and the creature's shape/colour stays stable. -->
             <span v-if="genusInput !== '' && !genusInputValid" style="font-size:12px;color:#ff8a80;">
               Must be 0–999
             </span>

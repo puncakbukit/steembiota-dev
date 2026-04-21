@@ -2587,6 +2587,11 @@ const CreatureView = {
     async loadKinship() {
       this.kinshipLoading = true;
       const selfKey = nodeKey(this.author, this.permlink);
+      // FIX 1 — Race condition guard: snapshot the current generation counter so
+      // that if the user navigates to another creature while this async chain is
+      // still in flight, every write below can detect the staleness and abort
+      // before overwriting the new creature's kinship data.
+      const currentGen = this._loadGeneration;
       try {
         // --- Parents: fetch individually (cheap, known keys) ---
         const loadParent = async (ref) => {
@@ -2623,6 +2628,9 @@ const CreatureView = {
           loadParent(this._rawParentA),
           loadParent(this._rawParentB)
         ]);
+        // FIX 1 — Stale-result guard: another creature may have been loaded while
+        // the parent fetches were in flight.  Discard results if so.
+        if (this._loadGeneration !== currentGen) return;
         this.parentA = pA;
         this.parentB = pB;
 
@@ -2632,6 +2640,9 @@ const CreatureView = {
         if (this._rawParentB?.author) authorsToFetch.add(this._rawParentB.author);
 
         const corpus = await fetchCorpusByAuthors(authorsToFetch);
+        // FIX 1 — Second guard: corpus fetch involves multiple RPC calls and is
+        // the slowest part of loadKinship.  Check again before writing siblings/children.
+        if (this._loadGeneration !== currentGen) return;
         // Seed corpus with the creature itself
         corpus.set(selfKey, {
           key: selfKey, author: this.author, permlink: this.permlink,
@@ -3221,7 +3232,11 @@ const CreatureView = {
               ❤️ {{ votes.length }}
             </span>
             <!-- Upvote button + % picker popover -->
-            <div v-if="username && !hasVoted" style="position:relative;">
+            <!-- FIX 6 — Z-Index Phantom: isolation:isolate creates a new stacking
+                 context so the bobbing canvas animation (hardware-accelerated on
+                 mobile) can never flicker through the vote-picker popover, regardless
+                 of how the browser handles GPU compositing layers. -->
+            <div v-if="username && !hasVoted" style="position:relative;isolation:isolate;">
               <button
                 @click="toggleVotePicker"
                 :disabled="votingInProgress"

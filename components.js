@@ -4224,7 +4224,13 @@ const TransferPanelComponent = {
   computed: {
     pendingOffer()    { return this.transferState?.pendingOffer || null; },
     transferHistory() { return this.transferState?.transferHistory || []; },
-    hasHistory()      { return this.transferHistory.length > 0; }
+    hasHistory()      { return this.transferHistory.length > 0; },
+    // FIX 5 — Recipient self-check: computed so the UI reacts the instant the
+    // user types their own name — no button click required.
+    isSelfTransfer() {
+      const r = this.recipientInput.trim().toLowerCase();
+      return !!r && !!this.username && r === this.username.toLowerCase();
+    }
   },
   methods: {
     async sendOffer() {
@@ -4334,7 +4340,45 @@ const TransferPanelComponent = {
         this.$emit("notify", "Steem Keychain is not installed.", "error");
         return;
       }
+
+      // FIX 2 — "Handshake" pre-flight check.
+      // The owner may have re-offered to someone else (which implicitly cancels this
+      // offer) between the time this user loaded the page and now.  If we let the
+      // Keychain popup open first, the user spends RC signing a transaction that the
+      // protocol will silently discard — a confusing "Success but nothing happened"
+      // experience.  Instead, fetch the freshest reply set and re-parse the ownership
+      // chain; only proceed if the current pending offer still matches ours.
+      const cachedOfferPermlink = this.pendingOffer.offerPermlink;
       this.publishing = true;
+      try {
+        const freshReplies = await fetchAllReplies(this.creatureAuthor, this.creaturePermlink);
+        const freshChain   = parseOwnershipChain(freshReplies, this.creatureAuthor);
+        if (
+          !freshChain.pendingOffer ||
+          freshChain.pendingOffer.offerPermlink !== cachedOfferPermlink ||
+          freshChain.pendingOffer.to !== this.username
+        ) {
+          this.$emit(
+            "notify",
+            "⚠️ This offer is no longer active — the owner may have sent a new offer or cancelled it. Please refresh the page.",
+            "error"
+          );
+          this.publishing = false;
+          return;
+        }
+      } catch (e) {
+        // Non-fatal: if we can't verify, warn the user but still let them proceed
+        // rather than permanently blocking the accept flow on a flaky node.
+        console.warn("SteemBiota: pre-flight ownership check failed:", e);
+        this.$emit(
+          "notify",
+          "⚠️ Could not verify offer status — your connection may be unstable. Proceeding anyway.",
+          "error"
+        );
+        // A short delay so the user can read the warning before Keychain opens.
+        await new Promise(r => setTimeout(r, 1800));
+      }
+
       publishTransferAccept(
         this.username,
         this.creatureAuthor,
@@ -4425,11 +4469,19 @@ const TransferPanelComponent = {
             <div style="display:flex;flex-direction:column;gap:8px;">
               <input v-model="recipientInput" type="text" placeholder="Recipient username (without @)"
                 class="sb-input-full" @keydown.enter="sendOffer" />
+              <!-- FIX 5 — Inline self-transfer warning: shown reactively as the user
+                   types, before they can even click the button. -->
+              <p v-if="isSelfTransfer"
+                style="font-size:0.72rem;color:#ff8a80;margin:0;padding:5px 8px;
+                       background:#2a0000;border:1px solid #5a1a1a;border-radius:5px;">
+                ⚠ You cannot transfer a creature to yourself.
+              </p>
               <p style="font-size:0.72rem;color:#444;margin:0;">
                 ⚠ This cannot be undone unless the recipient declines (never accepts).
                 The offer stays open until they accept or you cancel it.
               </p>
-              <button @click="sendOffer" :disabled="publishing || !recipientInput.trim()" style="background:#0d1a2e;">
+              <!-- FIX 5 — Disable Send Offer when recipient is self (isSelfTransfer). -->
+              <button @click="sendOffer" :disabled="publishing || !recipientInput.trim() || isSelfTransfer" style="background:#0d1a2e;">
                 {{ publishing ? "Publishing…" : "🤝 Send Offer" }}
               </button>
             </div>

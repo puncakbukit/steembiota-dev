@@ -132,6 +132,15 @@ Equipping accessories on creatures requires rendering the accessory into a tempo
 
 `CreatureView` watches `$route.params` (deep) in addition to loading data in `created()`. This covers both permlink-only changes (e.g. navigating between two creatures by the same author) and **author-only changes** (e.g. navigating from `@alice/creature-one` to `@bob/creature-one`). On Steem, permlinks are unique per author — two different authors can publish posts with identical permlinks. The previous watcher only observed `$route.params.permlink`; a navigation where only the author changed left stale content on screen while the URL updated. The current deep watcher fires on any param change and always calls `loadCreature()`.
 
+### Kinship Load-Generation Guard
+
+`loadCreature()` increments a monotonic counter (`_loadGeneration`) each time it runs. `loadKinship()` snapshots this counter as `currentGen` at the very start of its execution. Because loading kinship involves multiple sequential RPC calls — parent fetches and a full corpus sweep across parent authors — it can take several seconds to complete. If the user navigates to a different creature before `loadKinship()` finishes, the counter will have incremented. Two guard checkpoints test `this._loadGeneration !== currentGen`:
+
+1. **After parent fetches resolve** — before writing `this.parentA` / `this.parentB`.
+2. **After corpus fetch resolves** — before writing `this.siblings` / `this.children`.
+
+At either checkpoint, if the generation has advanced, the function returns immediately without writing any data. This prevents stale kinship data from a previously viewed creature popping into the current creature's Family tab several seconds after navigation.
+
 ### Canvas Sizing and DPR
 
 Canvas backing-store dimensions are calculated once in `mounted()` via `_applyDpr()` and only recalculated when the CSS size or `devicePixelRatio` actually changes (monitored by a `ResizeObserver`). This prevents the browser from re-initialising the backing buffer on every frame — a significant source of CPU and memory overhead on high-DPR displays and during pinch-zoom.
@@ -140,9 +149,15 @@ Canvas backing-store dimensions are calculated once in `mounted()` via `_applyDp
 
 `CreatureCanvasComponent` accepts an `interactionsBlocked` prop (Boolean, default `false`). When `true`, the canvas receives `pointer-events: none` and its `z-index` is dropped to 0. `CreatureView` sets this via a `canvasInteractionsBlocked` computed property that is `true` whenever `actionPanelOpen` or `votePickerOpen` is active. The interact-tab panel area raises `actionPanelOpen` via `@pointerenter` / `@pointerleave`. This prevents the bobbing creature canvas from intercepting touch events aimed at Feed, Play, Walk, and other UI buttons positioned near the canvas on small screens.
 
-### Mobile Vertical Scroll Priority
+**Mobile Vertical Scroll Priority**
 
 The creature canvas carries `touch-action: pan-y` in its inline style. This tells the browser's touch handling layer to always treat vertical swipe gestures over the canvas as scroll events rather than JavaScript click events. Without this, a user swiping down to scroll the page while their finger crosses the canvas could trigger a spurious poke reaction, causing the creature to bob unexpectedly and fighting the scroll gesture.
+
+### Vote Picker Z-Index Isolation
+
+The vote-strength popover (the `%` slider that opens above the ❤️ upvote button) uses `z-index: 200`. On some mobile browsers, the creature canvas's bobbing animation is hardware-accelerated in a separate GPU compositing layer. Depending on how the browser resolves competing stacking contexts, this layer could flicker through absolute-positioned siblings.
+
+The `<div>` wrapping the upvote button and its popover now carries `isolation: isolate`. This creates a self-contained stacking context, confining the GPU layer promotion of the canvas animation to below that element's subtree. The popover is therefore always guaranteed to render above the canvas, regardless of the mobile browser's compositing strategy.
 
 ### Phenotype Derivation (`buildPhenotype`)
 
@@ -357,6 +372,10 @@ The "Shirt" template was removed from `ACCESSORY_TEMPLATES` because no renderer 
 
 Accessory names are generated deterministically from template + genome (material adjective + type-specific noun).
 
+### Parameter Input Controls
+
+Each genome parameter in the Create Accessory panel is controlled by a **paired range + number input**. The range slider allows quick "vibe" adjustments by dragging. The adjacent `<input type="number">` allows typing an exact integer, which is essential for hitting precise values (e.g. a specific hue of exactly 142°) on mobile devices where the slider thumb cannot be positioned with sufficient precision. Both inputs share the same `updateGenome(key, value)` handler and stay in sync at all times.
+
 ### Wearing Accessories on Creatures
 
 #### Permission Model (on accessory post replies)
@@ -453,6 +472,10 @@ The pixel downsampling (`samplePixels`) and Sobel edge detection + HSL conversio
 
 The **🎲 Reroll** button increments `rerollIndex` and regenerates the genome from the same image. Small deterministic offsets are applied to `aspectRatio` (±15% per unit) and `dominantHue` (±25° per unit) before fitting, giving each reroll a visibly different body shape and colour palette. `rerollIndex = 0` always produces the pure image-faithful result.
 
+### Genus Override (Preview Step)
+
+The Genus Override field is available both before and after image analysis. In the preview step, editing the field calls `applyGenusOnly()` rather than `reroll()`. This updates only `genome.GEN` — and regenerates the creature's name accordingly — without incrementing `rerollIndex`. The body shape and colour palette that the user was happy with are preserved. To explore different shapes and colours, the dedicated **🎲 Reroll** button is used instead.
+
 ### UI Flow
 
 1. **Pick** — drag-and-drop zone or file browser (JPG, PNG, GIF, WebP)
@@ -474,6 +497,10 @@ Creature ownership can be transferred between users via a **two-sided on-chain h
 
 Creatures with an open transfer offer display a **🤝 Pending → @recipient** amber badge directly on their card in the Home grid and Profile page. Owners can see at a glance which creatures are locked in a pending handshake without clicking into each detail page.
 
+### Self-Transfer Guard
+
+The Send Offer button is disabled and an inline warning is shown whenever the recipient input field contains the logged-in user's own username. This check is reactive — it is evaluated on every keystroke via a computed property (`isSelfTransfer`), so the UI refuses the action before the user even clicks. The `sendOffer()` method also enforces this check as a server-side safeguard.
+
 ### Effective Owner
 
 The original `post.author` never changes on-chain. SteemBiota derives the **effective owner** by walking the reply history via `parseOwnershipChain()`. The effective owner governs who can manage permits, who sees the Transfer panel, and whose profile the creature appears on.
@@ -483,6 +510,7 @@ The original `post.author` never changes on-chain. SteemBiota derives the **effe
 - Only the effective owner at the time of an offer may publish it; only the named recipient may accept.
 - Permits issued before a completed transfer are voided automatically (`permitsValidFrom` timestamp).
 - **Recipient account verification** — before publishing a `transfer_offer`, the app calls `getAccounts` to verify the recipient exists on Steem, preventing typo-induced permanent lock-outs.
+- **Accept pre-flight check** — before the Keychain popup opens for a `transfer_accept`, the app re-fetches the creature's latest replies and re-runs `parseOwnershipChain`. If the pending offer's `offer_permlink` no longer matches the chain's current active offer (because the sender issued a new offer to someone else, implicitly cancelling this one), the accept is blocked with a clear error message. This prevents a recipient from spending Resource Credits on a transaction the protocol will silently discard. If the network check fails, a brief warning is shown and the accept is allowed to proceed so a flaky RPC node cannot permanently block a valid acceptance.
 
 ---
 
@@ -703,9 +731,17 @@ Image-inspired founders add `"_source": "image-upload"` inside the genome object
 
 **Anti-dumping ownership** — Transfers require the recipient's explicit on-chain acceptance. Pending offers are visible on creature cards in list views.
 
+**Stale-result safety** — All multi-step async operations that write to component state use generation counters or equivalent guards to discard results that were superseded by a subsequent navigation before they completed. This applies to creature loading (`_loadGeneration` in `loadCreature`) and kinship loading (`currentGen` snapshot in `loadKinship`).
+
+**On-chain pre-flight verification** — Before opening the Keychain popup for a transfer accept, the app re-fetches the latest reply set and verifies the offer is still current. Users are never asked to spend Resource Credits on a transaction the protocol will silently ignore.
+
 **Opt-in breeding** — Creatures are closed to external breeding by default. Owners must explicitly grant named permits.
 
-**Mobile-first interactions** — Canvas tap dead-zones compensate for bobbing motion. `pointer-events: none` is applied when activity panels overlap the canvas. `touch-action: pan-y` ensures vertical scroll gestures always take priority over canvas click handlers.
+**Mobile-first interactions** — Canvas tap dead-zones compensate for bobbing motion. `pointer-events: none` is applied when activity panels overlap the canvas. `touch-action: pan-y` ensures vertical scroll gestures always take priority over canvas click handlers. `isolation: isolate` on the social button container prevents the GPU-composited canvas animation from bleeding through the vote-picker popover on mobile browsers.
+
+**Precision controls** — Every genome slider in the Accessory creator is paired with a number input so users can reach exact integer values on touch screens without relying on dragging accuracy.
+
+**Surgical genome edits** — In the Upload preview, changing the Genus Override field updates only `GEN` without altering the visual reroll index. The shape and colour the user selected via 🎲 Reroll are preserved.
 
 **Defensive caching** — Multi-tier caching (IndexedDB → localStorage → live fetch) with global invalidation stamps, surgical patching after transfers, and quota-exceeded eviction.
 

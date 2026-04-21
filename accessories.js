@@ -972,15 +972,26 @@ const AccessoriesView = {
           ['STR', 0, 9999,'Structure'],
           ['ORN', 0, 9999,'Ornament'],
         ]" :key="key">
+          <!-- FIX 3 — Precision input: the range slider is great for "vibing" a
+               colour, but hitting e.g. exactly 142° on a mobile touchscreen is
+               nearly impossible.  A paired number input lets the user type the
+               exact integer while both controls stay in sync via the same
+               updateGenome() handler. -->
           <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
             <span style="font-size:0.72rem;color:#777;width:82px;flex-shrink:0;">{{ label }}</span>
             <input type="range" :min="min" :max="max" :value="genome[key]"
               @input="updateGenome(key, $event.target.value)"
               style="flex:1;accent-color:#7b1fa2;"
             />
-            <span style="font-size:0.72rem;color:#555;width:36px;text-align:right;">
-              {{ genome[key] }}
-            </span>
+            <input
+              type="number"
+              :min="min" :max="max" step="1"
+              :value="genome[key]"
+              @change="updateGenome(key, $event.target.value)"
+              style="width:58px;font-size:0.72rem;background:#111;color:#ccc;
+                     border:1px solid #333;border-radius:4px;padding:2px 5px;
+                     text-align:right;-moz-appearance:textfield;"
+            />
           </div>
         </template>
 
