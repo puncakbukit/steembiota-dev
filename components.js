@@ -4656,7 +4656,9 @@ const EquipPanelComponent = {
     fossil:           { type: Boolean, default: false },
   },
   emits: ["notify", "wearings-updated"],
-  components: { ClosetThumbComponent },
+  // Note: ClosetThumbComponent is registered globally in app.js (vueApp.component).
+  // A local components: { ClosetThumbComponent } here would crash because accessories.js
+  // (where ClosetThumbComponent is defined) loads AFTER components.js in index.html.
 
   data() {
     return {
