@@ -431,6 +431,12 @@ function invalidateAccessoryCache(author, permlink) {
 }
 
 function parseSteembiotaPosts(rawPosts) {
+  // BUG FIX 4: Effective Ownership in the Home Feed Grid.
+  // The bulk parser never scanned replies for transfers (too expensive), so
+  // transferred creatures always showed the original author on the front page.
+  // Fix: read the per-post _effectiveOwner annotation written by patchListCacheOwner()
+  // (which is called on the detail page whenever a transfer is confirmed) and surface
+  // the "🤝 Transferred" badge in the grid without any extra network calls.
   const results = [];
   for (const p of rawPosts) {
     let meta = {};
@@ -438,6 +444,9 @@ function parseSteembiotaPosts(rawPosts) {
     if (!meta.steembiota || !meta.steembiota.genome) continue;
     const sb  = meta.steembiota;
     const age = calculateAge(p.created);   // live age — days since post was published
+    // _effectiveOwner is injected by patchListCacheOwner() when a transfer is confirmed
+    // on the detail page; fall back to the post author when absent.
+    const effectiveOwner = p._effectiveOwner || p.author;
     results.push({
       author:         p.author,
       permlink:       p.permlink,
@@ -455,7 +464,8 @@ function parseSteembiotaPosts(rawPosts) {
       originalAuthor:   null,
       originalPermlink: null,
       originalCreated:  null,
-      created:        p.created || ""
+      created:        p.created || "",
+      effectiveOwner,
     });
   }
   results.sort((a, b) => (b.created > a.created ? 1 : -1));
@@ -2123,6 +2133,10 @@ const CreatureView = {
       wearings:            [],
       // Incremented each time loadCreature() starts; used to cancel stale background fetches.
       _loadGeneration:     0,
+      // BUG FIX 7: Mobile canvas deadlock — tracks whether any action panel (Feed,
+      // activity tabs, vote picker, etc.) is open on top of the canvas so we can
+      // block canvas pointer events while the user interacts with those panels.
+      actionPanelOpen:     false,
     };
   },
   created() {
@@ -2134,9 +2148,19 @@ const CreatureView = {
   // → /@a/post2).  created() only fires on first mount, so clicking a Child or
   // Sibling in the Kinship Panel changed the URL but left stale content on screen.
   // The watcher detects the permlink change and reloads the creature explicitly.
+  //
+  // BUG FIX 2: Ghost Data on author-only navigation.
+  // On Steem, permlinks are unique per author, not globally.  @alice/creature-one
+  // and @bob/creature-one are entirely different posts.  The old watcher only
+  // observed $route.params.permlink, so navigating from @alice/creature-one to
+  // @bob/creature-one (identical permlink, different author) left Alice's data
+  // on screen with Bob's URL in the address bar.
+  // Fix: watch the entire params object with deep:true so any param change
+  // (author OR permlink) triggers a reload.
   watch: {
-    '$route.params.permlink': {
+    '$route.params': {
       handler() { this.loadCreature(); },
+      deep: true,
       immediate: false
     }
   },
@@ -2161,6 +2185,12 @@ const CreatureView = {
     fossil() {
       if (!this.genome) return false;
       return (this.postAge ?? 0) >= this.genome.LIF + (this.feedState ? this.feedState.lifespanBonus : 0);
+    },
+    // BUG FIX 7: Returns true whenever an overlapping UI panel is open so the
+    // canvas applies pointer-events:none, preventing the bobbing creature from
+    // intercepting taps intended for buttons below it on small screens.
+    canvasInteractionsBlocked() {
+      return this.actionPanelOpen || this.votePickerOpen;
     },
     unicodeArt()       { return this.genome ? buildUnicodeArt(this.genome, this.postAge ?? 0, this.feedState, this.facingRight, this.currentPose || "standing") : ""; },
     steemitUrl()       {
@@ -2930,6 +2960,7 @@ const CreatureView = {
           :anticipate-trigger="anticipateTrigger"
           :wearing="wearing"
           :wearings="wearings"
+          :interactions-blocked="canvasInteractionsBlocked"
           @facing-resolved="onFacingResolved"
           @pose-resolved="onPoseResolved"
         ></creature-canvas-component>
@@ -2954,7 +2985,9 @@ const CreatureView = {
          </div>
 
          <!-- Tab Content -->
-         <div v-show="activeTab === 'interact'">
+         <div v-show="activeTab === 'interact'"
+              @pointerenter="actionPanelOpen = true"
+              @pointerleave="actionPanelOpen = false">
 
         <!-- ── Worn Accessories + Equip Panel ── -->
         <!-- FIX 6: Pass :fossil so the panel can suppress the Equip form

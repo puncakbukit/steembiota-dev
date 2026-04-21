@@ -175,6 +175,12 @@ const CreatureCanvasComponent = {
     wearing:         { type: Object,  default: null  },
     // Multiple accessories currently worn (new API).
     wearings:        { type: Array,   default: () => [] },
+    // BUG FIX 7: Mobile Canvas Deadlock.
+    // When action panels (Feed, Walk, etc.) are open on small screens, the bobbing
+    // creature canvas intercepts touch events aimed at buttons positioned below it.
+    // Set interactionsBlocked:true while any such panel is open to apply
+    // pointer-events:none and lower the canvas z-index so buttons take priority.
+    interactionsBlocked: { type: Boolean, default: false },
   },
   emits: ["facing-resolved", "pose-resolved", "clicked"],
   data() {
@@ -335,10 +341,15 @@ const CreatureCanvasComponent = {
       this._dpr = dpr;
     },
     _normalizedWearings() {
+      // BUG FIX 3: Zombie Accessory — filter out items where the accessory owner
+      // has revoked the permission (permissionLapsed === true).  Without this filter
+      // a revoked accessory continued to render on the creature indefinitely because
+      // the draw loop had no visibility into the lapsed state.  A "⚠ Lapsed" badge
+      // is still shown in the Equip panel so the owner knows to click Remove.
       if (Array.isArray(this.wearings) && this.wearings.length) {
-        return this.wearings.filter(w => w && w.genome && w.template !== "shirt");
+        return this.wearings.filter(w => w && w.genome && w.template !== "shirt" && !w.permissionLapsed);
       }
-      return (this.wearing && this.wearing.genome && this.wearing.template !== "shirt")
+      return (this.wearing && this.wearing.genome && this.wearing.template !== "shirt" && !this.wearing.permissionLapsed)
         ? [this.wearing]
         : [];
     },
@@ -1073,6 +1084,13 @@ const CreatureCanvasComponent = {
     _drawAccessoryOnCreature(ctx, p, sc, ox, oy, pt, W, H, accessory, opts = {}) {
       if (!accessory || !accessory.genome) return;
       const { template, genome: ag } = accessory;
+      // BUG FIX 5: "Shirt" was listed as a valid template in some older versions of
+      // ACCESSORY_TEMPLATES but the renderer has never supported it.  The guard below
+      // (and the dead switch/scale cases further down) prevented shirts from appearing,
+      // but users could still create them, leaving a permanently invisible accessory.
+      // The fix is two-part: (a) remove "shirt" from ACCESSORY_TEMPLATES so it is no
+      // longer creatable (done in accessories.js), and (b) keep this early-return as a
+      // defensive fallback in case any legacy shirt genome is still in the wild.
       if (template === 'shirt') return;
       const underlayNecklace = !!opts.underlayNecklace;
 
@@ -1159,11 +1177,26 @@ const CreatureCanvasComponent = {
           anchorY = headY - hR * 1.05;
       }
 
-      // Render the accessory into an off-screen canvas
-      const offscreen = document.createElement('canvas');
-      offscreen.width  = accW;
-      offscreen.height = accH;
-      const offCtx = offscreen.getContext('2d');
+      // Render the accessory into an off-screen canvas.
+      // BUG FIX 1: Reuse a single offscreen canvas per component instance instead
+      // of allocating a new HTMLCanvasElement + 2D context on every frame.
+      // At 60 fps this was exhausting GPU context limits and causing "context lost"
+      // errors / tab crashes.  We only recreate (or resize) the canvas when accW or
+      // accH actually changes.
+      if (!this._offscreenCanvas) {
+        this._offscreenCanvas = document.createElement('canvas');
+        this._offscreenCanvas.width  = accW;
+        this._offscreenCanvas.height = accH;
+        this._offscreenCtx = this._offscreenCanvas.getContext('2d');
+      } else if (this._offscreenCanvas.width !== accW || this._offscreenCanvas.height !== accH) {
+        this._offscreenCanvas.width  = accW;
+        this._offscreenCanvas.height = accH;
+        // getContext() returns the same cached context after resize; no need to re-assign.
+      }
+      const offscreen = this._offscreenCanvas;
+      const offCtx    = this._offscreenCtx;
+      // Clear the reused canvas before each draw to avoid ghosting from previous accessories.
+      offCtx.clearRect(0, 0, accW, accH);
       // drawAccessory is defined in accessories.js (loaded before components.js)
       if (typeof drawAccessory === 'function') {
         drawAccessory(offCtx, template, ag, accW, accH, { transparentBackground: true, isWorn: true });
@@ -2570,7 +2603,10 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
           ? 'Fossilised creature — ' + (genome.SX === 0 ? 'male' : 'female') + ', genome preserved on-chain'
           : 'A ' + (genome.SX === 0 ? 'male' : 'female') + ' creature, ' + (feedState ? feedState.label : '') + ' — click to interact')
       : 'Creature canvas loading'"
-    :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;' + (fossil || !genome ? 'cursor:default;' : 'cursor:pointer;') + '-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'"
+    :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;'
+      + (fossil || !genome ? 'cursor:default;' : 'cursor:pointer;')
+      + '-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'
+      + (interactionsBlocked ? 'pointer-events:none;z-index:0;' : 'z-index:1;')"
     @click="onCanvasClick"></canvas>`
 };
 
@@ -4913,15 +4949,24 @@ const EquipPanelComponent = {
       </div>
 
       <!-- EQUIP -->
-      <!-- FIX 6 (Fossil Blind-Spot): Hide the full equip form for fossilised creatures.
-           Fossils can no longer equip new accessories, but the owner can still Remove
-           accessories that were worn at time of death to return them to their closet.
-           Show a clear explanation instead of a confusing "Equip" toggle that would
-           silently fail or show a scary "Force Unequip" as the only recovery option. -->
+      <!-- BUG FIX 8 (Fossil Accessory Retrieval UX): Hide the full equip form for
+           fossilised creatures.  Fossils can no longer equip new accessories, but
+           the CURRENT OWNER (who may be a new owner after a transfer) can still
+           Remove accessories that were worn at time of death to return them to their
+           closet.  The notice now explicitly addresses the transfer case so a new
+           owner who received a fossil doesn't think their accessories are lost
+           forever — it calls out the "Remove" button above and explains that the
+           accessory will be returned to their closet after removal. -->
       <div v-if="fossil && isOwner" class="sb-fossil-equip-notice"
         style="margin:10px 0;padding:10px 14px;border-radius:8px;background:#111;border:1px solid #2a2a2a;font-size:0.80rem;color:#666;">
-        🦴 This creature is a fossil. New accessories cannot be equipped.<br>
-        <span style="color:#80cbc4;">You can still remove worn accessories above to retrieve them.</span>
+        🦴 This creature is a fossil — it can no longer wear new accessories.<br>
+        <span style="color:#80cbc4;">
+          Any accessories shown above are still equipped and can be retrieved.
+          Use the <strong style="color:#e0e0e0;">👚 Remove</strong> button next to each item to return it to your closet.
+        </span>
+        <span v-if="hasWearings" style="display:block;margin-top:6px;color:#ffb74d;">
+          ⚠ {{ wearings.length }} accessory{{ wearings.length !== 1 ? 'ies are' : ' is' }} currently trapped in this fossil — remove {{ wearings.length !== 1 ? 'them' : 'it' }} to recover {{ wearings.length !== 1 ? 'them' : 'it' }}.
+        </span>
       </div>
       <template v-if="isOwner && username && !fossil">
         <div @click="expanded=!expanded" class="sb-equip-toggle">
