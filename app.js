@@ -1479,7 +1479,11 @@ const HomeView = {
           <h3 class="sb-section-title">Genome</h3>
           <genome-table-component :genome="genome"></genome-table-component>
           <h3 class="sb-section-title">Unicode Render</h3>
-          <pre :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
+          <!-- FIX 3A (A11y): aria-hidden hides the box-drawing chars from screen readers
+               (which would read "Box drawings light vertical…" for each glyph).
+               The visually-hidden span provides a concise description instead. -->
+          <span class="sb-sr-only">Unicode art representation of the creature genome</span>
+          <pre aria-hidden="true" :style="fossil ? { color:'#444', opacity:'0.6' } : {}">{{ unicodeArt }}</pre>
           <div class="sb-post-title-wrap">
             <label class="sb-form-label">Post title</label>
             <input v-model="customTitle" type="text" maxlength="255" class="sb-input-full"/>
@@ -2084,7 +2088,15 @@ const CreatureView = {
     return {
       loading:       true,
       loadError:     null,
-      activeTab: 'interact', // Default tab
+      // FIX 4B (Tab State Navigation): Read the initial tab from the URL query param
+      // (?tab=stats) so that "Back" navigation and shared links restore the correct tab.
+      // Without this, navigating from Creature A's "Stats" tab to Creature B always
+      // reset to "Interact", breaking the expected browser-back behavior.
+      activeTab: (() => {
+        const valid = ['interact','lineage','stats','mgmt','social'];
+        const q = new URLSearchParams(window.location.hash.split('?')[1] || '').get('tab');
+        return valid.includes(q) ? q : 'interact';
+      })(),
       isPhantom:     false,   // true when post was tombstoned via delete_comment
       genome:        null,
       name:          null,
@@ -2159,9 +2171,26 @@ const CreatureView = {
   // (author OR permlink) triggers a reload.
   watch: {
     '$route.params': {
-      handler() { this.loadCreature(); },
+      handler() {
+        // FIX 4B: On creature navigation, read the tab from the new URL (or default).
+        const valid = ['interact','lineage','stats','mgmt','social'];
+        const q = new URLSearchParams(window.location.hash.split('?')[1] || '').get('tab');
+        this.activeTab = valid.includes(q) ? q : 'interact';
+        this.loadCreature();
+      },
       deep: true,
       immediate: false
+    },
+    // FIX 4B: Push tab changes into the URL hash so Back/Forward and shared links
+    // restore the correct tab.  We use replaceState to avoid polluting history for
+    // every single tab click — only navigating to a different creature is a new entry.
+    activeTab(tab) {
+      const hash  = window.location.hash.split('?')[0];
+      const query = tab !== 'interact' ? `?tab=${tab}` : '';
+      const newHash = hash + query;
+      if (window.location.hash !== newHash) {
+        history.replaceState(null, '', window.location.pathname + newHash);
+      }
     }
   },
   mounted() {
@@ -2880,6 +2909,15 @@ const CreatureView = {
             <span style="font-size:0.85rem;color:#aaa;">
               Age: <strong style="color:#eee;">{{ postAge }} day{{ postAge === 1 ? '' : 's' }}</strong>
             </span>
+            <!-- FIX 3B (Color-Only Fertility): Add an explicit "Fertile Now" text badge so
+                 color-blind users aren't reliant on the pinkish #f48fb1 Young Adult color or
+                 the 🌸 icon alone to determine whether the creature is currently breedable. -->
+            <span v-if="isFertile && !fossil"
+              style="font-size:0.78rem;font-weight:bold;color:#f48fb1;background:#1a0010;
+                     border:1px solid #880e4f;border-radius:12px;padding:2px 10px;"
+              role="status" aria-live="polite"
+              title="This creature is currently in its fertile window and can be used for breeding"
+            >🌸 Fertile Now</span>
             <span v-if="lifecycleStage"
               :style="{ fontSize:'0.82rem', fontWeight:'bold', color:lifecycleStage.color,
                         border:'1px solid '+lifecycleStage.color, borderRadius:'12px', padding:'2px 10px' }"
@@ -4328,6 +4366,7 @@ vueApp.component("UserProfileComponent",        UserProfileComponent);
 vueApp.component("LoadingSpinnerComponent",     LoadingSpinnerComponent);
 vueApp.component("CreatureCanvasComponent",     CreatureCanvasComponent);
 vueApp.component("AccessoryCanvasComponent",    AccessoryCanvasComponent);
+vueApp.component("ClosetThumbComponent",        ClosetThumbComponent);  // FIX 2A: static img thumbnail
 vueApp.component("AccessoryCardComponent",      AccessoryCardComponent);
 vueApp.component("WearPanelComponent",          WearPanelComponent);
 vueApp.component("EquipPanelComponent",         EquipPanelComponent);

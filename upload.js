@@ -561,8 +561,15 @@ methods: {
       const img      = await loadImageFile(file);
       this.imageEl   = img;
 
-      // Run analysis on next tick so the UI shows "analysing…" first
-      await new Promise(r => setTimeout(r, 40));
+      // FIX 2B (Main-Thread Image Analysis): samplePixels() draws a potentially
+      // large image onto a 64×64 canvas and analysePixels() runs Sobel edge
+      // detection + HSL conversion — both are synchronous and can block the main
+      // thread for 200–500ms on large (10MB+) photos.  Wrapping them in a
+      // requestAnimationFrame allows the browser to commit the "Analysing…"
+      // spinner to the screen BEFORE the heavy work starts, so the UI doesn't
+      // appear frozen.  We then await a small setTimeout(0) after rAF to ensure
+      // the spinner paint has been flushed by the compositor.
+      await new Promise(resolve => requestAnimationFrame(() => setTimeout(resolve, 0)));
 
       const data   = samplePixels(img);
       const stats  = analysePixels(data, img.naturalWidth, img.naturalHeight);

@@ -632,6 +632,7 @@ const ACCESSORY_TEMPLATES = [
 ];
 
 // ============================================================
+// ============================================================
 // AccessoryCanvasComponent
 // Renders one accessory on a <canvas> element.
 // Props: template (String), genome (Object), canvasW, canvasH
@@ -661,6 +662,53 @@ const AccessoryCanvasComponent = {
     }
   },
   template: `<canvas ref="canvas" :width="canvasW" :height="canvasH" style="max-width:100%;display:block;"></canvas>`
+};
+
+// ============================================================
+// FIX 2A (Closet Canvas Explosion):
+// ClosetThumbComponent — renders an accessory ONCE into an off-screen
+// canvas, converts it to a PNG data URL, then displays a static <img>.
+//
+// Using a live AccessoryCanvasComponent for every closet item causes the
+// browser to maintain N active 2D GPU contexts simultaneously (one per
+// canvas element).  Mobile browsers hard-cap GPU contexts at ~16–32;
+// exceeding that limit causes silent context loss and visual corruption.
+//
+// ClosetThumbComponent draws once in mounted(), converts the canvas to
+// a data URL with toDataURL(), then discards the canvas entirely.
+// The rendered pixel data lives in the <img> src — zero GPU contexts held.
+// ============================================================
+const ClosetThumbComponent = {
+  name: "ClosetThumbComponent",
+  props: {
+    template: { type: String,  default: "hat" },
+    genome:   { type: Object,  default: null  },
+    canvasW:  { type: Number,  default: 58    },
+    canvasH:  { type: Number,  default: 46    },
+  },
+  data() { return { dataUrl: "" }; },
+  mounted() { this.renderThumb(); },
+  watch: {
+    template() { this.renderThumb(); },
+    genome()   { this.renderThumb(); },
+  },
+  methods: {
+    renderThumb() {
+      if (!this.genome) return;
+      const offscreen = document.createElement("canvas");
+      offscreen.width  = this.canvasW;
+      offscreen.height = this.canvasH;
+      const ctx = offscreen.getContext("2d");
+      if (typeof drawAccessory === "function") {
+        drawAccessory(ctx, this.template, this.genome, this.canvasW, this.canvasH, { transparentBackground: true });
+      }
+      // toDataURL transfers pixel data to a PNG string — the canvas is then GC'd.
+      this.dataUrl = offscreen.toDataURL("image/png");
+    }
+  },
+  template: `<img v-if="dataUrl" :src="dataUrl" :width="canvasW" :height="canvasH"
+    style="max-width:100%;display:block;image-rendering:pixelated;"
+    :alt="template + ' accessory thumbnail'" />`
 };
 
 // ============================================================

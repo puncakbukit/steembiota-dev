@@ -2606,6 +2606,7 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
     :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;'
       + (fossil || !genome ? 'cursor:default;' : 'cursor:pointer;')
       + '-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'
+      + 'touch-action:pan-y;'
       + (interactionsBlocked ? 'pointer-events:none;z-index:0;' : 'z-index:1;')"
     @click="onCanvasClick"></canvas>`
 };
@@ -2619,7 +2620,12 @@ const CreatureCardComponent = {
   components: { CreatureCanvasComponent },
   props: {
     post:     { type: Object, required: true },
-    username: { type: String, default: "" }
+    username: { type: String, default: "" },
+    // FIX 1A (Pending Transfer Badge): When the creature has an open transfer offer,
+    // show a 🤝 Pending badge directly on the card so owners can see at a glance
+    // which of their creatures are locked in a handshake — without clicking into
+    // each detail page.  Pass transferState.pendingOffer (or null) from the parent.
+    pendingOffer: { type: Object, default: null }
   },
   data() {
     return {
@@ -2771,7 +2777,18 @@ const CreatureCardComponent = {
           style="display:block;margin:0 auto;"
         ></creature-canvas-component>
 
-        <div class="sb-card-name">🧬 {{ post.name }}</div>
+        <div class="sb-card-name">
+          🧬 {{ post.name }}
+          <!-- FIX 1A: Show 🤝 Pending badge when creature has an open transfer offer.
+               Without this, the owner must click into each creature's detail page
+               to discover which items are locked in a pending handshake. -->
+          <span v-if="pendingOffer" title="Transfer offer pending — waiting for recipient to accept"
+            style="display:inline-block;margin-left:6px;font-size:0.68rem;
+                   background:#1a1200;color:#ffb74d;border:1px solid #3a2800;
+                   border-radius:4px;padding:1px 5px;vertical-align:middle;">
+            🤝 Pending → @{{ pendingOffer.to }}
+          </span>
+        </div>
 
         <!-- Row 1: sex · age · lifecycle · ❤️ count [↑] -->
         <div class="sb-card-row" @click.prevent.stop>
@@ -3531,6 +3548,19 @@ const BreedingPanelComponent = {
             loadGenomeFromPost(this.urlA.trim()),
             loadGenomeFromPost(trimmed),
           ]);
+          // FIX 1B (Genus Mismatch): Explicitly verify GEN matches before running
+          // the full ancestor walk.  Without this, pasting a URL for an incompatible
+          // genus would pass kinshipPreview silently and only fail at the final Breed
+          // button click — a confusing late-stage error that discards the user's work.
+          if (resA.genome.GEN !== resB.genome.GEN) {
+            const nameA = typeof generateGenusName === "function" ? generateGenusName(resA.genome.GEN) : `GEN ${resA.genome.GEN}`;
+            const nameB = typeof generateGenusName === "function" ? generateGenusName(resB.genome.GEN) : `GEN ${resB.genome.GEN}`;
+            throw new Error(
+              `Genus mismatch: Parent A is ${nameA} (GEN ${resA.genome.GEN}) ` +
+              `but Parent B is ${nameB} (GEN ${resB.genome.GEN}). ` +
+              `Both parents must be the same genus.`
+            );
+          }
           await checkBreedingCompatibility(resA, resB);
           this.kinshipPreview = "ok";
         } catch (e) {
@@ -4626,6 +4656,7 @@ const EquipPanelComponent = {
     fossil:           { type: Boolean, default: false },
   },
   emits: ["notify", "wearings-updated"],
+  components: { ClosetThumbComponent },
 
   data() {
     return {
@@ -4816,9 +4847,24 @@ const EquipPanelComponent = {
     async equipAccessory() {
       if (!this.previewAcc || !window.steem_keychain) return;
 
-      this.publishing = true;
-
       const { accAuthor, accPermlink, accName } = this.previewAcc;
+      // FIX 4A (Double-Spend Accessory Trap): Use a module-level Set to track
+      // accessory IDs whose wear_on transaction is currently in-flight across ALL
+      // component instances (including other browser tabs via BroadcastChannel).
+      // The blockchain "is it busy?" check has a race condition: if the user has
+      // two tabs open for two different creatures, both can pass the check before
+      // the first Steem block confirms the transaction.  We mitigate this by
+      // disabling the Equip button for this accPermlink the moment we broadcast,
+      // and clearing it once the callback fires (success or failure).
+      const accKey = `${accAuthor}/${accPermlink}`;
+      if (!window._sbPendingEquips) window._sbPendingEquips = new Set();
+      if (window._sbPendingEquips.has(accKey)) {
+        this.$emit("notify", "A wear transaction for this accessory is already in progress — please wait.", "error");
+        return;
+      }
+      window._sbPendingEquips.add(accKey);
+
+      this.publishing = true;
 
       publishWearOn(
         this.username,
@@ -4830,6 +4876,7 @@ const EquipPanelComponent = {
         accName,
         (res) => {
           this.publishing = false;
+          window._sbPendingEquips && window._sbPendingEquips.delete(accKey);
 
           if (res.success) {
             this.$emit("notify", `🧢 ${accName} equipped!`, "success");
@@ -4983,8 +5030,13 @@ const EquipPanelComponent = {
             <div v-if="loadingCloset" class="sb-dimmer">Loading...</div>
             <div v-else-if="filteredCloset.length === 0" class="sb-closet-empty">No matching items...</div>
             <div v-else class="sb-closet-scroll">
+              <!-- FIX 2A (Closet Canvas Explosion): Use ClosetThumbComponent (static <img> via
+                   toDataURL) instead of AccessoryCanvasComponent (live GPU canvas) for each
+                   closet item.  At 60+ items the old approach exhausted mobile GPU context limits
+                   and caused silent canvas-lost errors.  The thumb renders once and discards the
+                   offscreen canvas immediately — zero GPU contexts remain active. -->
               <div v-for="item in filteredCloset" :key="item.permlink" @click="selectFromCloset(item)" style="cursor:pointer;text-align:center;">
-                <accessory-canvas-component :template="item.template" :genome="item.genome" :canvas-w="58" :canvas-h="46" />
+                <closet-thumb-component :template="item.template" :genome="item.genome" :canvas-w="58" :canvas-h="46" />
                 <div style="font-size:10px;color:#888;">{{ item.name }}</div>
               </div>
             </div>
@@ -5006,7 +5058,9 @@ const EquipPanelComponent = {
           <div v-if="previewAcc" style="margin-top:8px;">
             <accessory-canvas-component :template="previewAcc.template" :genome="previewAcc.genome" :canvas-w="80" :canvas-h="64" />
             <div class="sb-equip-preview-name">{{ previewAcc.accName }}</div>
-            <button @click="equipAccessory" :disabled="publishing">🧢 Equip</button>
+            <!-- FIX 4A: Also disable when accKey is in the session-level pending equips set -->
+            <button @click="equipAccessory"
+              :disabled="publishing || ($root._sbPendingEquips && $root._sbPendingEquips.has(previewAcc.accAuthor+'/'+previewAcc.accPermlink))">🧢 Equip</button>
           </div>
         </div>
       </template><!-- end v-if isOwner && username && !fossil -->
