@@ -1258,12 +1258,27 @@ async function fetchAncestors(startAuthor, startPermlink) {
       await writeAncestryDB(key, parentA, parentB, phantom);
     }
 
-    // Phantom check (same safety guarantee as original)
+    // BUG 7 FIX: Phantom ancestor — "Severed Lineage" instead of hard block.
+    //
+    // Previously, a single deleted ancestor post would throw an Error and permanently
+    // prevent breeding for all downstream descendants, even though the immediate
+    // parents are perfectly healthy and visible on-chain.  The user had no way to
+    // fix this because they didn't create the ancestor and can't restore a deleted post.
+    //
+    // New behaviour:
+    //   • A phantom ancestor does NOT throw — it is recorded in the visited map
+    //     with a severedLineage flag so the BFS can continue past it.
+    //   • fetchAncestors returns the completed map with a top-level
+    //     `hasSeveredLineage` flag that callers can inspect.
+    //   • checkBreedingCompatibility attaches a non-blocking warning to its return
+    //     value; the breeding panel surfaces it and tags the child with the
+    //     "Severed Lineage" trait rather than refusing to breed at all.
     if (phantom) {
-      throw new Error(
-        `Ancestor @${author}/${permlink} is a Phantom — its post was removed. ` +
-        `Ancestry cannot be verified; breeding blocked.`
-      );
+      // Mark this node as severed so callers know lineage is incomplete here.
+      visited.set(key, { author, permlink, meta: null, depth, severed: true });
+      // Signal up to the traversal result that at least one phantom was found.
+      visited._hasSeveredLineage = true;
+      continue;  // do NOT enqueue the phantom's parents — there are none to fetch
     }
 
     visited.set(key, { author, permlink, meta, depth });
@@ -1501,7 +1516,20 @@ async function checkBreedingCompatibility(resA, resB) {
     );
   }
 
-  return null; // compatible
+  // BUG 7 FIX: If either ancestry walk encountered a phantom (deleted) post,
+  // breeding is still allowed, but the result carries a severed-lineage flag so
+  // the child can be tagged with the "Severed Lineage" trait and the UI can show
+  // the player an informative (non-blocking) warning.
+  const hasSeveredLineage = !!(ancestorsA._hasSeveredLineage || ancestorsB._hasSeveredLineage);
+  return hasSeveredLineage
+    ? {
+        severedLineage: true,
+        warning:
+          "⚠ One or more ancestors of this pair had their post deleted (Phantom). " +
+          "Lineage cannot be fully verified. The offspring will carry a "Severed Lineage" trait " +
+          "but is otherwise healthy and fully breedable."
+      }
+    : null; // compatible, clean lineage
 }
 
 // ---- Utility ----

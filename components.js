@@ -3175,7 +3175,11 @@ const ActivityPanelComponent = {
     ctxAlreadyFed:         { type: Boolean, default: false },
     initialActivityState:  { type: Object,  default: null }
   },
-  emits: ["notify", "feed-state-updated", "activity-state-updated", "optimistic-feed", "optimistic-play", "optimistic-walk", "optimistic-anticipate", "cancel-anticipate"],
+  emits: ["notify", "feed-state-updated", "activity-state-updated", "optimistic-feed", "optimistic-play", "optimistic-walk", "optimistic-anticipate", "cancel-anticipate",
+    // BUG 8 FIX: Emitted on Keychain rejection so the parent (CreatureView) can
+    // reset its alreadyFedToday ref immediately — preventing the Feed button
+    // staying stuck in a disabled/success state until the next blockchain re-fetch.
+    "feed-failed"],
   data() {
     return {
       // Feed state
@@ -3326,6 +3330,11 @@ const ActivityPanelComponent = {
             // doesn't stay stuck in "alert" until the 12-second timeout fires.
             this.alreadyFedToday = false;
             this.$emit("cancel-anticipate");
+            // BUG 8 FIX: Notify the parent (CreatureView) so it can reset its own
+            // alreadyFedToday ref.  Without this the Feed button stays disabled/
+            // success because the parent's ctxAlreadyFed was set optimistically and
+            // is only refreshed on a blockchain re-fetch, which hasn't happened yet.
+            this.$emit("feed-failed");
             this.$emit("notify", "Feed failed: " + (response.message || "Unknown error"), "error");
           }
         }
@@ -3585,6 +3594,10 @@ const BreedingPanelComponent = {
       // Early kinship preview (fix 3b): set when urlB is filled and valid
       kinshipPreview: null,   // null | "checking" | "ok" | { error: string }
       _kinshipTimer:  null,
+      // BUG 7 FIX: Set to a warning string when a phantom ancestor is detected
+      // (severed lineage).  null = clean lineage.  Shown in the child preview
+      // as an informational badge, not a blocking error.
+      _severedLineageWarning: null,
     };
   },
   watch: {
@@ -3835,7 +3848,14 @@ const BreedingPanelComponent = {
         if (!this.kinshipPreview || this.kinshipPreview === "checking") {
           this.loadStatus = "Checking ancestry and family relationships…";
           try {
-            await checkBreedingCompatibility(resA, resB);
+            const compatResult = await checkBreedingCompatibility(resA, resB);
+            // BUG 7 FIX: A non-null result means severed lineage (phantom ancestor).
+            // Store the warning so the UI can display it; do NOT block breeding.
+            if (compatResult && compatResult.severedLineage) {
+              this._severedLineageWarning = compatResult.warning;
+            } else {
+              this._severedLineageWarning = null;
+            }
           } catch (e) {
             // FIX 1C: If the check fails mid-way (e.g. 429 rate-limit or CORS
             // timeout on a public node), clear the "checking" state and surface
@@ -3862,6 +3882,14 @@ const BreedingPanelComponent = {
         // rapid clicks from the same user produce different genomes and permlinks.
         const nonce = this.urlA + this.urlB + (this.username || "") + Date.now() + Math.floor(Math.random() * 1e9);
         const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome, nonce);
+
+        // BUG 7 FIX: Stamp the "Severed Lineage" trait onto the child genome if
+        // a phantom ancestor was encountered during the compatibility check.
+        // This is stored in json_metadata so it can be displayed on the creature
+        // page without affecting any gameplay mechanics.
+        if (this._severedLineageWarning) {
+          child._severedLineage = true;
+        }
 
         this._facingRight = Math.random() < 0.5;
         this.childGenome = child;
@@ -4062,6 +4090,14 @@ const BreedingPanelComponent = {
         <div v-if="loadError"  class="sb-breed-error">⚠ {{ loadError }}</div>
 
         <div v-if="childGenome" class="sb-child-preview">
+          <!-- BUG 7 FIX: Severed Lineage warning — shown instead of a hard error when
+               a phantom (deleted) ancestor is found.  Breeding is allowed; the child
+               carries the trait permanently on-chain as json_metadata._severedLineage. -->
+          <div v-if="_severedLineageWarning"
+            style="margin-bottom:12px;padding:10px 14px;border-radius:8px;
+                   background:#1a1200;border:1px solid #7a5800;color:#ffe082;font-size:12px;line-height:1.5;">
+            🌿 {{ _severedLineageWarning }}
+          </div>
           <div class="sb-child-title">🧬 {{ childName }}</div>
           <div class="sb-child-subtitle">
             {{ sexLabel }} &nbsp;·&nbsp;
@@ -4139,9 +4175,14 @@ const BreedPermitPanelComponent = {
   },
   methods: {
     async grantPermit() {
-      const grantee = this.granteeInput.trim().toLowerCase();
+      // BUG 2 FIX: Strip leading @ and whitespace; validate Steem username format.
+      const grantee = this.granteeInput.trim().replace(/^@+/, "").trim().toLowerCase();
       if (!grantee) {
         this.$emit("notify", "Please enter a username to grant a permit to.", "error");
+        return;
+      }
+      if (!/^[a-z0-9.-]+$/.test(grantee)) {
+        this.$emit("notify", "Invalid username — only lowercase letters, digits, dots, and hyphens are allowed.", "error");
         return;
       }
       if (grantee === this.username) {
@@ -4306,11 +4347,19 @@ const TransferPanelComponent = {
   },
   methods: {
     async sendOffer() {
-      const to = this.recipientInput.trim().toLowerCase();
-      if (!to) {
+      // BUG 2 FIX: Strip leading @ and surrounding whitespace so that a user who
+      // copies "@alice" from a Steem profile gets the same result as typing "alice".
+      // Also enforce the Steem username regex before hitting the chain.
+      const raw = this.recipientInput.trim().replace(/^@+/, "").trim().toLowerCase();
+      if (!raw) {
         this.$emit("notify", "Please enter a recipient username.", "error");
         return;
       }
+      if (!/^[a-z0-9.-]+$/.test(raw)) {
+        this.$emit("notify", "Invalid username — only lowercase letters, digits, dots, and hyphens are allowed.", "error");
+        return;
+      }
+      const to = raw;
       if (to === this.username) {
         this.$emit("notify", "You cannot transfer to yourself.", "error");
         return;

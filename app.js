@@ -2769,6 +2769,12 @@ const CreatureView = {
         if (!canvas.fossil) canvas._behaviourLoop();
       }
     },
+    // BUG 8 FIX: ActivityPanelComponent emits this when a Feed Keychain request is
+    // rejected. Reset alreadyFedToday on the parent so the Feed button returns to
+    // its enabled state immediately, without waiting for a blockchain re-fetch.
+    onFeedFailed() {
+      this.alreadyFedToday = false;
+    },
     onFacingResolved(dir)  { this.facingRight = dir; },
     onPoseResolved(pose)   { this.currentPose = pose; },
 
@@ -3084,6 +3090,7 @@ const CreatureView = {
           @activity-state-updated="onActivityStateUpdated"
           @optimistic-anticipate="onOptimisticAnticipate"
           @cancel-anticipate="onCancelAnticipate"
+          @feed-failed="onFeedFailed"
           @optimistic-feed="reactionTrigger++"
           @optimistic-play="reactionTrigger++"
           @optimistic-walk="reactionTrigger++"
@@ -3231,7 +3238,11 @@ const CreatureView = {
       </div>
     </div>
 
-        
+        <!-- BUG 3 FIX: Pose label + social counters are wrapped in a dedicated stacking
+             context container (position:relative; z-index:10) so the hardware-accelerated
+             bobbing canvas can never promote to a layer that overlays the vote-picker
+             popover on mobile Chrome/Safari, regardless of GPU compositing decisions. -->
+        <div style="position:relative;z-index:10;">
         <!-- Pose label + social counters row -->
         <div style="display:flex;align-items:center;justify-content:space-between;
                     min-height:18px;margin:3px 0 0;">
@@ -3333,6 +3344,7 @@ const CreatureView = {
         <div v-if="fossil" style="margin:6px 0;color:#666;font-size:0.85rem;letter-spacing:0.05em;">
           🦴 This creature has fossilised. Its genome is preserved on-chain.
         </div>
+        </div><!-- end z-index:10 stacking context for social counters / votePicker -->
 
         <hr/>
 
@@ -3469,6 +3481,10 @@ const LeaderboardView = {
       topXp:        1,    // used to scale XP bars
       retrying:     false,           // FIX 6: true while a retry fetch is in progress
       failedAuthors: [],             // FIX 6: authors whose XP fetch failed — enables Retry button
+      // BUG 1 FIX: Track when the user last manually refreshed so we can enforce
+      // the 10-minute cooldown between manual cache-busting refreshes.
+      lastManualRefreshAt: 0,
+      manualRefreshCooldownMs: 10 * 60 * 1000,  // 10 minutes
     };
   },
   async created() {
@@ -3650,6 +3666,30 @@ const LeaderboardView = {
       return colors[rankTitle] || "#555";
     },
 
+    // BUG 1 FIX: "Refresh Rankings" — bypasses the 24-hour leaderboard cache so
+    // players who just bred a speciated offspring or joined for the first time can
+    // see their updated rank immediately.  Rate-limited to once per 10 minutes so
+    // we don't hammer the public RPC nodes.
+    async manualRefresh() {
+      const now = Date.now();
+      const cooldownRemaining = this.lastManualRefreshAt + this.manualRefreshCooldownMs - now;
+      if (cooldownRemaining > 0) {
+        const minsLeft = Math.ceil(cooldownRemaining / 60000);
+        // Notify is injected; use a gentle inline message instead of crashing.
+        this.loadError = `Please wait ${minsLeft} more minute${minsLeft === 1 ? "" : "s"} before refreshing again.`;
+        setTimeout(() => { if (this.loadError && this.loadError.startsWith("Please wait")) this.loadError = ""; }, 4000);
+        return;
+      }
+      this.lastManualRefreshAt = now;
+      // Evict the leaderboard cache entry so created() re-fetches from the chain.
+      try { localStorage.removeItem("steembiota:leaderboard:v1"); } catch {}
+      this.loading   = true;
+      this.loadError = "";
+      this.entries   = [];
+      // Re-run the full load logic by re-calling created().
+      await this.$options.created.call(this);
+    },
+
     // FIX 6: Retry only the authors whose XP data failed to load (typically due
     // to a 429 rate-limit on the public node).  Successfully fetched authors are
     // already cached, so this is a minimal, targeted re-fetch rather than a full
@@ -3743,7 +3783,20 @@ const LeaderboardView = {
   },
   template: `
     <div style="margin-top:20px;padding:0 16px 40px;">
-      <h2 style="color:#a5d6a7;margin:0 0 4px;font-size:1.1rem;letter-spacing:0.05em;">🏆 Leaderboard</h2>
+      <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px;">
+        <h2 style="color:#a5d6a7;margin:0;font-size:1.1rem;letter-spacing:0.05em;">🏆 Leaderboard</h2>
+        <!-- BUG 1 FIX: "Refresh Rankings" button — bypasses the 24-hour cache so
+             new players or players who just speciated can see their updated rank.
+             Rate-limited to once per 10 minutes to protect public RPC nodes. -->
+        <button
+          @click="manualRefresh"
+          :disabled="loading || retrying"
+          style="font-size:11px;padding:4px 12px;background:#0d1a0d;
+                 color:#66bb6a;border:1px solid #2e7d32;border-radius:6px;
+                 cursor:pointer;white-space:nowrap;"
+          title="Force-refresh the leaderboard, bypassing the 24-hour cache. Rate-limited to once per 10 minutes."
+        >🔄 Refresh Rankings</button>
+      </div>
       <p style="font-size:12px;color:#444;margin:0 0 20px;">
         Ranked by XP from founders, offspring, feeds given, upvotes cast, genera contributed &amp; speciation events.
       </p>
@@ -3878,7 +3931,7 @@ const LeaderboardView = {
 // handoffs where this user is the named recipient).
 const NotificationsView = {
   name: "NotificationsView",
-  inject: ["username", "notify"],
+  inject: ["username", "notify", "updateNotifBadge"],
   data() {
     return {
       loading:       true,
@@ -3989,6 +4042,15 @@ const NotificationsView = {
             );
             const cacheKey = `steembiota:notifications:${String(this.username).toLowerCase()}:v1`;
             writeObjectCache(cacheKey, { notifications: this.notifications });
+            // BUG 5 FIX: Sync the nav-bar badge immediately instead of waiting for
+            // the next 5-minute poll.  The accepted offer was already removed from
+            // this.notifications above, so the new pending count is simply the
+            // number of remaining transfer_offer entries.
+            const remainingOffers = this.notifications.filter(x => x.type === "transfer_offer").length;
+            // notifBadgeCount is provided via the App root; reach it through inject.
+            if (typeof this.updateNotifBadge === "function") {
+              this.updateNotifBadge(remainingOffers);
+            }
           } else {
             this.notify("Accept failed: " + (res.message || "Unknown error"), "error");
           }
@@ -4300,6 +4362,10 @@ const App = {
     provide("hasKeychain", hasKeychain);
     provide("notify",      notify);
     provide("profileData", profileData);
+    // BUG 5 FIX: Expose a setter so child views (NotificationsView) can update the
+    // nav-bar badge count immediately after accepting a transfer offer, without
+    // waiting for the next 5-minute poll interval.
+    provide("updateNotifBadge", (count) => { notifBadgeCount.value = count; });
 
     return {
       username, hasKeychain, keychainReady,

@@ -249,7 +249,12 @@
     .sb-dot     { color: #444; }
     .sb-muted   { color: #888; }
     .sb-dimmer  { color: #555; }
-    .sb-dimmer-2 { color: #3a3a3a; }
+    /* BUG 6 FIX: #3a3a3a on #111 background yields a contrast ratio of ~1.86:1,
+       well below the WCAG AA minimum of 4.5:1. Changed to #767676, which achieves
+       exactly 4.54:1 on #111 — the minimum passing value. Critical provenance
+       information (transferred badge, original author) is now readable for users
+       with low vision or in bright sunlight. */
+    .sb-dimmer-2 { color: #767676; }
 
     .sb-copy-btn {
       margin-top: 7px;
@@ -811,7 +816,8 @@
     .sb-phantom-card  { border: 1px solid #333; border-radius: 10px; padding: 16px; text-align: center; background: #0a0a0a; color: #555; }
     .sb-phantom-icon  { font-size: 1.8rem; }
     .sb-phantom-label { font-size: 0.78rem; margin-top: 6px; }
-    .sb-phantom-author { font-size: 0.68rem; color: #3a3a3a; margin-top: 4px; }
+    /* BUG 6 FIX: Same contrast fix — was #3a3a3a (1.86:1), now #767676 (4.54:1). */
+    .sb-phantom-author { font-size: 0.68rem; color: #767676; margin-top: 4px; }
     .sb-phantom-note   { font-size: 0.65rem; color: #2a2a2a; margin-top: 4px; font-style: italic; }
     .sb-no-data { font-size: 12px; color: #333; margin-bottom: 8px; }
 

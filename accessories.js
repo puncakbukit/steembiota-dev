@@ -981,6 +981,10 @@ const AccessoriesView = {
         if (myGen !== this._listGeneration) return;
         const safeRaw = Array.isArray(raw) ? raw : [];
         this.allAccessories = parseSteembiotaAccessories(safeRaw);
+        // BUG 4 FIX: Reset to page 1 whenever the list is refreshed from the
+        // chain so a user browsing page 4 doesn't end up on an empty page
+        // after the total item count changes.
+        this.listPage = 1;
         if (canUseCache) writeListCache(cacheKey, safeRaw);
       } catch (e) {
         if (myGen !== this._listGeneration) return; // stale — discard error too
