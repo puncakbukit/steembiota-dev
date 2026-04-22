@@ -39,7 +39,7 @@ Files: `index.html`, `blockchain.js`, `components.js`, `accessories.js`, `upload
 
 ## Creature Genome
 
-Each creature is defined by ten integer genes, plus an optional provenance tag:
+Each creature is defined by ten integer genes, plus optional provenance tags:
 
 | Gene | Description | Range |
 |---|---|---|
@@ -54,6 +54,7 @@ Each creature is defined by ten integer genes, plus an optional provenance tag:
 | `FRT_END` | Fertility window end (days from birth) | varies |
 | `MUT` | Mutation tendency — scales per-gene mutation probability for offspring | 0–2 (founders); 0–5 (bred offspring) |
 | `_source` | Optional provenance tag — `"image-upload"` for creatures created via the Upload page; absent for random founders and offspring | string or absent |
+| `_severedLineage` | Optional trait flag — `true` when the child was bred from a lineage containing a Phantom ancestor. Stored in `json_metadata` only; has no effect on gameplay but is displayed as a badge on the creature page. | boolean or absent |
 
 All ten numeric genes are stored verbatim inside every creature post (in a fenced code block and in `json_metadata.steembiota.genome`), so any client can reconstruct and render the creature entirely from the blockchain.
 
@@ -112,7 +113,9 @@ The creature detail page shows an explicit **🌸 Fertile Now** text badge next 
 
 ### Phantom Creatures
 
-If a post is deleted on Steem (`delete_comment` op), the API returns the post with an empty `author` field. SteemBiota detects this as a **phantom** — distinct from a fossil (natural end-of-life). The creature page shows a 👻 tombstone screen with a lore explanation. Phantoms cannot be fed, played with, walked, or bred. If any ancestor in a breeding chain is phantom, the breeding attempt is blocked entirely to prevent inbreeding check evasion.
+If a post is deleted on Steem (`delete_comment` op), the API returns the post with an empty `author` field. SteemBiota detects this as a **phantom** — distinct from a fossil (natural end-of-life). The creature page shows a 👻 tombstone screen with a lore explanation. Phantoms cannot be fed, played with, walked, or bred.
+
+If a **non-direct ancestor** in a breeding chain is phantom, breeding is no longer blocked. Instead, the child genome is stamped with `_severedLineage: true` and an amber informational banner is shown in the breed preview. This prevents one user's old deletion from permanently poisoning all downstream descendants of a healthy creature pair. See [Kinship: Severed Lineage](#kinship-severed-lineage) below.
 
 ---
 
@@ -157,7 +160,7 @@ The creature canvas carries `touch-action: pan-y` in its inline style. This tell
 
 The vote-strength popover (the `%` slider that opens above the ❤️ upvote button) uses `z-index: 200`. On some mobile browsers, the creature canvas's bobbing animation is hardware-accelerated in a separate GPU compositing layer. Depending on how the browser resolves competing stacking contexts, this layer could flicker through absolute-positioned siblings.
 
-The `<div>` wrapping the upvote button and its popover now carries `isolation: isolate`. This creates a self-contained stacking context, confining the GPU layer promotion of the canvas animation to below that element's subtree. The popover is therefore always guaranteed to render above the canvas, regardless of the mobile browser's compositing strategy.
+The **pose label and social counters row** (which contains the upvote button, vote-picker popover, and resteem button) is now wrapped in a dedicated `<div style="position:relative;z-index:10;">` container. This creates a self-contained stacking context, guaranteeing that all UI elements in this row — including the floating vote-picker — are always rendered above the hardware-accelerated canvas animation layer, regardless of the mobile browser's compositing strategy.
 
 ### Phenotype Derivation (`buildPhenotype`)
 
@@ -243,8 +246,6 @@ Fossil creatures always render with the flat fossilised ellipse+cracks form rega
 
 ### Eye Styles
 
-The eye iris shape, pupil shape, and scaling all vary by `eyeStyle`:
-
 | Style | `GEN % 4` | Iris shape | Pupil shape |
 |---|---|---|---|
 | Round | 0 | Circle | Standard oval offset |
@@ -278,6 +279,8 @@ When a Steem Keychain popup opens for a Feed, Play, or Walk transaction, the cre
 - **On success** — the full celebratory reaction animation plays, pre-empting the anticipation pose.
 - **On rejection or failure** — the pose is cleared immediately and the autonomous behaviour loop resumes. The creature does not stay frozen waiting for the 12-second timeout.
 
+If a Feed transaction is rejected, `ActivityPanelComponent` emits a `feed-failed` event. `CreatureView` handles this by resetting its own `alreadyFedToday` ref immediately, ensuring the Feed button returns to its enabled state without waiting for a blockchain re-fetch. Previously, the parent's `alreadyFedToday` was left `true` until the next navigation because the optimistic pre-Keychain flag was set but never rolled back in the parent on failure.
+
 ### Reaction Animation
 
 Whenever a creature is successfully fed, played with, or walked, the canvas plays a short reaction sequence. The creature cycles through four fixed pose+expression pairs — Standing/Alert → Alert/Alert → Playful/Excited → Sitting/Happy — repeated 2 or 3 times at random, with each step lasting 2000–3000 ms. The autonomous behaviour loop is paused for the duration (velocities zeroed, position preserved). After the sequence finishes both `animPose` and `animExpression` are cleared and autonomous behaviour resumes. Any in-progress animation is cancelled and restarted cleanly if another interaction fires while it is running.
@@ -310,10 +313,11 @@ Edge bounce: the creature flips facing direction and reverses velocity at ±38% 
 ### Accessibility
 
 - **Genome bar accessibility** — every genome visualisation bar (`sb-genome-bar-track`) now carries `role="progressbar"`, `aria-valuenow`, `aria-valuemin`, `aria-valuemax`, and an `aria-label` that includes both the raw value and the percentage of range (e.g. "Morphology: 4500 (45% of range)"). Previously screen readers announced only the label and the raw number with no indication of where the value sat within its valid range.
-- **Screen reader support for Unicode art** — all `<pre>` unicode art blocks (both in `CreatureView`'s Stats tab and in `HomeView`'s Founder Creator) carry `aria-hidden="true"`. A visually-hidden `<span class="sb-sr-only">` immediately follows each block with a concise text summary of the creature's name, sex, lifecycle stage, and health state. Previously the Founder Creator's `<pre>` block was missing these attributes, leaving screen readers to read every box-drawing character aloud.
-- **Fertility text badge** — the **🌸 Fertile Now** badge communicates fertility status as explicit text. It is independent of the Young Adult stage colour (#f48fb1) and the 🌸 lifecycle icon so the information is available to users with colour-vision deficiency.
+- **Screen reader support for Unicode art** — all `<pre>` unicode art blocks carry `aria-hidden="true"`. A visually-hidden `<span class="sb-sr-only">` immediately follows each block with a concise text summary of the creature's name, sex, lifecycle stage, and health state.
+- **Fertility text badge** — the **🌸 Fertile Now** badge communicates fertility status as explicit text, independent of the Young Adult stage colour (#f48fb1) and the 🌸 lifecycle icon.
 - **Focus management** — when navigating from a creature grid to a creature detail page, keyboard focus is shifted programmatically to the creature name heading (`<h2 data-focus-target tabindex="-1">`). Screen-reader users hear the creature name announced immediately on arrival.
 - **Genome bar height** — the genome visualisation bars were increased from 6 px to 10 px for improved colour legibility on low-contrast displays.
+- **Text contrast** — `.sb-dimmer-2` and `.sb-phantom-author` use `#767676` on the `#111` dark background, achieving a contrast ratio of 4.54:1 — meeting the WCAG AA minimum of 4.5:1. Previously these classes used `#3a3a3a` (ratio ~1.86:1), making provenance information such as transfer history dates and the phantom creature author label nearly invisible for users with low vision or on screens in bright sunlight.
 - **Visually-hidden utility class** — `.sb-sr-only` (1×1 px, clipped, off-screen margin) is used wherever a text alternative must be provided for non-text content without disrupting the visual layout.
 
 ---
@@ -379,6 +383,13 @@ Accessory names are generated deterministically from template + genome (material
 
 Each genome parameter in the Create Accessory panel is controlled by a **paired range + number input**. The range slider allows quick "vibe" adjustments by dragging. The adjacent `<input type="number">` allows typing an exact integer, which is essential for hitting precise values (e.g. a specific hue of exactly 142°) on mobile devices where the slider thumb cannot be positioned with sufficient precision. Both inputs share the same `updateGenome(key, value)` handler and stay in sync at all times.
 
+### Accessory Browse Pagination
+
+The `/#/accessories` page supports template filter buttons (Hat, Crown, Necklace, Wings) and page-by-page pagination.
+
+- Switching filter resets to page 1 (watched via `filterTemplate` watcher).
+- After a fresh fetch from the chain, `listPage` is also reset to 1, ensuring that a user browsing a deep page of "All Accessories" is not left on an empty page after the total item count changes.
+
 ### Wearing Accessories on Creatures
 
 #### Permission Model (on accessory post replies)
@@ -408,12 +419,12 @@ The creature post is the source of truth for current equip state.
 - Owners can paste an accessory URL or pick from a "closet" (owned accessories) to equip.
 - The app checks permission before equipping, and prevents equipping if that accessory is already worn by another creature.
 - **Revoked permissions (lapsed):** a "⚠ Lapsed" badge is displayed; the accessory stops rendering on the creature canvas (`_normalizedWearings()` filters `permissionLapsed: true`); only Remove remains.
-- **Phantom/deleted accessories** — if an accessory owner deletes their post (`delete_comment`), `fetchCreatureWearings` detects the tombstoned post via `isPhantomPost()` and silently skips it. The equip slot is freed, so the creature owner can attach a replacement without first having to "Remove" an item that is no longer visible. The `wear_on` reply on the creature post remains immutably on-chain but is no longer surfaced in the UI.
-- **Closet thumbnails** — each accessory in the closet grid is rendered by `ClosetThumbComponent`, which draws the accessory once into an off-screen canvas, then converts it to a PNG via the async `canvas.toBlob()` API and stores the result as a `blob:` object URL. Zero live GPU contexts are held per closet item. Renders are staggered through a module-level `requestIdleCallback` queue (`_closetThumbQueue`) so thumbnails populate gradually during browser idle slices — a large closet never causes a visible frame drop on mount. Each component revokes its object URL in `beforeUnmount()` to prevent memory leaks. The previous approach (`AccessoryCanvasComponent` per item with synchronous `toDataURL()`) had two problems: it exhausted the mobile GPU context limit (~16–32 active 2D contexts) at 60+ items causing silent canvas-lost errors and severe jank, and its synchronous pixel readback blocked the main thread for every item in the closet simultaneously. The closet retains a **Load More** button that reveals 20 additional thumbnails at a time.
+- **Phantom/deleted accessories** — if an accessory owner deletes their post (`delete_comment`), `fetchCreatureWearings` detects the tombstoned post via `isPhantomPost()` and silently skips it. The equip slot is freed so the creature owner can attach a replacement without first having to "Remove" an item that is no longer visible.
+- **Closet thumbnails** — each accessory in the closet grid is rendered by `ClosetThumbComponent`, which draws the accessory once into an off-screen canvas, then converts it to a PNG via the async `canvas.toBlob()` API and stores the result as a `blob:` object URL. Zero live GPU contexts are held per closet item. Renders are staggered through a module-level `requestIdleCallback` queue (`_closetThumbQueue`) so thumbnails populate gradually during browser idle slices. The closet retains a **Load More** button that reveals 20 additional thumbnails at a time.
 - **Ghost accessory state** — all transient equip-panel UI is reset automatically on creature navigation.
 - **Fossil accessories** — the equip form is hidden for fossil creatures, but Remove buttons remain so owners can retrieve accessories from fossilised creatures.
 - **Wear exclusivity** — the app checks the accessory's reply history before equipping to prevent two creatures wearing the same accessory simultaneously.
-- **Double-spend guard** — when a `wear_on` broadcast is dispatched, the accessory ID is added to `window._sbPendingEquips` (a session-level Set shared across all instances). Any concurrent second call for the same ID is rejected immediately. The ID is removed when the Keychain callback fires. This closes a race condition where two tabs could each pass the pre-equip "is it busy?" check before the first transaction is confirmed on-chain.
+- **Double-spend guard** — when a `wear_on` broadcast is dispatched, the accessory ID is added to `window._sbPendingEquips` (a session-level Set shared across all instances). Any concurrent second call for the same ID is rejected immediately.
 - **Post-transfer lock-out ("Panic Reset")** — the accessory page surfaces a **🚨 Force Unequip** button when the new owner finds the accessory still equipped on a creature they don't own.
 - **Public domain confirmation** — the `wear_public` action is guarded by a browser confirmation dialog explaining that equips made during the public window persist even if the owner later reverts to private.
 - **Layer reorder** — owners can reorder draw layers using ▲/▼ controls in the equip panel.
@@ -467,7 +478,7 @@ The pixel downsampling (`samplePixels`) and Sobel edge detection + HSL conversio
 | Stat | Target gene | Method |
 |---|---|---|
 | `dominantHue` | `GEN`, `CLR` | Best-fit palette search via `fitHue()` |
-| `aspectRatio` | `MOR` | Coarse+fine scan of MOR space via `fitMor()` — coarse step of 7 (1,428 candidates) followed by a ±200 fine scan around the winner. The step was reduced from 37 to 7 to ensure no narrow local optimum in the non-linear PRNG output space is skipped for extreme image aspect ratios (very tall or very wide images). |
+| `aspectRatio` | `MOR` | Coarse+fine scan of MOR space via `fitMor()` — coarse step of 7 (1,428 candidates) followed by a ±200 fine scan around the winner. The step was reduced from 37 to 7 to ensure no narrow local optimum in the non-linear PRNG output space is skipped for extreme image aspect ratios. |
 | `edgeDensity` | `APP` | Linear mapping + RNG jitter via `fitApp()` |
 | `colourfulness` + `litVariance` + `edgeDensity` | `ORN` | Weighted blend + bounded jitter via `fitOrn()` |
 | RNG stream | `SX`, `LIF`, `FRT_START`, `FRT_END`, `MUT` | Drawn from master seed (`pixelHash ^ rerollIndex`) |
@@ -476,11 +487,11 @@ The pixel downsampling (`samplePixels`) and Sobel edge detection + HSL conversio
 
 The **🎲 Reroll** button increments `rerollIndex` and regenerates the genome from the same image. Small deterministic offsets are applied to `aspectRatio` (±15% per unit) and `dominantHue` (±25° per unit) before fitting, giving each reroll a visibly different body shape and colour palette. `rerollIndex = 0` always produces the pure image-faithful result.
 
-The button is disabled for 300 ms after each click (`rerolling` flag) to prevent double-tap CPU stalls. `imageToGenome` touches every pixel of the source image and runs a PRNG-heavy fitting loop; queuing multiple calls in rapid succession would freeze the canvas for several hundred milliseconds.
+The button is disabled for 300 ms after each click (`rerolling` flag) to prevent double-tap CPU stalls.
 
 ### Genus Override (Preview Step)
 
-The Genus Override field is available both before and after image analysis. In the preview step, editing the field calls `applyGenusOnly()` rather than `reroll()`. This updates only `genome.GEN` — and regenerates the creature's name accordingly — without incrementing `rerollIndex`. The body shape and colour palette that the user was happy with are preserved. To explore different shapes and colours, the dedicated **🎲 Reroll** button is used instead.
+The Genus Override field is available both before and after image analysis. In the preview step, editing the field calls `applyGenusOnly()` rather than `reroll()`. This updates only `genome.GEN` — and regenerates the creature's name accordingly — without incrementing `rerollIndex`. The body shape and colour palette that the user was happy with are preserved.
 
 ### UI Flow
 
@@ -501,11 +512,15 @@ Creature ownership can be transferred between users via a **two-sided on-chain h
 
 ### Pending Transfer Visibility
 
-Creatures with an open transfer offer display a **🤝 Pending → @recipient** amber badge directly on their card in the Home grid and Profile page. Owners can see at a glance which creatures are locked in a pending handshake without clicking into each detail page.
+Creatures with an open transfer offer display a **🤝 Pending → @recipient** amber badge directly on their card in the Home grid and Profile page.
+
+### Username Validation
+
+All username inputs (Transfer Panel recipient, Breed Permit grantee) strip leading `@` symbols and surrounding whitespace before processing. A regex check (`/^[a-z0-9.-]+$/`) enforces Steem's valid username character set. Both sanitisation and validation are applied before the `getAccounts` existence check and before any Keychain call, preventing malformed names from reaching the blockchain and causing impossible-to-accept offer states.
 
 ### Self-Transfer Guard
 
-The Send Offer button is disabled and an inline warning is shown whenever the recipient input field contains the logged-in user's own username. This check is reactive — it is evaluated on every keystroke via a computed property (`isSelfTransfer`), so the UI refuses the action before the user even clicks. The `sendOffer()` method also enforces this check as a server-side safeguard.
+The Send Offer button is disabled and an inline warning is shown whenever the recipient input field contains the logged-in user's own username. This check is reactive — it is evaluated on every keystroke via a computed property (`isSelfTransfer`).
 
 ### Effective Owner
 
@@ -516,8 +531,8 @@ The original `post.author` never changes on-chain. SteemBiota derives the **effe
 - Only the effective owner at the time of an offer may publish it; only the named recipient may accept.
 - Permits issued before a completed transfer are voided automatically (`permitsValidFrom` timestamp).
 - **Recipient account verification** — before publishing a `transfer_offer`, the app calls `getAccounts` to verify the recipient exists on Steem, preventing typo-induced permanent lock-outs.
-- **Accept pre-flight check** — before the Keychain popup opens for a `transfer_accept`, the app re-fetches the creature's latest replies and re-runs `parseOwnershipChain`. If the pending offer's `offer_permlink` no longer matches the chain's current active offer (because the sender issued a new offer to someone else, implicitly cancelling this one), the accept is blocked with a clear error message. This prevents a recipient from spending Resource Credits on a transaction the protocol will silently discard. If the network check fails, a brief warning is shown and the accept is allowed to proceed so a flaky RPC node cannot permanently block a valid acceptance.
-- **Cancel pre-flight check** — before the Keychain popup opens for a `transfer_cancel`, the app similarly re-fetches the latest reply set and verifies the offer is still active. If the recipient already accepted the transfer between page-load and the cancel click, the cancel is aborted and the local state is synced immediately. This prevents the previous owner's UI from displaying "Cancelling…" indefinitely while the creature has already moved to a new wallet.
+- **Accept pre-flight check** — before the Keychain popup opens for a `transfer_accept`, the app re-fetches the creature's latest replies and re-runs `parseOwnershipChain`. If the pending offer's `offer_permlink` no longer matches the chain's current active offer, the accept is blocked with a clear error message.
+- **Cancel pre-flight check** — before the Keychain popup opens for a `transfer_cancel`, the app similarly re-fetches the latest reply set and verifies the offer is still active. If the recipient already accepted, the cancel is aborted and local state is synced immediately.
 
 ---
 
@@ -529,13 +544,19 @@ Two creatures can breed if: same `GEN`; opposite sex; both within their effectiv
 
 ### Early Genus Mismatch Detection
 
-When a Parent B URL is pasted into the Breed panel, the app fetches both genomes (debounced 800 ms) and checks `GEN` equality before running the full ancestor walk. If the genera differ, an inline error is shown immediately — for example: `"Genus mismatch: Parent A is Forvix (GEN 12) but Parent B is Thalara (GEN 77)."` This prevents the user from waiting through the full kinship check only to see a genus error at the final Breed button click.
+When a Parent B URL is pasted into the Breed panel, the app fetches both genomes (debounced 800 ms) and checks `GEN` equality before running the full ancestor walk. If the genera differ, an inline error is shown immediately. This prevents the user from waiting through the full kinship check only to see a genus error at the final Breed button click.
 
 ### Kinship Check
 
 `checkBreedingCompatibility(resA, resB)` walks up to twelve generations of ancestry via BFS, using a cache-first strategy (IndexedDB → live RPC) to avoid redundant network calls for already-visited ancestors. Results from the early URL-paste check are cached in `kinshipPreview` and reused at Breed time if still valid, halving total RPC cost for the common case. The Breed button is disabled while `kinshipPreview === "checking"` to prevent duplicate concurrent ancestor walks.
 
-If the check fails mid-way due to a public node rate-limit (HTTP 429) or a CORS timeout, the `kinshipPreview` state is explicitly set to an error object before the exception propagates. This ensures the Breed button returns to its normal idle state with a readable error message rather than staying permanently frozen in "Verifying…". The user can adjust the parent URLs or retry after a short wait.
+If the check fails mid-way due to a public node rate-limit (HTTP 429) or a CORS timeout, the `kinshipPreview` state is explicitly set to an error object before the exception propagates. This ensures the Breed button returns to its normal idle state with a readable error message rather than staying permanently frozen in "Verifying…".
+
+### Kinship: Severed Lineage
+
+If `fetchAncestors` encounters a **phantom** (deleted) ancestor post during the BFS traversal, it no longer throws an error. Instead, it records the phantom node as `{ severed: true }` and sets `visited._hasSeveredLineage = true`, then continues traversal past it (the phantom has no fetchable parents, so the BFS simply does not enqueue further nodes from that branch).
+
+`checkBreedingCompatibility` returns `{ severedLineage: true, warning: "…" }` instead of `null` when either ancestry walk encountered a phantom. Breeding is **not blocked** — the kinship check still verifies that the two immediate parents are not too closely related based on the reachable portion of the tree. The child genome is stamped with `_severedLineage: true` in its `json_metadata`, and an amber informational banner is displayed in the breed preview panel. This prevents one user's long-ago post deletion from permanently poisoning all downstream creatures who descend from that lineage.
 
 ### Matchmaker
 
@@ -569,6 +590,8 @@ The **🔔 Notifications** page (`/#/notifications`) aggregates all on-chain eve
 | 🤝 Transfer offer | Someone is offering you ownership of a creature |
 
 Incoming transfer offers are highlighted at the top of the page with a one-click **✅ Accept** button. A red badge on the 🔔 nav icon shows the count of pending offers, refreshed on login and polled every 5 minutes.
+
+**Immediate badge sync** — when a transfer offer is accepted on the Notifications page, the nav-bar badge count is decremented immediately without waiting for the next 5-minute poll. `NotificationsView` calls the injected `updateNotifBadge(count)` function provided by the App root, passing the count of remaining pending offers after removal.
 
 ---
 
@@ -606,6 +629,7 @@ The post with the **earlier publication timestamp** is the original. Any later p
 | ⚡ Speciation | Legitimately bred offspring that created a new genus |
 | 🧬 Bred / Bred — Mutation | Legitimately bred offspring with valid parent links |
 | 🌱 Origin Creature | Legitimate founder (random or image-inspired) |
+| 🌿 Severed Lineage | Bred offspring whose lineage contains a Phantom ancestor; breeding was permitted but full ancestry could not be verified |
 
 ---
 
@@ -638,6 +662,8 @@ The post with the **earlier publication timestamp** is the original. Any later p
 
 The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetches up to 200 creature posts via cursor-based pagination, then fetches each author's comment and vote history. RPC calls are rate-limited to 3 concurrent requests via `_throttledMap`. Per-author XP data is cached for 24 hours. Failed authors can be retried individually via a **Retry** button at reduced concurrency.
 
+**Manual Refresh** — a **🔄 Refresh Rankings** button is shown in the leaderboard header. Clicking it evicts the 24-hour leaderboard cache and triggers a full re-fetch from the chain, allowing a player who has just bred a speciated offspring (earning ~575 XP) or joined for the first time to see their updated ranking immediately. The button is rate-limited to once every 10 minutes per browser session to protect public RPC nodes; attempting to refresh too soon shows a timed message with the remaining wait in minutes.
+
 ---
 
 ## Caching
@@ -650,7 +676,7 @@ The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetche
 | Profile owned creatures | localStorage | 30 min | Per user |
 | Profile owned accessories | localStorage | 30 min | Per user |
 | Notifications | localStorage | 60 s | Per user |
-| Leaderboard | localStorage | 24 h | Global |
+| Leaderboard | localStorage | 24 h | Global (manual-refresh burstable) |
 | Per-author XP detail | localStorage | 24 h | Per author |
 
 **Global invalidation stamp** — `invalidateGlobalListCaches()` writes a version timestamp; any cache entry written before it is treated as stale immediately.
@@ -695,6 +721,7 @@ The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetche
 
 Offspring adds: `"type": "offspring"`, `"parentA"`, `"parentB"`, `"mutated"`, `"speciated"`.
 Image-inspired founders add `"_source": "image-upload"` inside the genome object.
+Offspring bred through a severed lineage add `"_severedLineage": true` inside the genome object.
 
 ### Accessory post
 
@@ -740,25 +767,33 @@ Image-inspired founders add `"_source": "image-upload"` inside the genome object
 
 **Anti-dumping ownership** — Transfers require the recipient's explicit on-chain acceptance. Pending offers are visible on creature cards in list views.
 
-**Stale-result safety** — All multi-step async operations that write to component state use generation counters or equivalent guards to discard results that were superseded by a subsequent navigation before they completed. This applies to creature loading (`_loadGeneration` in `loadCreature`), kinship loading (`currentGen` snapshot in `loadKinship`), ProfileView background refreshes (`_profileCreatureGen` / `_profileAccessoryGen` in `refreshCreatures` / `refreshAccessories`), and AccessoriesView filter fetches (`_listGeneration` in `loadAccessoryList`).
+**Stale-result safety** — All multi-step async operations that write to component state use generation counters or equivalent guards to discard results that were superseded by a subsequent navigation before they completed. This applies to creature loading, kinship loading, ProfileView background refreshes, and AccessoriesView filter fetches.
 
-**On-chain pre-flight verification** — Before opening the Keychain popup for a transfer accept, the app re-fetches the latest reply set and verifies the offer is still current. Users are never asked to spend Resource Credits on a transaction the protocol will silently ignore.
+**On-chain pre-flight verification** — Before opening the Keychain popup for a transfer accept, the app re-fetches the latest reply set and verifies the offer is still current.
 
 **Opt-in breeding** — Creatures are closed to external breeding by default. Owners must explicitly grant named permits.
 
-**Mobile-first interactions** — Canvas tap dead-zones compensate for bobbing motion. `pointer-events: none` is applied when activity panels overlap the canvas. `touch-action: pan-y` ensures vertical scroll gestures always take priority over canvas click handlers. `isolation: isolate` on the social button container prevents the GPU-composited canvas animation from bleeding through the vote-picker popover on mobile browsers. A `touchstart`/`touchend` distance threshold (< 5 px) distinguishes genuine taps from micro-scroll gestures on high-sensitivity touchscreens, preventing the creature from feeling unresponsive to pokes on mobile.
+**Username sanitisation** — All raw username inputs strip leading `@` symbols, trim whitespace, and validate against Steem's allowed character set (`/^[a-z0-9.-]+$/`) before any RPC call or Keychain operation. This prevents malformed names (e.g. `@alice` instead of `alice`) from producing unacceptable transfer offers or invalid permit grants.
+
+**Non-blocking lineage** — A deleted ancestor post (Phantom) degrades gracefully to a "Severed Lineage" trait on the child rather than permanently blocking breeding for all downstream descendants. The kinship inbreeding check still runs on the reachable portion of the tree.
+
+**Immediate UI feedback** — Accepting a transfer offer immediately decrements the nav-bar notification badge without waiting for the 5-minute poll interval. Rejecting a Feed Keychain prompt immediately re-enables the Feed button without waiting for a blockchain re-fetch.
+
+**Mobile-first interactions** — Canvas tap dead-zones compensate for bobbing motion. `pointer-events: none` is applied when activity panels overlap the canvas. `touch-action: pan-y` ensures vertical scroll gestures always take priority over canvas click handlers. A dedicated stacking context (`position:relative; z-index:10`) wraps the social counters and vote-picker popover so the GPU-composited canvas animation layer can never flicker through it on mobile Chrome/Safari. A `touchstart`/`touchend` distance threshold (< 5 px) distinguishes genuine taps from micro-scroll gestures on high-sensitivity touchscreens.
 
 **Precision controls** — Every genome slider in the Accessory creator is paired with a number input so users can reach exact integer values on touch screens without relying on dragging accuracy.
 
-**Surgical genome edits** — In the Upload preview, changing the Genus Override field updates only `GEN` without altering the visual reroll index. The shape and colour the user selected via 🎲 Reroll are preserved. The Reroll button is debounced (300 ms) to prevent CPU stalls from rapid repeated taps.
+**Surgical genome edits** — In the Upload preview, changing the Genus Override field updates only `GEN` without altering the visual reroll index. The shape and colour the user selected via 🎲 Reroll are preserved.
 
-**Defensive caching** — Multi-tier caching (IndexedDB → localStorage → live fetch) with global invalidation stamps, surgical patching after transfers, and quota-exceeded eviction.
+**Defensive caching** — Multi-tier caching (IndexedDB → localStorage → live fetch) with global invalidation stamps, surgical patching after transfers, quota-exceeded eviction, and a user-triggered manual refresh on the leaderboard (rate-limited to once per 10 minutes).
 
 **Resilient URL parsing** — All Steem URL inputs strip zero-width Unicode characters and tolerate trailing query parameters and fragments.
 
 **Non-blocking UI** — Heavy synchronous operations (image pixel analysis, Sobel edge detection) yield control back to the browser via `requestAnimationFrame` before running, so loading spinners are visible before work begins. Closet thumbnail rendering is staggered through a `requestIdleCallback` queue to avoid mount-time frame drops on large accessory collections.
 
 **GPU context hygiene** — Closet accessory thumbnails use a render-once-to-blob strategy (`ClosetThumbComponent` with async `toBlob()`) rather than maintaining live canvas GPU contexts per item. The session-level `_sbPendingEquips` set prevents race conditions when the same accessory is being equipped from multiple browser tabs simultaneously.
+
+**WCAG AA contrast** — All text used for critical game information (provenance badges, transfer history, phantom labels) meets the 4.5:1 minimum contrast ratio required by WCAG AA against the app's `#111` dark background.
 
 ---
 
