@@ -1526,7 +1526,7 @@ async function checkBreedingCompatibility(resA, resB) {
         severedLineage: true,
         warning:
           "⚠ One or more ancestors of this pair had their post deleted (Phantom). " +
-          "Lineage cannot be fully verified. The offspring will carry a "Severed Lineage" trait " +
+          "Lineage cannot be fully verified. The offspring will carry a 'Severed Lineage' trait " +
           "but is otherwise healthy and fully breedable."
       }
     : null; // compatible, clean lineage
