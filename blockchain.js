@@ -2468,7 +2468,16 @@ async function fetchCreatureWearings(creatureAuthor, creaturePermlink, creatureR
   for (const [, { accAuthor, accPermlink, wornAt }] of equipped) {
     try {
       const accPost = await fetchPost(accAuthor, accPermlink);
-      if (!accPost || !accPost.author) continue;
+
+      // FIX 2A: "Zombie" Accessory Reference.
+      // If the accessory owner deleted their post (delete_comment sets author to ""),
+      // the creature is left "wearing" a null object.  The equipped slot would stay
+      // occupied by an invisible item, blocking the owner from equipping anything new
+      // until they manually "Remove" something they can't see.
+      // Fix: detect tombstoned posts via isPhantomPost() and skip them entirely so
+      // the slot is treated as free.  The wear_on reply on the creature post remains
+      // on-chain (immutable), but we simply stop surfacing the dead reference in the UI.
+      if (!accPost || isPhantomPost(accPost) || !accPost.author) continue;
 
       let meta = {};
       try { meta = JSON.parse(accPost.json_metadata || '{}'); } catch {}

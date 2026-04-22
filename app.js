@@ -1866,8 +1866,16 @@ const ProfileView = {
 
     async refreshCreatures(user, cacheKey, opts = {}) {
       const { setLoadingFalse = false } = opts;
+      // FIX 1A: Capture a generation token at the start of the async fetch.
+      // If the user navigates to a different profile while this fetch is in-flight,
+      // _profileCreatureGen will have been incremented by the next loadCreatures()
+      // call. We check at every async boundary and silently discard stale results.
+      if (!this._profileCreatureGen) this._profileCreatureGen = 0;
+      const myGen = ++this._profileCreatureGen;
       try {
         const owned = await fetchCreaturesOwnedBy(user, 100);
+        // Stale-result guard: bail out if the user has already navigated away.
+        if (myGen !== this._profileCreatureGen) return;
         const mapped = owned.map(({ post: p, meta: sb, effectiveOwner }) => {
           const age = calculateAge(p.created);
           return {
@@ -1891,6 +1899,7 @@ const ProfileView = {
           writeOwnedProfileCache(cacheKey, mapped);
         }
       } catch (e) {
+        if (myGen !== this._profileCreatureGen) return; // stale — discard error too
         if (!this.creatures.length) this.creaturesError = e.message || "Failed to load creatures.";
       }
       if (setLoadingFalse) this.creaturesLoading = false;
@@ -1913,8 +1922,13 @@ const ProfileView = {
 
     async refreshAccessories(user, cacheKey, opts = {}) {
       const { setLoadingFalse = false } = opts;
+      // FIX 1A: Same generation guard as refreshCreatures — prevents a slow "All"
+      // accessories fetch from overwriting results for a different user.
+      if (!this._profileAccessoryGen) this._profileAccessoryGen = 0;
+      const myGen = ++this._profileAccessoryGen;
       try {
         const owned = await fetchAccessoriesOwnedBy(user, 100);
+        if (myGen !== this._profileAccessoryGen) return; // stale — discard
         const sorted = owned.sort((a, b) => new Date(b.created) - new Date(a.created));
         // Same protection as creatures tab: avoid replacing a known-good list
         // with a transient empty response from chain scans.
@@ -1924,6 +1938,7 @@ const ProfileView = {
           writeOwnedProfileCache(cacheKey, sorted);
         }
       } catch (e) {
+        if (myGen !== this._profileAccessoryGen) return; // stale — discard error too
         if (!this.accessories.length) this.accessoriesError = e.message || "Failed to load accessories.";
       }
       if (setLoadingFalse) this.accessoriesLoading = false;

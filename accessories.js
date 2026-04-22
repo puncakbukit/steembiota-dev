@@ -675,9 +675,43 @@ const AccessoryCanvasComponent = {
 // exceeding that limit causes silent context loss and visual corruption.
 //
 // ClosetThumbComponent draws once in mounted(), converts the canvas to
-// a data URL with toDataURL(), then discards the canvas entirely.
-// The rendered pixel data lives in the <img> src — zero GPU contexts held.
+// an object URL via the async canvas.toBlob() API, then discards the
+// canvas entirely.  The rendered pixel data lives in the <img> src —
+// zero GPU contexts held.
+//
+// FIX 4: Replaced synchronous toDataURL() with async toBlob().
+// toDataURL() is a blocking GPU→CPU pixel readback.  For a closet with
+// 100 items, calling it 100 times during mount causes a visible multi-
+// hundred-ms UI freeze.  toBlob() performs the same readback off the
+// main render loop, and renders are staggered via requestIdleCallback
+// so the page remains responsive while thumbnails populate gradually.
 // ============================================================
+
+// Module-level idle-callback queue so all ClosetThumb instances share
+// a single render pipeline and don't pile up during the mount wave.
+const _closetThumbQueue = [];
+let   _closetThumbRunning = false;
+
+function _drainClosetThumbQueue() {
+  if (_closetThumbRunning || _closetThumbQueue.length === 0) return;
+  _closetThumbRunning = true;
+
+  // Use requestIdleCallback when available (all modern browsers) so
+  // thumbnails render during idle slices and never block a user gesture.
+  // Fall back to a 0-ms setTimeout for Safari < 16 which lacks rIC.
+  const schedule = typeof requestIdleCallback === "function"
+    ? cb => requestIdleCallback(cb, { timeout: 500 })
+    : cb => setTimeout(cb, 0);
+
+  schedule(function pump() {
+    const task = _closetThumbQueue.shift();
+    if (!task) { _closetThumbRunning = false; return; }
+    task();   // renders one thumbnail
+    if (_closetThumbQueue.length > 0) schedule(pump);
+    else _closetThumbRunning = false;
+  });
+}
+
 const ClosetThumbComponent = {
   name: "ClosetThumbComponent",
   props: {
@@ -687,13 +721,25 @@ const ClosetThumbComponent = {
     canvasH:  { type: Number,  default: 46    },
   },
   data() { return { dataUrl: "" }; },
-  mounted() { this.renderThumb(); },
+  mounted() { this._scheduleRender(); },
+  beforeUnmount() {
+    // Revoke any object URL we created so the browser can free the memory.
+    if (this.dataUrl && this.dataUrl.startsWith("blob:")) {
+      URL.revokeObjectURL(this.dataUrl);
+    }
+  },
   watch: {
-    template() { this.renderThumb(); },
-    genome()   { this.renderThumb(); },
+    template() { this._scheduleRender(); },
+    genome()   { this._scheduleRender(); },
   },
   methods: {
-    renderThumb() {
+    _scheduleRender() {
+      if (!this.genome) return;
+      // Push a render task for this instance onto the shared idle queue.
+      _closetThumbQueue.push(() => this._doRender());
+      _drainClosetThumbQueue();
+    },
+    _doRender() {
       if (!this.genome) return;
       const offscreen = document.createElement("canvas");
       offscreen.width  = this.canvasW;
@@ -702,8 +748,22 @@ const ClosetThumbComponent = {
       if (typeof drawAccessory === "function") {
         drawAccessory(ctx, this.template, this.genome, this.canvasW, this.canvasH, { transparentBackground: true });
       }
-      // toDataURL transfers pixel data to a PNG string — the canvas is then GC'd.
-      this.dataUrl = offscreen.toDataURL("image/png");
+      // FIX 4: Use async toBlob() instead of blocking toDataURL().
+      // toBlob() performs the GPU→CPU readback asynchronously, avoiding
+      // the synchronous stall that caused visible frame drops on large closets.
+      offscreen.toBlob(blob => {
+        if (!blob) {
+          // Fallback: if toBlob isn't supported or fails, use toDataURL as a
+          // last resort so thumbnails still appear rather than staying blank.
+          try { this.dataUrl = offscreen.toDataURL("image/png"); } catch {}
+          return;
+        }
+        // Revoke the previous blob URL before creating a new one.
+        if (this.dataUrl && this.dataUrl.startsWith("blob:")) {
+          URL.revokeObjectURL(this.dataUrl);
+        }
+        this.dataUrl = URL.createObjectURL(blob);
+      }, "image/png");
     }
   },
   template: `<img v-if="dataUrl" :src="dataUrl" :width="canvasW" :height="canvasH"
@@ -811,6 +871,9 @@ const AccessoriesView = {
       listError:       "",
       listPage:        1,
       filterTemplate:  "",
+      // FIX 1B: Generation counter to prevent stale tag-filter fetches from
+      // overwriting the UI when the user rapidly toggles template filters.
+      _listGeneration: 0,
 
       // Static catalogue exposed to template
       templates: ACCESSORY_TEMPLATES,
@@ -893,25 +956,37 @@ const AccessoriesView = {
 
     // ── Browse ────────────────────────────────────────────────
     async loadAccessoryList() {
+      // FIX 1B: Increment the generation counter each time a fetch is kicked off.
+      // A slow "All" fetch must not overwrite the results of a faster "Hat" fetch
+      // that resolved after it was dispatched. We capture the token at the start
+      // of each call and check it before writing to this.allAccessories.
+      const myGen = ++this._listGeneration;
+
       const cacheKey = "steembiota:list:accessories:v1";
       const canUseCache = (typeof readListCache === "function" && typeof writeListCache === "function");
       const cachedRaw = canUseCache ? readListCache(cacheKey) : null;
       if (cachedRaw) {
-        this.allAccessories = parseSteembiotaAccessories(cachedRaw);
-        this.listLoading = false;
+        // Only apply cache if we're still the current fetch.
+        if (myGen === this._listGeneration) {
+          this.allAccessories = parseSteembiotaAccessories(cachedRaw);
+          this.listLoading = false;
+        }
       } else {
         this.listLoading = true;
       }
       this.listError   = "";
       try {
         const raw = await fetchPostsByTag("steembiota", 100);
+        // Stale-result guard: if a newer fetch has started, discard our results.
+        if (myGen !== this._listGeneration) return;
         const safeRaw = Array.isArray(raw) ? raw : [];
         this.allAccessories = parseSteembiotaAccessories(safeRaw);
         if (canUseCache) writeListCache(cacheKey, safeRaw);
       } catch (e) {
+        if (myGen !== this._listGeneration) return; // stale — discard error too
         if (!cachedRaw) this.listError = e.message || "Failed to load accessories.";
       }
-      this.listLoading = false;
+      if (myGen === this._listGeneration) this.listLoading = false;
     },
 
     prevPage() { if (this.listPage > 1) this.listPage--; },

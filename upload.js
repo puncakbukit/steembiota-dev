@@ -314,8 +314,15 @@ function morAspectRatio(mor) {
 function fitMor(targetRatio) {
   let bestMor = 0, bestDist = Infinity;
 
-  // Coarse scan
-  for (let m = 0; m < 10000; m += 37) {
+  // FIX 2C: Reduced coarse scan step from 37 → 7.
+  // mulberry32 is non-linear, so the aspect-ratio curve through MOR space has
+  // local optima with widths sometimes narrower than 37 units.  A step of 37
+  // could skip an entire "sweet spot" — for very tall or very wide images the
+  // coarse winner would land in the wrong basin of attraction, and the ±200
+  // fine scan would never reach the true optimum.  A step of 7 costs ~14×
+  // more iterations (1428 vs 270) but is still microseconds on modern CPUs,
+  // and guarantees no basin narrower than 7 MOR units is missed.
+  for (let m = 0; m < 10000; m += 7) {
     const dist = Math.abs(morAspectRatio(m) - targetRatio);
     if (dist < bestDist) { bestDist = dist; bestMor = m; }
   }
@@ -488,8 +495,12 @@ data() {
     // Drag state
     isDragging:    false,
 
-    // NEW: reroll tracking
+    // Reroll tracking
     rerollIndex:   0,
+    // FIX 3B: Debounce flag — set to true for 300ms after each reroll click so
+    // mashing the button can't queue multiple simultaneous imageToGenome calls
+    // (which are CPU-heavy and will freeze the canvas on each invocation).
+    rerolling:     false,
   };
 },
 
@@ -603,8 +614,17 @@ methods: {
   // ----------------------------------------------------------
   reroll() {
     if (!this.imageEl) return;
+    // FIX 3B: Prevent double-click CPU stall.
+    // imageToGenome() touches every pixel of the image and runs a PRNG-heavy
+    // genome fitting loop.  If the user mashes the button, queuing several of
+    // these in rapid succession will freeze the canvas for hundreds of ms.
+    // A 300ms lockout lets the current frame finish painting before the next
+    // call is accepted.
+    if (this.rerolling) return;
+    this.rerolling = true;
+    setTimeout(() => { this.rerolling = false; }, 300);
 
-    this.rerollIndex++; // NEW: increment index
+    this.rerollIndex++; // increment index
 
     // UPDATED: pass rerollIndex
     const genome = imageToGenome(this.imageEl, this.rerollIndex);
@@ -931,8 +951,10 @@ methods: {
           <div style="display:flex;gap:10px;flex-wrap:wrap;justify-content:center;margin-bottom:20px;">
 
             <!-- Reroll -->
+            <!-- FIX 3B: :disabled="rerolling" prevents CPU stalls from rapid re-clicks -->
             <button
               @click="reroll"
+              :disabled="rerolling"
               style="background:#1a2a1a;border:1px solid #2e7d32;color:#a5d6a7;"
               title="Regenerate a different creature from the same image"
             >🎲 Reroll</button>

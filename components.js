@@ -193,6 +193,11 @@ const CreatureCanvasComponent = {
       animExpression:  null,
       _animTimers:     [],   // pending setTimeout ids so we can cancel on unmount
 
+      // FIX 3C: Touch-start coordinates for scroll-vs-poke discrimination.
+      // Set on touchstart, consumed and cleared on touchend.
+      _touchStartX:    null,
+      _touchStartY:    null,
+
       // ── Autonomous behaviour state machine ──────────────────
       // _behavX    : current horizontal offset from canvas centre (pixels)
       // _behavY    : current vertical offset from canvas centre (pixels, +ve = down)
@@ -834,6 +839,48 @@ const CreatureCanvasComponent = {
         const clampedX = Math.max(-xLimit, Math.min(xLimit, targetX));
         const clampedY = Math.max(-yLimit, Math.min(yLimit, targetY));
         this._enterWalkTo(clampedX, clampedY);
+      }
+    },
+
+    // ----------------------------------------------------------
+    // FIX 3C: Mobile Scroll vs. Poke — touch threshold handlers.
+    //
+    // On high-sensitivity touchscreens a "tap" to poke the creature
+    // often contains a 1-2px finger-lift slide.  The browser sees
+    // touch-action:pan-y and may classify the whole gesture as a
+    // micro-scroll, suppressing the click event entirely and making
+    // the creature feel unresponsive on mobile.
+    //
+    // Strategy: record (x,y) on touchstart, then on touchend compute
+    // the Euclidean delta.  Only synthesise a click if delta < 5px.
+    // This matches the creature's intended "poke" UX while allowing
+    // genuine swipe-scrolls to pass through uninterrupted.
+    // ----------------------------------------------------------
+    onTouchStart(event) {
+      if (event.touches.length !== 1) return;
+      this._touchStartX = event.touches[0].clientX;
+      this._touchStartY = event.touches[0].clientY;
+    },
+    onTouchEnd(event) {
+      if (this._touchStartX === null) return;
+      const touch = event.changedTouches[0];
+      if (!touch) return;
+      const dx = touch.clientX - this._touchStartX;
+      const dy = touch.clientY - this._touchStartY;
+      this._touchStartX = null;
+      this._touchStartY = null;
+      // Only treat as a tap if the finger barely moved (< 5px).
+      // Larger deltas are genuine scrolls — let the browser handle them.
+      if (Math.hypot(dx, dy) < 5) {
+        // Synthesise a MouseEvent-compatible object so onCanvasClick
+        // can read clientX/clientY without any changes to its logic.
+        this.onCanvasClick({
+          clientX: touch.clientX,
+          clientY: touch.clientY
+        });
+        // Prevent the browser from also firing a delayed click event
+        // (300ms tap-delay) which would double-trigger onCanvasClick.
+        event.preventDefault();
       }
     },
 
@@ -2608,7 +2655,9 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
       + '-webkit-tap-highlight-color:transparent;outline:none;user-select:none;'
       + 'touch-action:pan-y;'
       + (interactionsBlocked ? 'pointer-events:none;z-index:0;' : 'z-index:1;')"
-    @click="onCanvasClick"></canvas>`
+    @click="onCanvasClick"
+    @touchstart.passive="onTouchStart"
+    @touchend="onTouchEnd"></canvas>`
 };
 
 // ---- CreatureCardComponent ----
@@ -2989,7 +3038,15 @@ const GenomeTableComponent = {
           <span class="sb-genome-key">{{ g.label }}</span>
           <span class="sb-genome-bar-desc" :style="{ color: g.color }">{{ g.desc }}</span>
         </div>
-        <div class="sb-genome-bar-track">
+        <!-- FIX 3A (A11y): role="progressbar" + aria-value* let screen readers
+             announce "4500 out of 9999" instead of just reading the label and
+             raw number with no context about what percentage of the range it represents. -->
+        <div class="sb-genome-bar-track"
+          role="progressbar"
+          :aria-valuenow="g.value"
+          :aria-valuemin="g.min"
+          :aria-valuemax="g.max"
+          :aria-label="g.label + ': ' + g.value + ' (' + pct(g.value, g.min, g.max) + '% of range)'">
           <div class="sb-genome-bar-fill" :style="{ width: pct(g.value, g.min, g.max) + '%', background: g.color }"></div>
           <span class="sb-genome-bar-num">{{ g.value }}</span>
         </div>
@@ -3002,7 +3059,12 @@ const GenomeTableComponent = {
           <span class="sb-genome-key">{{ g.label }}</span>
           <span class="sb-genome-bar-desc" :style="{ color: g.color }">{{ g.desc }}</span>
         </div>
-        <div class="sb-genome-bar-track">
+        <div class="sb-genome-bar-track"
+          role="progressbar"
+          :aria-valuenow="g.value"
+          :aria-valuemin="g.min"
+          :aria-valuemax="g.max"
+          :aria-label="g.label + ': ' + g.value + ' (' + pct(g.value, g.min, g.max) + '% of range)'">
           <div class="sb-genome-bar-fill" :style="{ width: pct(g.value, g.min, g.max) + '%', background: g.color }"></div>
           <span class="sb-genome-bar-num">{{ g.value }}</span>
         </div>
@@ -3772,7 +3834,17 @@ const BreedingPanelComponent = {
         // blocking the Breed button when we already have a good answer.
         if (!this.kinshipPreview || this.kinshipPreview === "checking") {
           this.loadStatus = "Checking ancestry and family relationships…";
-          await checkBreedingCompatibility(resA, resB);
+          try {
+            await checkBreedingCompatibility(resA, resB);
+          } catch (e) {
+            // FIX 1C: If the check fails mid-way (e.g. 429 rate-limit or CORS
+            // timeout on a public node), clear the "checking" state and surface
+            // a human-readable message.  Without this the Breed button stays
+            // stuck in "Verifying…" indefinitely, preventing compatible pairs
+            // from ever being bred in that session.
+            this.kinshipPreview = { error: e.message || String(e) };
+            throw e;   // re-throw so the outer catch handles UI reset
+          }
         } else if (this.kinshipPreview && this.kinshipPreview.error) {
           throw new Error(this.kinshipPreview.error);
         }
@@ -4309,7 +4381,35 @@ const TransferPanelComponent = {
         this.$emit("notify", "Steem Keychain is not installed.", "error");
         return;
       }
+      if (!this.pendingOffer) return;
+
+      // FIX 2B: Transfer "Handshake" Deadlock.
+      // If the recipient clicks "Accept" at almost the same time the owner clicks
+      // "Cancel", block inclusion order determines which wins.  If the Accept wins,
+      // the creature has already moved wallets — but the previous owner's UI still
+      // shows "Cancelling…" until a hard refresh.  We defend against this by
+      // re-fetching the chain state before opening Keychain: if the offer is already
+      // gone (accepted or replaced), abort immediately and sync the local state.
       this.publishing = true;
+      try {
+        const freshReplies = await fetchAllReplies(this.creatureAuthor, this.creaturePermlink);
+        const freshChain   = parseOwnershipChain(freshReplies, this.creatureAuthor);
+        if (!freshChain.pendingOffer ||
+            freshChain.pendingOffer.offerPermlink !== this.pendingOffer.offerPermlink) {
+          // Offer is already gone — update local state and bail out.
+          this.$emit("notify",
+            "⚠️ The offer is no longer active (it may have already been accepted or replaced). Refreshing state.",
+            "error"
+          );
+          this.$emit("transfer-updated", freshChain);
+          this.publishing = false;
+          return;
+        }
+      } catch (e) {
+        // Non-fatal: node failure — let the cancel proceed rather than blocking it.
+        console.warn("SteemBiota: pre-flight cancel check failed:", e);
+      }
+
       publishTransferCancel(
         this.username,
         this.creatureAuthor,
