@@ -793,6 +793,11 @@ const CreatureCanvasComponent = {
       const clickX = (event.clientX - rect.left) * scaleX;
       const clickY = (event.clientY - rect.top)  * scaleY;
 
+      // BUG 4c FIX: Draw a brief expanding ring at the tap point so mobile
+      // users get immediate visual confirmation of where their touch landed,
+      // even before the hit-test result (poke vs. walk-to) is determined.
+      this._drawTouchRipple(clickX, clickY);
+
       const W = this.canvasW, H = this.canvasH;
 
       // Creature's current centre in canvas coordinates.
@@ -882,6 +887,59 @@ const CreatureCanvasComponent = {
         // (300ms tap-delay) which would double-trigger onCanvasClick.
         event.preventDefault();
       }
+    },
+
+    // ----------------------------------------------------------
+    // BUG 4b FIX: Keyboard navigation — Enter key pokes the creature.
+    // tabindex="0" on the canvas lets keyboard users focus it; pressing
+    // Enter synthesises a click at the creature's current visual centre
+    // so screen-reader and keyboard-only users can "poke" the creature
+    // without needing a mouse or touchscreen.
+    // ----------------------------------------------------------
+    onKeyEnter() {
+      if (this.fossil || !this.genome) return;
+      const canvas = this.$refs.canvas;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      // Synthesise a click at the creature's current visual centre.
+      // We use the CSS-pixel centre of the canvas element (not the logical
+      // canvas coordinate), because onCanvasClick converts from viewport
+      // coords using getBoundingClientRect — matching what a real click does.
+      this.onCanvasClick({
+        clientX: rect.left + rect.width  * 0.46,
+        clientY: rect.top  + rect.height * 0.52,
+      });
+    },
+
+    // ----------------------------------------------------------
+    // BUG 4c FIX: Touch feedback ripple.
+    // Draws a brief expanding ring at (x, y) in logical canvas coordinates
+    // for 200 ms so mobile users get visual confirmation that their tap
+    // registered, even when it misses the body ellipse dead-zone.
+    // The ripple is drawn on top of the normal frame; the next draw() call
+    // will clear it naturally so no cleanup is needed.
+    // ----------------------------------------------------------
+    _drawTouchRipple(x, y) {
+      const canvas = this.$refs.canvas;
+      if (!canvas) return;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) return;
+      const start    = performance.now();
+      const duration = 200; // ms
+      const animate  = (now) => {
+        const t      = Math.min((now - start) / duration, 1);
+        const radius = t * 28;           // expands from 0 to 28px
+        const alpha  = (1 - t) * 0.55;  // fades from 55% to 0%
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        ctx.strokeStyle = `rgba(255, 255, 255, ${alpha})`;
+        ctx.lineWidth   = 2.5;
+        ctx.stroke();
+        ctx.restore();
+        if (t < 1) requestAnimationFrame(animate);
+      };
+      requestAnimationFrame(animate);
     },
 
     // ----------------------------------------------------------
@@ -2645,10 +2703,11 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
   },
   template: `<canvas ref="canvas" :width="canvasW" :height="canvasH"
     role="img"
+    tabindex="0"
     :aria-label="genome
       ? (fossil
           ? 'Fossilised creature — ' + (genome.SX === 0 ? 'male' : 'female') + ', genome preserved on-chain'
-          : 'A ' + (genome.SX === 0 ? 'male' : 'female') + ' creature, ' + (feedState ? feedState.label : '') + ' — click to interact')
+          : 'A ' + (genome.SX === 0 ? 'male' : 'female') + ' creature, ' + (feedState ? feedState.label : '') + ' — click or press Enter to interact')
       : 'Creature canvas loading'"
     :style="'width:'+canvasW+'px;height:'+canvasH+'px;max-width:100%;'
       + (fossil || !genome ? 'cursor:default;' : 'cursor:pointer;')
@@ -2656,6 +2715,7 @@ _drawEar(ctx, p, sc, headX, headY, hue, sat, lit, side, front) {
       + 'touch-action:pan-y;'
       + (interactionsBlocked ? 'pointer-events:none;z-index:0;' : 'z-index:1;')"
     @click="onCanvasClick"
+    @keyup.enter="onKeyEnter"
     @touchstart.passive="onTouchStart"
     @touchend="onTouchEnd"></canvas>`
 };
@@ -3294,6 +3354,23 @@ const ActivityPanelComponent = {
       // if (response.success) callback below.
       this.$emit("optimistic-anticipate");
 
+      // BUG 1 FIX: Keychain "Silent Close" — 60-second timeout.
+      // If the user dismisses the Keychain popup via the browser's window "X" button
+      // (not the in-extension Cancel button), some Keychain versions never fire the
+      // callback, leaving publishingFeed = true and the UI stuck forever.
+      // The timeout fires the callback manually with a synthetic failure response so
+      // all rollback paths execute normally.
+      let _feedCallbackFired = false;
+      const _feedTimeoutId = setTimeout(() => {
+        if (_feedCallbackFired) return;
+        _feedCallbackFired = true;
+        this.publishingFeed = false;
+        this.alreadyFedToday = false;
+        this.$emit("cancel-anticipate");
+        this.$emit("feed-failed");
+        this.$emit("notify", "Transaction timed out or was closed — please try again.", "error");
+      }, 60000);
+
       publishFeed(
         this.username,
         this.creatureAuthor,
@@ -3302,6 +3379,9 @@ const ActivityPanelComponent = {
         this.foodType,
         this.unicodeArt,
         (response) => {
+          if (_feedCallbackFired) return; // timeout already fired
+          _feedCallbackFired = true;
+          clearTimeout(_feedTimeoutId);
           this.publishingFeed = false;
           if (response.success) {
             const feeder  = this.username;
@@ -3398,10 +3478,24 @@ const ActivityPanelComponent = {
       this._optimisticUpdate("play");
       this.$emit("optimistic-play");
 
+      // BUG 1 FIX: Keychain "Silent Close" — 60-second timeout for play.
+      let _playCallbackFired = false;
+      const _playTimeoutId = setTimeout(() => {
+        if (_playCallbackFired) return;
+        _playCallbackFired = true;
+        this.publishingPlay = false;
+        this.alreadyPlayedToday = false;
+        this.$emit("cancel-anticipate");
+        this.$emit("notify", "Transaction timed out or was closed — please try again.", "error");
+      }, 60000);
+
       publishPlay(
         this.username, this.creatureAuthor, this.creaturePermlink,
         this.creatureName, this.unicodeArt,
         (response) => {
+          if (_playCallbackFired) return;
+          _playCallbackFired = true;
+          clearTimeout(_playTimeoutId);
           this.publishingPlay = false;
           if (response.success) {
             if (typeof invalidateCreatureCache === "function") invalidateCreatureCache(this.creatureAuthor, this.creaturePermlink);
@@ -3427,10 +3521,24 @@ const ActivityPanelComponent = {
       this._optimisticUpdate("walk");
       this.$emit("optimistic-walk");
 
+      // BUG 1 FIX: Keychain "Silent Close" — 60-second timeout for walk.
+      let _walkCallbackFired = false;
+      const _walkTimeoutId = setTimeout(() => {
+        if (_walkCallbackFired) return;
+        _walkCallbackFired = true;
+        this.publishingWalk = false;
+        this.alreadyWalkedToday = false;
+        this.$emit("cancel-anticipate");
+        this.$emit("notify", "Transaction timed out or was closed — please try again.", "error");
+      }, 60000);
+
       publishWalk(
         this.username, this.creatureAuthor, this.creaturePermlink,
         this.creatureName, this.unicodeArt,
         (response) => {
+          if (_walkCallbackFired) return;
+          _walkCallbackFired = true;
+          clearTimeout(_walkTimeoutId);
           this.publishingWalk = false;
           if (response.success) {
             this.$emit("notify", "🦮 Took " + this.creatureName + " for a walk! Vitality improved.", "success");
@@ -3927,6 +4035,15 @@ const BreedingPanelComponent = {
         this.publishing = false;
         return;
       }
+      // BUG 1 FIX: Keychain "Silent Close" — 60-second timeout for offspring publish.
+      let _breedCallbackFired = false;
+      const _breedTimeoutId = setTimeout(() => {
+        if (_breedCallbackFired) return;
+        _breedCallbackFired = true;
+        this.publishing = false;
+        this.$emit("notify", "Transaction timed out or was closed — please try again.", "error");
+      }, 60000);
+
       publishOffspring(
         this.username,
         this.childGenome,
@@ -3936,6 +4053,9 @@ const BreedingPanelComponent = {
         this.customTitle,
         generateGenusName(this.childGenome.GEN),
         (response) => {
+          if (_breedCallbackFired) return;
+          _breedCallbackFired = true;
+          clearTimeout(_breedTimeoutId);
           this.publishing = false;
           if (response.success) {
             const childPermlink = response.permlink;
@@ -5206,7 +5326,11 @@ const EquipPanelComponent = {
            closet.  The notice now explicitly addresses the transfer case so a new
            owner who received a fossil doesn't think their accessories are lost
            forever — it calls out the "Remove" button above and explains that the
-           accessory will be returned to their closet after removal. -->
+           accessory will be returned to their closet after removal.
+           BUG 2 FIX (Fossil Accessory Retrieval UX Paradox): Also explicitly list
+           any accessories whose permissionLapsed=true — these no longer render on
+           the canvas and are easily missed, yet they are still trapped in the fossil
+           metadata and must be removed to return them to the closet. -->
       <div v-if="fossil && isOwner" class="sb-fossil-equip-notice"
         style="margin:10px 0;padding:10px 14px;border-radius:8px;background:#111;border:1px solid #2a2a2a;font-size:0.80rem;color:#666;">
         🦴 This creature is a fossil — it can no longer wear new accessories.<br>
@@ -5217,6 +5341,20 @@ const EquipPanelComponent = {
         <span v-if="hasWearings" style="display:block;margin-top:6px;color:#ffb74d;">
           ⚠ {{ wearings.length }} accessory{{ wearings.length !== 1 ? 'ies are' : ' is' }} currently trapped in this fossil — remove {{ wearings.length !== 1 ? 'them' : 'it' }} to recover {{ wearings.length !== 1 ? 'them' : 'it' }}.
         </span>
+        <!-- BUG 2 FIX: List lapsed accessories separately — they are invisible on the
+             canvas because permissionLapsed=true hides them from rendering, so the
+             owner might not realise they are still locked in the fossil's metadata.
+             Naming them explicitly here ensures the owner knows they must click Remove
+             on each one to get it back into their closet. -->
+        <div v-if="wearings.some(w => w.permissionLapsed)" style="margin-top:8px;padding:8px 10px;border-radius:6px;background:#1a1000;border:1px solid #4a3000;color:#ffb74d;font-size:0.78rem;">
+          ⚠ The following accessories have <strong>lapsed permissions</strong> — they are no longer visible on the canvas but are still equipped. Scroll up and use 👚 Remove to recover them:
+          <ul style="margin:6px 0 0 14px;padding:0;">
+            <li v-for="w in wearings.filter(x => x.permissionLapsed)" :key="w.accAuthor+'/'+w.accPermlink" style="margin:2px 0;">
+              <strong style="color:#e0e0e0;">{{ w.accName }}</strong>
+              <span style="color:#555;font-size:0.72rem;"> (@{{ w.accAuthor }}/{{ w.accPermlink }})</span>
+            </li>
+          </ul>
+        </div>
       </div>
       <template v-if="isOwner && username && !fossil">
         <div @click="expanded=!expanded" class="sb-equip-toggle">

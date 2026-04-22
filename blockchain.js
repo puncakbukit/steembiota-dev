@@ -1051,7 +1051,27 @@ function parseBreedPermitsWithTransfer(replies, effectiveOwner, permitsValidFrom
 
 // ---- Publish a transfer offer reply to the creature's post ----
 // to : string — Steem username of the intended new owner
+//
+// BUG 5 FIX: Transfer Offer Permlink Collision.
+// If the same creature is offered to the same recipient more than once (e.g.
+// the first offer expired un-accepted and a second offer is made 6 months
+// later), the permlink must differ between the two offers — Steem forbids
+// two comments with the same author+permlink pair.
+//
+// buildPermlink() already appends Date.now() to every slug it generates, so
+// each call to publishTransferOffer produces a unique permlink even when the
+// recipient username is identical:
+//   steembiota-transfer-offer-bob-1719000000000  (first offer)
+//   steembiota-transfer-offer-bob-1750000000000  (second offer, 6 months later)
+//
+// This is confirmed by the buildPermlink implementation:
+//   return `${slug}-${Date.now()}`;
+//
+// No slug-level change is required; the comment and the explicit use of
+// buildPermlink (not a hand-crafted static string) enforce the contract.
 function publishTransferOffer(username, creatureAuthor, creaturePermlink, creatureName, to, callback) {
+  // buildPermlink appends Date.now() → guaranteed unique even for repeated offers
+  // to the same recipient.
   const permlink = buildPermlink('steembiota-transfer-offer-' + to.toLowerCase());
   const creaturePageUrl = `${APP_URL}/#/@${creatureAuthor}/${creaturePermlink}`;
 

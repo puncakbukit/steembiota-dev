@@ -300,37 +300,24 @@ function morAspectRatio(mor) {
  * bodyLen and bodyH are both drawn from the same MOR-seeded PRNG, so they
  * are correlated — the true achievable aspect-ratio space is not a simple
  * Cartesian product of [80,110] × [42,60] and cannot be described by a
- * pair of analytical min/max constants.  We therefore skip the pre-clamp
- * entirely and let the full coarse+fine scan find the closest achievable
- * value directly.  The search already returns the best match for any input,
- * even targets outside the achievable range, so the clamp was only masking
- * edge cases without improving accuracy.
+ * pair of analytical min/max constants.
  *
- * Uses a coarse scan (every 37 steps ≈ 270 probes) then refines
- * around the best candidate.  Runs in < 1 ms in all modern browsers.
+ * BUG 3 FIX: Replace coarse+fine scan with a full linear scan of all 10,000
+ * MOR values.  The mulberry32 PRNG is highly non-linear: "basins of attraction"
+ * (ranges of MOR that produce a specific aspect ratio) can be as narrow as 1–3
+ * units.  The previous coarse step of 7 (down from 37) still missed these tight
+ * spikes, causing the subsequent ±200 fine scan to land in the wrong basin for
+ * very tall or very wide images.  A full scan of 10,000 values takes only
+ * ~10–15 ms on a modern phone (each call is a handful of arithmetic ops) and
+ * is already inside a non-blocking requestAnimationFrame, so there is no UX
+ * cost.  This guarantees the global optimum is always found.
  *
  * Returns MOR integer.
  */
 function fitMor(targetRatio) {
   let bestMor = 0, bestDist = Infinity;
 
-  // FIX 2C: Reduced coarse scan step from 37 → 7.
-  // mulberry32 is non-linear, so the aspect-ratio curve through MOR space has
-  // local optima with widths sometimes narrower than 37 units.  A step of 37
-  // could skip an entire "sweet spot" — for very tall or very wide images the
-  // coarse winner would land in the wrong basin of attraction, and the ±200
-  // fine scan would never reach the true optimum.  A step of 7 costs ~14×
-  // more iterations (1428 vs 270) but is still microseconds on modern CPUs,
-  // and guarantees no basin narrower than 7 MOR units is missed.
-  for (let m = 0; m < 10000; m += 7) {
-    const dist = Math.abs(morAspectRatio(m) - targetRatio);
-    if (dist < bestDist) { bestDist = dist; bestMor = m; }
-  }
-
-  // Fine scan ±200 around the coarse winner
-  const lo = Math.max(0, bestMor - 200);
-  const hi = Math.min(9999, bestMor + 200);
-  for (let m = lo; m <= hi; m++) {
+  for (let m = 0; m < 10000; m++) {
     const dist = Math.abs(morAspectRatio(m) - targetRatio);
     if (dist < bestDist) { bestDist = dist; bestMor = m; }
   }

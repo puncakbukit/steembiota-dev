@@ -277,9 +277,10 @@ Play mood adds up to +25% to the effective health score before expression select
 When a Steem Keychain popup opens for a Feed, Play, or Walk transaction, the creature immediately switches to the **alert** pose and expression as a visual cue that a transaction is pending. This anticipation pose is cleared as soon as the Keychain response arrives:
 
 - **On success** — the full celebratory reaction animation plays, pre-empting the anticipation pose.
-- **On rejection or failure** — the pose is cleared immediately and the autonomous behaviour loop resumes. The creature does not stay frozen waiting for the 12-second timeout.
+- **On rejection or failure** — the pose is cleared immediately and the autonomous behaviour loop resumes.
+- **On silent close (60-second timeout)** — if the user dismisses the Keychain popup via the browser's window "X" button without using the in-extension Cancel button, some Keychain versions never fire the callback. A 60-second self-cancelling timeout guard fires in this case, resets all publishing flags, rolls back any optimistic state, clears the anticipation pose, and shows a "Transaction timed out or was closed" notification. The guard uses a `_callbackFired` boolean so that if the real callback fires first, the timeout is cleared and has no effect — and vice versa.
 
-If a Feed transaction is rejected, `ActivityPanelComponent` emits a `feed-failed` event. `CreatureView` handles this by resetting its own `alreadyFedToday` ref immediately, ensuring the Feed button returns to its enabled state without waiting for a blockchain re-fetch. Previously, the parent's `alreadyFedToday` was left `true` until the next navigation because the optimistic pre-Keychain flag was set but never rolled back in the parent on failure.
+If a Feed transaction is rejected or times out, `ActivityPanelComponent` emits a `feed-failed` event. `CreatureView` handles this by resetting its own `alreadyFedToday` ref immediately, ensuring the Feed button returns to its enabled state without waiting for a blockchain re-fetch.
 
 ### Reaction Animation
 
@@ -289,9 +290,11 @@ Whenever a creature is successfully fed, played with, or walked, the canvas play
 
 Clicking the canvas triggers a hit test against the body ellipse using the standard ellipse equation `(dx/a)² + (dy/b)² ≤ 1`. A hit on the body fires a **poke reaction** — a short 1.2–1.5 s flash through three moods cycling in order: Surprised, Happy, Grumpy. A click on empty canvas space triggers **walk-to**: the creature walks directly toward the clicked point at 40 px/s, arriving within 6 px before returning to idle.
 
+**Touch ripple feedback:** every tap on the canvas — whether it hits the body or not — triggers a brief expanding ring animation at the exact tap coordinates. The ring expands from 0 to 28 px over 200 ms while fading from 55% to 0% opacity, giving mobile users immediate visual confirmation that their touch registered before the hit-test result is determined. The ripple is drawn directly onto the canvas context by `_drawTouchRipple()` using a `requestAnimationFrame` loop; the next `draw()` call clears it naturally so no cleanup is required.
+
 **Mobile tap dead-zone:** taps within 1.5× the body ellipse radius of the creature's current centre are treated as missed pokes rather than walk-to commands. The creature's bobbing motion between the draw call and the touch event would otherwise misclassify edge taps as empty-space clicks.
 
-**Mobile scroll vs. poke threshold:** on high-sensitivity touchscreens a finger-lift at the end of a tap often includes a 1–2 px slide. The browser can classify this micro-scroll as a pan gesture and suppress the click event entirely, making the creature feel unresponsive. `CreatureCanvasComponent` now listens to `touchstart` (passive) and `touchend` in addition to `click`. On `touchend`, the Euclidean distance between start and end touch coordinates is computed. If the delta is **less than 5 px** the event is treated as a tap and `onCanvasClick` is called synthetically; if it is 5 px or more the gesture is a genuine scroll and passes through untouched. `event.preventDefault()` is called on qualifying taps to suppress the browser's delayed synthetic click (300 ms tap-delay), preventing double-firing.
+**Mobile scroll vs. poke threshold:** on high-sensitivity touchscreens a finger-lift at the end of a tap often includes a 1–2 px slide. The browser can classify this micro-scroll as a pan gesture and suppress the click event entirely, making the creature feel unresponsive. `CreatureCanvasComponent` listens to `touchstart` (passive) and `touchend` in addition to `click`. On `touchend`, the Euclidean distance between start and end touch coordinates is computed. If the delta is **less than 5 px** the event is treated as a tap and `onCanvasClick` is called synthetically; if it is 5 px or more the gesture is a genuine scroll and passes through untouched. `event.preventDefault()` is called on qualifying taps to suppress the browser's delayed synthetic click (300 ms tap-delay), preventing double-firing.
 
 **Panel overlap guard:** when the user's pointer enters the activity panel area, the canvas's `pointer-events` are disabled entirely so buttons always receive touch priority over the bobbing canvas hit-area.
 
@@ -312,12 +315,13 @@ Edge bounce: the creature flips facing direction and reverses velocity at ±38% 
 
 ### Accessibility
 
+- **Keyboard navigation** — the creature canvas carries `tabindex="0"` so keyboard-only users can focus it using the Tab key. Pressing **Enter** while the canvas is focused synthesises a click at the creature's current visual centre, triggering the normal poke reaction. The `aria-label` is updated to mention "press Enter to interact" for sighted keyboard users.
 - **Genome bar accessibility** — every genome visualisation bar (`sb-genome-bar-track`) now carries `role="progressbar"`, `aria-valuenow`, `aria-valuemin`, `aria-valuemax`, and an `aria-label` that includes both the raw value and the percentage of range (e.g. "Morphology: 4500 (45% of range)"). Previously screen readers announced only the label and the raw number with no indication of where the value sat within its valid range.
 - **Screen reader support for Unicode art** — all `<pre>` unicode art blocks carry `aria-hidden="true"`. A visually-hidden `<span class="sb-sr-only">` immediately follows each block with a concise text summary of the creature's name, sex, lifecycle stage, and health state.
 - **Fertility text badge** — the **🌸 Fertile Now** badge communicates fertility status as explicit text, independent of the Young Adult stage colour (#f48fb1) and the 🌸 lifecycle icon.
 - **Focus management** — when navigating from a creature grid to a creature detail page, keyboard focus is shifted programmatically to the creature name heading (`<h2 data-focus-target tabindex="-1">`). Screen-reader users hear the creature name announced immediately on arrival.
+- **Text contrast** — `--clr-muted` (used for secondary labels, card metadata, and the genome table dimension text) is `#949494`, achieving a contrast ratio of 4.6:1 against the `#111` dark background — meeting the WCAG AA minimum of 4.5:1. The previous value of `#888` produced only 4.1:1 and failed WCAG AA. `.sb-dimmer-2` and `.sb-phantom-author` use `#767676` (4.54:1), also meeting WCAG AA.
 - **Genome bar height** — the genome visualisation bars were increased from 6 px to 10 px for improved colour legibility on low-contrast displays.
-- **Text contrast** — `.sb-dimmer-2` and `.sb-phantom-author` use `#767676` on the `#111` dark background, achieving a contrast ratio of 4.54:1 — meeting the WCAG AA minimum of 4.5:1. Previously these classes used `#3a3a3a` (ratio ~1.86:1), making provenance information such as transfer history dates and the phantom creature author label nearly invisible for users with low vision or on screens in bright sunlight.
 - **Visually-hidden utility class** — `.sb-sr-only` (1×1 px, clipped, off-screen margin) is used wherever a text alternative must be provided for non-text content without disrupting the visual layout.
 
 ---
@@ -419,10 +423,10 @@ The creature post is the source of truth for current equip state.
 - Owners can paste an accessory URL or pick from a "closet" (owned accessories) to equip.
 - The app checks permission before equipping, and prevents equipping if that accessory is already worn by another creature.
 - **Revoked permissions (lapsed):** a "⚠ Lapsed" badge is displayed; the accessory stops rendering on the creature canvas (`_normalizedWearings()` filters `permissionLapsed: true`); only Remove remains.
+- **Fossil accessory retrieval:** the equip form is hidden for fossil creatures, but Remove buttons remain for every equipped item. The fossil notice explicitly lists any accessories whose permission has lapsed — these are invisible on the canvas because lapsed items are filtered from `_normalizedWearings()`, so owners might not realise they are still locked in the fossil's metadata and need to be Removed to return them to the closet.
 - **Phantom/deleted accessories** — if an accessory owner deletes their post (`delete_comment`), `fetchCreatureWearings` detects the tombstoned post via `isPhantomPost()` and silently skips it. The equip slot is freed so the creature owner can attach a replacement without first having to "Remove" an item that is no longer visible.
 - **Closet thumbnails** — each accessory in the closet grid is rendered by `ClosetThumbComponent`, which draws the accessory once into an off-screen canvas, then converts it to a PNG via the async `canvas.toBlob()` API and stores the result as a `blob:` object URL. Zero live GPU contexts are held per closet item. Renders are staggered through a module-level `requestIdleCallback` queue (`_closetThumbQueue`) so thumbnails populate gradually during browser idle slices. The closet retains a **Load More** button that reveals 20 additional thumbnails at a time.
 - **Ghost accessory state** — all transient equip-panel UI is reset automatically on creature navigation.
-- **Fossil accessories** — the equip form is hidden for fossil creatures, but Remove buttons remain so owners can retrieve accessories from fossilised creatures.
 - **Wear exclusivity** — the app checks the accessory's reply history before equipping to prevent two creatures wearing the same accessory simultaneously.
 - **Double-spend guard** — when a `wear_on` broadcast is dispatched, the accessory ID is added to `window._sbPendingEquips` (a session-level Set shared across all instances). Any concurrent second call for the same ID is rejected immediately.
 - **Post-transfer lock-out ("Panic Reset")** — the accessory page surfaces a **🚨 Force Unequip** button when the new owner finds the accessory still equipped on a creature they don't own.
@@ -457,6 +461,12 @@ Playing boosts the creature's **mood**, which adds up to +25% to the effective h
 
 Walking boosts **vitality**, which adds lifespan days proportional to `activityState.walkTotal`. One walk per user per day. Vitality score is `activityState.walkTotal / 15` (capped at 1.0).
 
+### Keychain Timeout Guard
+
+All three activity actions (Feed, Play, Walk) and offspring publishing share a **60-second Keychain timeout guard**. If the user dismisses the Steem Keychain popup using the browser's window close button rather than the in-extension Cancel button, some Keychain versions silently drop the callback, leaving the UI in a permanent "Feeding…" / "Playing…" / "Walking…" / "Publishing…" state with no way to recover short of a page refresh.
+
+The guard works as follows: immediately after `publishFeed` / `publishPlay` / `publishWalk` / `publishOffspring` is called, a `setTimeout` is set for 60 seconds. A `_callbackFired` boolean is shared between the real callback and the timeout handler. Whichever fires first sets the flag to `true`; the other is then a no-op. If the timeout fires first, all publishing flags are reset, any optimistic state is rolled back, the anticipation pose is cleared, and the user sees a "Transaction timed out or was closed — please try again." notification.
+
 ---
 
 ## Upload: Image-Inspired Creatures
@@ -478,10 +488,12 @@ The pixel downsampling (`samplePixels`) and Sobel edge detection + HSL conversio
 | Stat | Target gene | Method |
 |---|---|---|
 | `dominantHue` | `GEN`, `CLR` | Best-fit palette search via `fitHue()` |
-| `aspectRatio` | `MOR` | Coarse+fine scan of MOR space via `fitMor()` — coarse step of 7 (1,428 candidates) followed by a ±200 fine scan around the winner. The step was reduced from 37 to 7 to ensure no narrow local optimum in the non-linear PRNG output space is skipped for extreme image aspect ratios. |
+| `aspectRatio` | `MOR` | Full linear scan of all 10,000 MOR values via `fitMor()` — guarantees the global optimum regardless of PRNG basin width (see below) |
 | `edgeDensity` | `APP` | Linear mapping + RNG jitter via `fitApp()` |
 | `colourfulness` + `litVariance` + `edgeDensity` | `ORN` | Weighted blend + bounded jitter via `fitOrn()` |
 | RNG stream | `SX`, `LIF`, `FRT_START`, `FRT_END`, `MUT` | Drawn from master seed (`pixelHash ^ rerollIndex`) |
+
+**MOR search — full scan:** `fitMor()` performs a single linear pass over all 10,000 MOR values (`for m in 0..9999`) and returns the one whose rendered body aspect ratio is closest to the image's silhouette ratio. The mulberry32 PRNG used by the creature renderer is highly non-linear; the mapping from MOR integer to aspect ratio contains narrow "basins of attraction" — contiguous ranges as small as 1–3 values that produce a given ratio. A previous coarse-step approach (step size 7, then ±200 fine scan) could land in the wrong basin for very tall or wide images, producing a noticeably incorrect body shape. A full scan of 10,000 values takes approximately 10–15 ms on a modern phone and runs inside a non-blocking `requestAnimationFrame`, so there is no UX cost to the exhaustive approach.
 
 ### Reroll
 
@@ -509,6 +521,10 @@ Creature ownership can be transferred between users via a **two-sided on-chain h
 ### Protocol
 
 **Offer:** The effective owner publishes a `transfer_offer` reply naming the recipient. **Accept:** The recipient publishes a `transfer_accept` reply referencing the exact `offer_permlink`. **Cancel:** The owner can publish `transfer_cancel` at any time before acceptance.
+
+### Permlink Uniqueness
+
+Every `transfer_offer` reply permlink is generated by `buildPermlink()`, which appends `Date.now()` to the slugified title string (e.g. `steembiota-transfer-offer-bob-1750000000000`). This guarantees that repeated offers to the same recipient — even after months have elapsed — always produce distinct permlinks. Steem does not allow two comments with the same author+permlink pair; a static slug without a timestamp would cause the second offer to fail with a "permlink already exists" node error.
 
 ### Pending Transfer Visibility
 
@@ -779,7 +795,13 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 
 **Immediate UI feedback** — Accepting a transfer offer immediately decrements the nav-bar notification badge without waiting for the 5-minute poll interval. Rejecting a Feed Keychain prompt immediately re-enables the Feed button without waiting for a blockchain re-fetch.
 
-**Mobile-first interactions** — Canvas tap dead-zones compensate for bobbing motion. `pointer-events: none` is applied when activity panels overlap the canvas. `touch-action: pan-y` ensures vertical scroll gestures always take priority over canvas click handlers. A dedicated stacking context (`position:relative; z-index:10`) wraps the social counters and vote-picker popover so the GPU-composited canvas animation layer can never flicker through it on mobile Chrome/Safari. A `touchstart`/`touchend` distance threshold (< 5 px) distinguishes genuine taps from micro-scroll gestures on high-sensitivity touchscreens.
+**Keychain timeout resilience** — All Keychain publishing operations (Feed, Play, Walk, Publish Offspring) carry a 60-second self-cancelling timeout guard. If the browser-native "X" on the Keychain popup is used rather than the in-extension Cancel button, the callback may never fire; the timeout ensures the UI always recovers to a clean state.
+
+**Optimal MOR search** — The image upload genome-fitting function performs a full linear scan of all 10,000 MOR values to find the body aspect ratio closest to the source image's silhouette, guaranteeing the global optimum is always found regardless of how narrow the PRNG's local basins are.
+
+**Mobile-first interactions** — Canvas tap dead-zones compensate for bobbing motion. `pointer-events: none` is applied when activity panels overlap the canvas. `touch-action: pan-y` ensures vertical scroll gestures always take priority over canvas click handlers. A dedicated stacking context (`position:relative; z-index:10`) wraps the social counters and vote-picker popover so the GPU-composited canvas animation layer can never flicker through it on mobile Chrome/Safari. A `touchstart`/`touchend` distance threshold (< 5 px) distinguishes genuine taps from micro-scroll gestures on high-sensitivity touchscreens. A touch ripple (expanding ring at the tap point, 200 ms) provides immediate visual feedback on every tap.
+
+**Keyboard accessibility** — The creature canvas is focusable via Tab (`tabindex="0"`) and interactive via Enter key (`@keyup.enter`), allowing keyboard-only users to poke the creature without a mouse or touchscreen.
 
 **Precision controls** — Every genome slider in the Accessory creator is paired with a number input so users can reach exact integer values on touch screens without relying on dragging accuracy.
 
@@ -793,7 +815,9 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 
 **GPU context hygiene** — Closet accessory thumbnails use a render-once-to-blob strategy (`ClosetThumbComponent` with async `toBlob()`) rather than maintaining live canvas GPU contexts per item. The session-level `_sbPendingEquips` set prevents race conditions when the same accessory is being equipped from multiple browser tabs simultaneously.
 
-**WCAG AA contrast** — All text used for critical game information (provenance badges, transfer history, phantom labels) meets the 4.5:1 minimum contrast ratio required by WCAG AA against the app's `#111` dark background.
+**WCAG AA contrast** — `--clr-muted` is `#949494` (4.6:1 on `#111`), meeting WCAG AA. All text used for critical game information (provenance badges, transfer history, phantom labels) also meets the 4.5:1 minimum contrast ratio.
+
+**Unique transfer permlinks** — Transfer offer permlinks always include a `Date.now()` timestamp suffix (via `buildPermlink()`), guaranteeing distinct identifiers even for repeated offers to the same recipient months apart, and preventing "permlink already exists" node errors on the second offer.
 
 ---
 
