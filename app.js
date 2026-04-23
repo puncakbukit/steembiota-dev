@@ -1749,7 +1749,7 @@ const AboutView = {
 // Two tabs: Creatures (owned via transfer chain) and Accessories (owned via transfer chain).
 const ProfileView = {
   name: "ProfileView",
-  inject: ["username", "notify"],
+  inject: ["username", "notify", "globalState"],
   components: { CreatureCardComponent, AccessoryCardComponent, LoadingSpinnerComponent },
   data() {
     return {
@@ -1878,6 +1878,12 @@ const ProfileView = {
         if (myGen !== this._profileCreatureGen) return;
         const mapped = owned.map(({ post: p, meta: sb, effectiveOwner }) => {
           const age = calculateAge(p.created);
+          // ── GSM fast-path: prefer the global state owner when available ──
+          // stateOwnerOf() is an O(1) map lookup and reflects the latest
+          // confirmed transfer, even mid-session, without an extra RPC call.
+          const gsmOwner = this.globalState?.value
+            ? stateOwnerOf(this.globalState.value, p.author, p.permlink, effectiveOwner)
+            : effectiveOwner;
           return {
             author: p.author, permlink: p.permlink,
             name: sb.name || p.author, genome: sb.genome, age,
@@ -1888,7 +1894,7 @@ const ProfileView = {
             fingerprint: genomeFingerprint(sb.genome),
             isDuplicate: false, isPhantom: false,
             originalAuthor: null, originalPermlink: null, originalCreated: null,
-            created: p.created || "", effectiveOwner,
+            created: p.created || "", effectiveOwner: gsmOwner,
           };
         }).sort((a, b) => new Date(b.created) - new Date(a.created));
         // If we already have data on-screen (usually from cache), do not let an
@@ -2087,7 +2093,7 @@ const ProfileView = {
 // and provides Feed + Breed interaction panels.
 const CreatureView = {
   name: "CreatureView",
-  inject: ["username", "notify"],
+  inject: ["username", "notify", "globalState", "syncStatus"],
   components: {
     CreatureCanvasComponent,
     CreatureCardComponent,
@@ -2447,6 +2453,13 @@ const CreatureView = {
     this.transferState     = ownership;
     this.effectiveOwner    = ownership.effectiveOwner;
 
+    // ── Update global state machine with the fresh on-chain ownership ──────
+    // This keeps the GSM warm for siblings / profile views that may be
+    // rendered immediately after this view loads, sparing them a reply scan.
+    if (this.globalState?.value) {
+      statePatchOwner(this.globalState.value, author, permlink, ownership.effectiveOwner);
+    }
+
     this.permitState = parseBreedPermitsWithTransfer(
       replies,
       ownership.effectiveOwner,
@@ -2720,6 +2733,16 @@ const CreatureView = {
       const prevOwner = this.effectiveOwner;
       this.transferState  = newTransferState;
       this.effectiveOwner = newTransferState.effectiveOwner;
+
+      // ── Hot-patch the global state machine so other views see the new owner
+      //    without waiting for a full re-bootstrap. ─────────────────────────
+      if (this.globalState?.value) {
+        statePatchOwner(
+          this.globalState.value,
+          this.author, this.permlink,
+          newTransferState.effectiveOwner
+        );
+      }
 
       // Fix 5b: use targeted cache patching instead of nuking everything.
       // Only nuke if we can't determine who the previous owner was.
@@ -4179,6 +4202,7 @@ const routes = [
   { path: "/acc/@:author/:permlink", name: "AccessoryItemView", component: AccessoryItemView },
   { path: "/@:user",              component: ProfileView       },
   { path: "/upload", component: UploadView },
+  { path: "/checkpoint", component: CheckpointManager },
 ];
 
 const router = createRouter({
@@ -4198,7 +4222,8 @@ const App = {
     LoadingSpinnerComponent,
     CreatureCanvasComponent,
     GenomeTableComponent,
-    GlobalProfileBannerComponent
+    GlobalProfileBannerComponent,
+    CheckpointManager
   },
 
   setup() {
@@ -4211,6 +4236,14 @@ const App = {
     const notification  = ref({ message: "", type: "error" });
     const profileData   = ref(null);
     const userLevel     = ref(null);   // computed from on-chain activity
+
+    // ── NFT Global State Machine (state.js) ─────────────────────────────────
+    // globalState is the single source of truth for ownership and equip status.
+    // Views should call stateOwnerOf() / stateEquippedOn() for O(1) lookups
+    // instead of scanning reply chains.  Falls back to reply-chain logic for
+    // NFTs not yet processed by the state machine.
+    const globalState  = ref(createEmptyState());
+    const syncStatus   = ref("⏳ Initialising state machine…");
 
     async function loadProfile(user) {
       if (!user) {
@@ -4298,6 +4331,13 @@ const App = {
 
     onMounted(() => {
       setRPC(0);
+
+      // ── Boot the NFT State Machine ──────────────────────────────────────
+      // bootstrapState() is defined in state.js.  It runs the full
+      // checkpoint → IPFS snapshot → replay sequence asynchronously.
+      // globalState and syncStatus update reactively as the sync progresses.
+      bootstrapState(globalState, syncStatus);
+
       // Always load a profile — logged-in user's own, or @steembiota as fallback
       loadProfile(username.value || "");
       // Start notification badge polling if already logged in
@@ -4358,21 +4398,29 @@ const App = {
       loadProfile(""); // fall back to @steembiota
     }
 
-    provide("username",    username);
-    provide("hasKeychain", hasKeychain);
-    provide("notify",      notify);
-    provide("profileData", profileData);
+    provide("username",       username);
+    provide("hasKeychain",    hasKeychain);
+    provide("notify",         notify);
+    provide("profileData",    profileData);
     // BUG 5 FIX: Expose a setter so child views (NotificationsView) can update the
     // nav-bar badge count immediately after accepting a transfer offer, without
     // waiting for the next 5-minute poll interval.
     provide("updateNotifBadge", (count) => { notifBadgeCount.value = count; });
+
+    // ── NFT State Machine provisions ─────────────────────────────────────────
+    // Injected by any child view that needs O(1) ownership/equip lookups
+    // instead of scanning reply chains on every render.
+    provide("globalState",    globalState);
+    provide("syncStatus",     syncStatus);
 
     return {
       username, hasKeychain, keychainReady,
       loginError, showLoginForm, isLoggingIn,
       notification, notify, dismissNotification,
       login, logout, profileData, userLevel,
-      notifBadgeCount
+      notifBadgeCount,
+      // Expose for App template
+      globalState, syncStatus
     };
   },
 
@@ -4391,6 +4439,7 @@ const App = {
       >Profile</router-link>
       <router-link to="/leaderboard" exact-active-class="nav-active">🏆 Leaderboard</router-link>
       <router-link to="/about"       exact-active-class="nav-active">About</router-link>
+      <router-link to="/checkpoint"   exact-active-class="nav-active">🛠️ Checkpoint</router-link>
 
       <!-- Notifications link — only shown when logged in, with badge for pending offers -->
       <router-link
@@ -4443,6 +4492,12 @@ const App = {
       :is-logged-in="!!username"
     ></global-profile-banner-component>
 
+    <!-- NFT State Machine sync status bar -->
+    <div
+      v-if="syncStatus && !syncStatus.startsWith('✅')"
+      style="font-size:11px;color:#ffe082;background:#1a1a2e;padding:4px 12px;text-align:center;border-bottom:1px solid #333;"
+    >{{ syncStatus }}</div>
+
     <hr/>
 
     <!-- Page content -->
@@ -4476,7 +4531,8 @@ vueApp.component("GlobalProfileBannerComponent", GlobalProfileBannerComponent);
 vueApp.component("ActivityPanelComponent",      ActivityPanelComponent);
 vueApp.component("CreatureView",                CreatureView);
 vueApp.component("LeaderboardView",             LeaderboardView);
-vueApp.component("UploadView", UploadView);
+vueApp.component("UploadView",                 UploadView);
+vueApp.component("CheckpointManager",          CheckpointManager);
 
 vueApp.use(router);
 vueApp.mount("#app");
