@@ -6,6 +6,8 @@ Creatures are generated from deterministic **genomes**, rendered procedurally as
 
 SteemBiota also includes an **Accessory system**: users can procedurally generate wearable items, publish them on-chain, browse all accessories, and transfer ownership using the same two-sided handshake protocol used by creatures.
 
+Creatures and accessories are treated as **NFTs**: each is uniquely identified by its `author/permlink` key, its ownership and equip state are tracked by a Global State Machine that is snapshotted to IPFS and anchored on-chain, and all state transitions are deterministic and cryptographically verifiable.
+
 🌐 **Live app:** https://puncakbukit.github.io/steembiota
 
 ---
@@ -16,7 +18,7 @@ SteemBiota explores digital organisms whose evolution is permanently stored on a
 
 Each creature has a compact genome that determines its body shape, colour, lifespan, and fertility window. Once published via Steem Keychain, the genome is immutable. A creature's lifecycle plays out in real time measured in days, and every interaction — feeding, playing, walking, breeding — is stored as a blockchain reply. The blockchain becomes the ecosystem's permanent fossil record.
 
-Creatures can be **transferred between owners** via a two-sided on-chain handshake. Ownership is a derived concept — the original `post.author` never changes, but SteemBiota walks the reply history to determine the current effective owner at read time.
+Creatures can be **transferred between owners** via a two-sided on-chain handshake. Ownership is tracked by the **Global State Machine** (see below), which delivers O(1) local lookups instead of scanning reply chains on every render.
 
 ---
 
@@ -30,10 +32,112 @@ The dApp runs entirely in the browser with no build tools and no backend.
 | Signing | Steem Keychain browser extension |
 | UI Framework | Vue 3 (CDN) + Vue Router 4 (CDN) |
 | Routing | Vue Router 4 (CDN, hash mode) |
+| State snapshot storage | IPFS (public gateways + Pinata / web3.storage) |
 | Hosting | GitHub Pages |
 | Build tools | None |
 
-Files: `index.html`, `blockchain.js`, `components.js`, `accessories.js`, `upload.js`, `app.js`
+Files: `index.html`, `blockchain.js`, `state.js`, `components.js`, `accessories.js`, `upload.js`, `app.js`
+
+---
+
+## NFT State Machine & Checkpoint System
+
+SteemBiota treats every creature and accessory as an **NFT** identified by its canonical `author/permlink` key. Instead of scanning reply chains on every page load to determine who owns a creature or what an accessory is equipped on, the app maintains a **Global State Machine (GSM)** — a single in-memory object that is the authoritative source of truth for ownership and equip state across the entire session.
+
+### State Schema
+
+```js
+{
+  version:   1,
+  block_num: 0,          // Steem block number of the last processed event
+  timestamp: null,       // ISO-8601 timestamp of the last processed event
+  ownership: {},         // "author/permlink" → current owner username
+  equipped:  {},         // "accAuthor/accPermlink" → "creatureAuthor/creaturePermlink"
+  registry:  {}          // "author/permlink" → { type: "creature"|"accessory", genome }
+}
+```
+
+### State Transitions
+
+All transitions are handled by `applyOperation(state, op, blockNum, timestamp)` in `state.js`. The function is **deterministic and idempotent** — replaying the same event twice has no effect. Supported operation types:
+
+| Operation type | Effect |
+|---|---|
+| `founder` / `offspring` | Mint creature NFT; set owner to `op.author` |
+| `accessory` | Mint accessory NFT; set owner to `op.author` |
+| `transfer_accept` | Transfer ownership of the referenced NFT to `op.author` (the accepting party) |
+| `wear_on` | Record accessory as equipped on creature; enforces exclusivity (removes any prior creature assignment) |
+| `wear_off` | Remove equip record |
+
+All other reply types (`feed`, `play`, `walk`, `breed_permit`, etc.) do not affect NFT state and are ignored by the GSM.
+
+### Boot Sequence
+
+On every page load, `bootstrapState()` runs the following sequence asynchronously, updating the `syncStatus` Vue ref at each step (displayed as a slim banner until the sync is complete):
+
+1. **Check IndexedDB** — if a previously persisted snapshot exists, load it instantly (offline-capable, zero RPC calls).
+2. **Fetch on-chain checkpoint** — scan the `@steembiota` account history for `custom_json` ops with id `steembiota_checkpoint`, sorted newest-first.
+3. **Compare CIDs** — if the on-chain checkpoint references the same CID as the IDB snapshot, skip the IPFS download; otherwise download and verify.
+4. **Verify IPFS snapshot** — compute `SHA-256` of the downloaded JSON (with keys canonically sorted) and compare against `state_hash` in the checkpoint. A mismatch means the IPFS node served a tampered file — the snapshot is rejected and the IDB cache is used as fallback.
+5. **Persist to IndexedDB** — save the verified snapshot so the next boot is instant.
+6. **Replay recent posts** — fetch recent posts tagged `steembiota` and apply any whose `created` timestamp postdates the snapshot's `timestamp`.
+7. **Expose to Vue** — `globalState` and `syncStatus` are provided to all child components.
+
+### State Hashing
+
+`hashState(state)` produces a **deterministic SHA-256 hex digest** of the state object. Before serialising to JSON, all keys in every sub-object are sorted recursively. This guarantees that two clients building identical states via different operation orderings produce the same hash, enabling trustless checkpoint verification.
+
+### IPFS Snapshot Distribution
+
+Three public IPFS gateways are tried in order with a 15-second timeout per attempt:
+
+1. `https://ipfs.io/ipfs/`
+2. `https://cloudflare-ipfs.com/ipfs/`
+3. `https://gateway.pinata.cloud/ipfs/`
+
+Any verified snapshot is persisted to the `sb_state_snapshot` IndexedDB store so that subsequent boots do not require an IPFS round-trip at all.
+
+### Checkpoint Broadcasting
+
+Any user can help decentralise the state:
+
+1. Export the current GSM state as `steembiota-state.json` (download link generated client-side).
+2. Pin the file to IPFS (e.g. via [Pinata](https://www.pinata.cloud) or [web3.storage](https://web3.storage)).
+3. Paste the resulting CID into the Checkpoint Authority panel and broadcast it to Steem via Keychain.
+
+The broadcast is a `custom_json` op with id `steembiota_checkpoint` and payload:
+
+```json
+{
+  "version":      1,
+  "block_num":    12345678,
+  "state_hash":   "abc123…",
+  "snapshot_cid": "QmXyz…"
+}
+```
+
+### GSM Convenience Helpers
+
+`state.js` exports several helpers consumed by `CreatureView` and `ProfileView`:
+
+| Helper | Purpose |
+|---|---|
+| `stateOwnerOf(state, author, permlink, fallback)` | O(1) ownership lookup; returns `fallback` when not yet in registry |
+| `stateEquippedOn(state, accAuthor, accPermlink)` | Returns `"author/permlink"` key of the wearing creature, or `null` |
+| `statePatchOwner(state, author, permlink, newOwner)` | Hot-patches the GSM immediately after a confirmed transfer |
+| `statePatchEquip(state, …)` | Hot-patches the GSM immediately after a confirmed `wear_on` |
+| `statePatchUnequip(state, …)` | Hot-patches the GSM immediately after a confirmed `wear_off` |
+
+### Integration with CreatureView and ProfileView
+
+- **`CreatureView`** — after `loadCreature()` resolves the on-chain ownership via `parseOwnershipChain()`, it immediately calls `statePatchOwner()` to keep the GSM warm. After a confirmed transfer, `onTransferUpdated()` also calls `statePatchOwner()`, so siblings and profile views see the new owner instantly without a re-bootstrap.
+- **`ProfileView`** — `refreshCreatures()` calls `stateOwnerOf()` for each creature in the owned list, preferring the GSM's in-memory owner over the reply-scan result. This eliminates the "effective owner lag" that previously required per-card reply fetches.
+
+### CheckpointManager Component
+
+Available at `/#/checkpoint` and via the 🛠️ Checkpoint nav link. Injected dependencies: `username`, `notify`, `globalState`, `syncStatus`.
+
+The component shows a live summary of the current GSM (NFT count, last block number, last timestamp), provides a one-click export, and a CID input + broadcast button. All Keychain interactions use the existing `publishCheckpoint()` function from `state.js`.
 
 ---
 
@@ -353,6 +457,7 @@ SteemBiota supports procedurally generated, on-chain **accessories** in addition
 - Each accessory has its own deterministic **Accessory Genome** and render template.
 - Published accessories are regular Steem posts with `json_metadata.steembiota.type = "accessory"`.
 - Accessories support the same transfer offer / accept / cancel ownership flow as creatures.
+- Accessory ownership and equip state are tracked by the GSM alongside creature ownership.
 - Accessory item pages live at `/#/acc/@author/permlink`.
 
 ### Accessory Templates
@@ -408,14 +513,9 @@ Accessory owners control wear access with on-chain replies:
 
 Rules: permissions are user-based (not creature-based); accessory owner is always implicitly permitted; public mode allows anyone to equip without explicit grant.
 
-#### Equip State Model (on creature post replies)
+#### Equip State Model
 
-Creature owners control what is currently worn by publishing:
-
-- `wear_on` — equip accessory
-- `wear_off` — remove accessory
-
-The creature post is the source of truth for current equip state.
+Creature owners control what is currently worn by publishing `wear_on` / `wear_off` replies on the creature post. The **Global State Machine** (not the raw reply chain) is now the primary source of truth for equip state in views. The `stateEquippedOn()` helper delivers an O(1) lookup that is always current within the session.
 
 #### UI Behaviour
 
@@ -425,73 +525,23 @@ The creature post is the source of truth for current equip state.
 - **Revoked permissions (lapsed):** a "⚠ Lapsed" badge is displayed; the accessory stops rendering on the creature canvas (`_normalizedWearings()` filters `permissionLapsed: true`); only Remove remains.
 - **Fossil accessory retrieval:** the equip form is hidden for fossil creatures, but Remove buttons remain for every equipped item. The fossil notice explicitly lists any accessories whose permission has lapsed — these are invisible on the canvas because lapsed items are filtered from `_normalizedWearings()`, so owners might not realise they are still locked in the fossil's metadata and need to be Removed to return them to the closet.
 - **Phantom/deleted accessories** — if an accessory owner deletes their post (`delete_comment`), `fetchCreatureWearings` detects the tombstoned post via `isPhantomPost()` and silently skips it. The equip slot is freed so the creature owner can attach a replacement without first having to "Remove" an item that is no longer visible.
-- **Closet thumbnails** — each accessory in the closet grid is rendered by `ClosetThumbComponent`, which draws the accessory once into an off-screen canvas, then converts it to a PNG via the async `canvas.toBlob()` API and stores the result as a `blob:` object URL. Zero live GPU contexts are held per closet item. Renders are staggered through a module-level `requestIdleCallback` queue (`_closetThumbQueue`) so thumbnails populate gradually during browser idle slices. The closet retains a **Load More** button that reveals 20 additional thumbnails at a time.
-- **Ghost accessory state** — all transient equip-panel UI is reset automatically on creature navigation.
-- **Wear exclusivity** — the app checks the accessory's reply history before equipping to prevent two creatures wearing the same accessory simultaneously.
-- **Double-spend guard** — when a `wear_on` broadcast is dispatched, the accessory ID is added to `window._sbPendingEquips` (a session-level Set shared across all instances). Any concurrent second call for the same ID is rejected immediately.
-- **Post-transfer lock-out ("Panic Reset")** — the accessory page surfaces a **🚨 Force Unequip** button when the new owner finds the accessory still equipped on a creature they don't own.
-- **Public domain confirmation** — the `wear_public` action is guarded by a browser confirmation dialog explaining that equips made during the public window persist even if the owner later reverts to private.
-- **Layer reorder** — owners can reorder draw layers using ▲/▼ controls in the equip panel.
 
 ---
 
-## Activities
+## Image Upload — Genome Derivation
 
-All three creature interactions — feeding, play, and walking — are presented in a single unified **🌿 Activities** panel on the creature page, directly below the canvas. Each action is published as a blockchain reply. Fossil creatures cannot receive any activities.
+The `/upload` page generates a genome whose visual output approximates the uploaded image.
 
-### Feed 🍃
+### Analysis Pipeline
 
-Feeding improves the creature's **health**, which affects its canvas expression, lifespan, and fertility window.
-
-**Food types:**
-
-| Food | Lifespan bonus | Fertility boost |
-|---|---|---|
-| 🍯 Nectar | +1 day per feed | none |
-| 🌿 Herbs | none | +5% window extension per feed |
-| 🍖 Meat | +0.5 day per feed | +2% window extension per feed |
-
-Health score is `feedEvents.total / 20` (capped at 1.0). The daily feed limit resets at UTC midnight.
-
-### Play 🎮
-
-Playing boosts the creature's **mood**, which adds up to +25% to the effective health score for expression calculation and extends the fertility window. One play per user per day. Mood score is `activityState.playTotal / 15` (capped at 1.0).
-
-### Walk 🦮
-
-Walking boosts **vitality**, which adds lifespan days proportional to `activityState.walkTotal`. One walk per user per day. Vitality score is `activityState.walkTotal / 15` (capped at 1.0).
-
-### Keychain Timeout Guard
-
-All three activity actions (Feed, Play, Walk) and offspring publishing share a **60-second Keychain timeout guard**. If the user dismisses the Steem Keychain popup using the browser's window close button rather than the in-extension Cancel button, some Keychain versions silently drop the callback, leaving the UI in a permanent "Feeding…" / "Playing…" / "Walking…" / "Publishing…" state with no way to recover short of a page refresh.
-
-The guard works as follows: immediately after `publishFeed` / `publishPlay` / `publishWalk` / `publishOffspring` is called, a `setTimeout` is set for 60 seconds. A `_callbackFired` boolean is shared between the real callback and the timeout handler. Whichever fires first sets the flag to `true`; the other is then a no-op. If the timeout fires first, all publishing flags are reset, any optimistic state is rolled back, the anticipation pose is cleared, and the user sees a "Transaction timed out or was closed — please try again." notification.
-
----
-
-## Upload: Image-Inspired Creatures
-
-The `/upload` page converts any image into a deterministic creature genome.
-
-### Image Analysis Pipeline
-
-1. The image is downsampled to at most 120×120 px via an off-screen canvas.
-2. Every pixel is classified as silhouette or background using a lightness threshold.
-3. Six statistics are extracted: `dominantHue`, `meanSat`, `meanLit`, `litVariance`, `aspectRatio`, `edgeDensity`, `colourfulness`, `lowContrast`.
-
-### Non-Blocking Analysis
-
-The pixel downsampling (`samplePixels`) and Sobel edge detection + HSL conversion (`analysePixels`) are synchronous and can block the main thread for 200–500 ms on large source images. Before either function runs, the app yields back to the browser via `requestAnimationFrame(() => setTimeout(resolve, 0))`. This guarantees the "Analysing…" spinner is composited to screen before the heavy work begins.
-
-### Genome Fitting
-
-| Stat | Target gene | Method |
-|---|---|---|
-| `dominantHue` | `GEN`, `CLR` | Best-fit palette search via `fitHue()` |
-| `aspectRatio` | `MOR` | Full linear scan of all 10,000 MOR values via `fitMor()` — guarantees the global optimum regardless of PRNG basin width (see below) |
-| `edgeDensity` | `APP` | Linear mapping + RNG jitter via `fitApp()` |
-| `colourfulness` + `litVariance` + `edgeDensity` | `ORN` | Weighted blend + bounded jitter via `fitOrn()` |
-| RNG stream | `SX`, `LIF`, `FRT_START`, `FRT_END`, `MUT` | Drawn from master seed (`pixelHash ^ rerollIndex`) |
+| Step | Algorithm |
+|---|---|
+| Colour extraction | Sample N pixels, pick dominant hue via circular mean; low-saturation images get `SAT < 20` |
+| Body shape extraction | Sobel edge detection → bounding box → aspect ratio |
+| MOR fit | Full linear scan of all 10,000 MOR values; pick closest aspect ratio |
+| CLR fit | `(dominantHue - paletteBase[bestGEN%8] + 360) % 360` |
+| GEN selection | Nearest palette base to dominant hue |
+| RNG stream | `SX`, `LIF`, `FRT_START`, `FRT_END`, `MUT` drawn from master seed (`pixelHash ^ rerollIndex`) |
 
 **MOR search — full scan:** `fitMor()` performs a single linear pass over all 10,000 MOR values (`for m in 0..9999`) and returns the one whose rendered body aspect ratio is closest to the image's silhouette ratio. The mulberry32 PRNG used by the creature renderer is highly non-linear; the mapping from MOR integer to aspect ratio contains narrow "basins of attraction" — contiguous ranges as small as 1–3 values that produce a given ratio. A previous coarse-step approach (step size 7, then ±200 fine scan) could land in the wrong basin for very tall or wide images, producing a noticeably incorrect body shape. A full scan of 10,000 values takes approximately 10–15 ms on a modern phone and runs inside a non-blocking `requestAnimationFrame`, so there is no UX cost to the exhaustive approach.
 
@@ -540,7 +590,10 @@ The Send Offer button is disabled and an inline warning is shown whenever the re
 
 ### Effective Owner
 
-The original `post.author` never changes on-chain. SteemBiota derives the **effective owner** by walking the reply history via `parseOwnershipChain()`. The effective owner governs who can manage permits, who sees the Transfer panel, and whose profile the creature appears on.
+The original `post.author` never changes on-chain. SteemBiota derives the **effective owner** by:
+
+1. **GSM fast path** — `stateOwnerOf()` delivers an O(1) lookup from the in-memory ownership map for any NFT already processed by the state machine. This is the primary path for list views and profile pages.
+2. **Reply-chain fallback** — `parseOwnershipChain()` scans the reply history for `transfer_offer` / `transfer_accept` / `transfer_cancel` ops. Used by `CreatureView` during full creature load, and whenever the GSM has not yet processed the NFT (e.g. during the replay gap at startup). The result is immediately hot-patched into the GSM via `statePatchOwner()`.
 
 ### Ownership Rules
 
@@ -686,6 +739,7 @@ The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetche
 
 | Cache | Storage | TTL | Scope |
 |---|---|---|---|
+| NFT state snapshot | IndexedDB (`sb_state_snapshot`) | Until superseded by a newer on-chain checkpoint | Global |
 | Creature list (Home grid) | IndexedDB | 5 min | Global |
 | Creature page | IndexedDB | 10 min | Per creature |
 | Ancestry graph | IndexedDB | persistent | Per creature |
@@ -697,7 +751,7 @@ The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetche
 
 **Global invalidation stamp** — `invalidateGlobalListCaches()` writes a version timestamp; any cache entry written before it is treated as stale immediately.
 
-**Surgical cache patching** — after a transfer, only the affected item's `effectiveOwner` is patched in the list cache and both owners' profile caches.
+**Surgical cache patching** — after a transfer, only the affected item's `effectiveOwner` is patched in the list cache and both owners' profile caches. `statePatchOwner()` simultaneously hot-patches the in-memory GSM so the change is visible everywhere in the session without a reload.
 
 **localStorage quota eviction** — on `QuotaExceededError`, the oldest `steembiota:*` entries are evicted one by one until the write succeeds.
 
@@ -713,6 +767,7 @@ The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetche
 | `/#/about` | About page |
 | `/#/leaderboard` | Global XP leaderboard |
 | `/#/notifications` | Notifications — activity feed and pending transfer accepts (login required) |
+| `/#/checkpoint` | Checkpoint Authority — export GSM state, pin to IPFS, broadcast on-chain |
 | `/#/@user` | Profile — tabbed inventory of owned creatures and accessories |
 | `/#/@author/permlink` | Creature — canvas, activities, equip panel, breed panel, transfer panel, Stats/Family/Social tabs. Active tab persisted in `?tab=` query param. |
 | `/#/acc/@author/permlink` | Accessory — canvas, wear-permission manager, social panel, transfer panel |
@@ -753,6 +808,20 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 }
 ```
 
+### Checkpoint broadcast (`custom_json`)
+
+```json
+{
+  "id": "steembiota_checkpoint",
+  "json": {
+    "version": 1,
+    "block_num": 12345678,
+    "state_hash": "sha256hexdigest…",
+    "snapshot_cid": "QmXyz…or bafyXyz…"
+  }
+}
+```
+
 ### Reply types
 
 | `type` | Post | Purpose |
@@ -771,11 +840,15 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 
 **Immutability** — All genomes and life events are stored on-chain and cannot be altered.
 
-**Determinism** — The same genome always renders the same creature. The same two parents always produce the same child.
+**Determinism** — The same genome always renders the same creature. The same two parents always produce the same child. The same sequence of operations always produces the same GSM state.
 
 **UTC time** — All timestamps use UTC to match the Steem blockchain clock.
 
 **Client-side only** — All logic runs in the browser. No servers or external databases.
+
+**Global State Machine** — Ownership and equip state for all NFTs are maintained in a single in-memory object seeded from a cryptographically verified IPFS snapshot and replayed forward from the Steem chain. O(1) lookups replace per-card reply scans throughout the UI.
+
+**Tamper-evident snapshots** — Every IPFS checkpoint snapshot is verified against a SHA-256 hash anchored on the Steem blockchain before it is accepted. A hash mismatch causes the snapshot to be silently rejected and a fallback used.
 
 **Diversity enforcement** — The kinship system prevents same-bloodline farming. Genus mismatch is detected at URL-paste time, not just at final submission.
 
@@ -783,7 +856,7 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 
 **Anti-dumping ownership** — Transfers require the recipient's explicit on-chain acceptance. Pending offers are visible on creature cards in list views.
 
-**Stale-result safety** — All multi-step async operations that write to component state use generation counters or equivalent guards to discard results that were superseded by a subsequent navigation before they completed. This applies to creature loading, kinship loading, ProfileView background refreshes, and AccessoriesView filter fetches.
+**Stale-result safety** — All multi-step async operations that write to component state use generation counters or equivalent guards to discard results that were superseded by a subsequent navigation before they completed. This applies to creature loading, kinship loading, ProfileView background refreshes, AccessoriesView filter fetches, and GSM bootstrap.
 
 **On-chain pre-flight verification** — Before opening the Keychain popup for a transfer accept, the app re-fetches the latest reply set and verifies the offer is still current.
 
@@ -793,7 +866,7 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 
 **Non-blocking lineage** — A deleted ancestor post (Phantom) degrades gracefully to a "Severed Lineage" trait on the child rather than permanently blocking breeding for all downstream descendants. The kinship inbreeding check still runs on the reachable portion of the tree.
 
-**Immediate UI feedback** — Accepting a transfer offer immediately decrements the nav-bar notification badge without waiting for the 5-minute poll interval. Rejecting a Feed Keychain prompt immediately re-enables the Feed button without waiting for a blockchain re-fetch.
+**Immediate UI feedback** — Accepting a transfer offer immediately decrements the nav-bar notification badge without waiting for the 5-minute poll interval. Rejecting a Feed Keychain prompt immediately re-enables the Feed button without waiting for a blockchain re-fetch. Confirmed transfers and equip changes are immediately hot-patched into the GSM.
 
 **Keychain timeout resilience** — All Keychain publishing operations (Feed, Play, Walk, Publish Offspring) carry a 60-second self-cancelling timeout guard. If the browser-native "X" on the Keychain popup is used rather than the in-extension Cancel button, the callback may never fire; the timeout ensures the UI always recovers to a clean state.
 
