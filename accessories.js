@@ -679,37 +679,52 @@ const AccessoryCanvasComponent = {
 // canvas entirely.  The rendered pixel data lives in the <img> src —
 // zero GPU contexts held.
 //
-// FIX 4: Replaced synchronous toDataURL() with async toBlob().
-// toDataURL() is a blocking GPU→CPU pixel readback.  For a closet with
-// 100 items, calling it 100 times during mount causes a visible multi-
-// hundred-ms UI freeze.  toBlob() performs the same readback off the
-// main render loop, and renders are staggered via requestIdleCallback
-// so the page remains responsive while thumbnails populate gradually.
+// BUG FIX 4B: Previous implementation used requestIdleCallback to stagger
+// renders.  On iOS Safari, requestIdleCallback is de-prioritized (sometimes
+// to the point of never firing) when the user is scrolling or the battery
+// is low.  This caused all closet thumbnails to stay blank indefinitely.
+//
+// New strategy: IntersectionObserver (visibility-gated rendering) +
+// setTimeout fallback.
+//
+//   1. When a ClosetThumb mounts, it registers itself with a shared
+//      IntersectionObserver.  The canvas is only rendered once the
+//      element actually enters the viewport.  This keeps off-screen
+//      thumbnails from consuming CPU/GPU time at all.
+//
+//   2. A per-instance 2 000 ms setTimeout fallback fires if the element
+//      is technically visible (or IO never fires) and the thumbnail is
+//      still blank.  This ensures thumbnails on screen at mount time are
+//      always rendered within 2 seconds even on the most restrictive
+//      mobile browsers.
+//
+//   3. Renders are still staggered — the IO callback flushes one task
+//      per entry, and the timeout fallback fires independently per
+//      instance — so the page stays responsive.
 // ============================================================
 
-// Module-level idle-callback queue so all ClosetThumb instances share
-// a single render pipeline and don't pile up during the mount wave.
-const _closetThumbQueue = [];
-let   _closetThumbRunning = false;
+// Shared IntersectionObserver used by all ClosetThumb instances.
+// Created lazily so it is not instantiated on the server or before the DOM
+// is ready.
+let _closetThumbObserver = null;
+// Map from Element → render-callback for in-flight IO observations.
+const _closetThumbObserverMap = new WeakMap();
 
-function _drainClosetThumbQueue() {
-  if (_closetThumbRunning || _closetThumbQueue.length === 0) return;
-  _closetThumbRunning = true;
-
-  // Use requestIdleCallback when available (all modern browsers) so
-  // thumbnails render during idle slices and never block a user gesture.
-  // Fall back to a 0-ms setTimeout for Safari < 16 which lacks rIC.
-  const schedule = typeof requestIdleCallback === "function"
-    ? cb => requestIdleCallback(cb, { timeout: 500 })
-    : cb => setTimeout(cb, 0);
-
-  schedule(function pump() {
-    const task = _closetThumbQueue.shift();
-    if (!task) { _closetThumbRunning = false; return; }
-    task();   // renders one thumbnail
-    if (_closetThumbQueue.length > 0) schedule(pump);
-    else _closetThumbRunning = false;
-  });
+function _getClosetThumbObserver() {
+  if (_closetThumbObserver) return _closetThumbObserver;
+  _closetThumbObserver = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        // Stop observing — we only need to render once.
+        _closetThumbObserver.unobserve(entry.target);
+        const cb = _closetThumbObserverMap.get(entry.target);
+        if (cb) cb();
+      }
+    },
+    { rootMargin: "200px" }  // pre-render slightly before entering viewport
+  );
+  return _closetThumbObserver;
 }
 
 const ClosetThumbComponent = {
@@ -721,24 +736,83 @@ const ClosetThumbComponent = {
     canvasH:  { type: Number,  default: 46    },
   },
   data() { return { dataUrl: "" }; },
-  mounted() { this._scheduleRender(); },
+
+  mounted() {
+    if (!this.genome) return;
+
+    // Register with the shared IntersectionObserver so we render only when
+    // the thumbnail scrolls into (or near) the viewport.
+    const el = this.$el;
+    if (el && typeof IntersectionObserver !== "undefined") {
+      _closetThumbObserverMap.set(el, () => this._doRender());
+      _getClosetThumbObserver().observe(el);
+    }
+
+    // BUG FIX 4B: Fallback timer.  If the IntersectionObserver never fires
+    // (e.g. the element is already visible at mount time and IO fires before
+    // this setTimeout is registered, or the browser de-prioritizes IO), we
+    // force a render after 2 000 ms.  This guarantees thumbnails that are
+    // on-screen when the closet opens will always appear within 2 seconds
+    // on iOS Safari and other restrictive environments.
+    this._fallbackTimer = setTimeout(() => {
+      if (!this.dataUrl) {
+        // Unobserve first to avoid a double-render if IO fires later.
+        const obs = _closetThumbObserver;
+        if (obs && el) obs.unobserve(el);
+        this._doRender();
+      }
+    }, 2000);
+  },
+
   beforeUnmount() {
+    // Clean up observer registration.
+    const el = this.$el;
+    if (el && _closetThumbObserver) {
+      _closetThumbObserver.unobserve(el);
+      _closetThumbObserverMap.delete(el);
+    }
+    // Cancel the fallback timer.
+    if (this._fallbackTimer !== undefined) {
+      clearTimeout(this._fallbackTimer);
+      this._fallbackTimer = undefined;
+    }
     // Revoke any object URL we created so the browser can free the memory.
     if (this.dataUrl && this.dataUrl.startsWith("blob:")) {
       URL.revokeObjectURL(this.dataUrl);
     }
   },
+
   watch: {
     template() { this._scheduleRender(); },
     genome()   { this._scheduleRender(); },
   },
+
   methods: {
+    // Called by the watch handlers when props change after mount — re-register
+    // with the observer so the new genome/template is rendered on next visibility.
     _scheduleRender() {
       if (!this.genome) return;
-      // Push a render task for this instance onto the shared idle queue.
-      _closetThumbQueue.push(() => this._doRender());
-      _drainClosetThumbQueue();
+      const el = this.$el;
+      if (!el) { this._doRender(); return; }
+
+      if (typeof IntersectionObserver !== "undefined") {
+        _closetThumbObserverMap.set(el, () => this._doRender());
+        _getClosetThumbObserver().observe(el);
+        // Reset the fallback timer on prop changes.
+        if (this._fallbackTimer !== undefined) clearTimeout(this._fallbackTimer);
+        this._fallbackTimer = setTimeout(() => {
+          if (!this.dataUrl) {
+            if (_closetThumbObserver) _closetThumbObserver.unobserve(el);
+            this._doRender();
+          }
+        }, 2000);
+      } else {
+        // No IntersectionObserver support — render immediately with a minimal
+        // delay to avoid blocking the current frame.
+        setTimeout(() => this._doRender(), 0);
+      }
     },
+
     _doRender() {
       if (!this.genome) return;
       const offscreen = document.createElement("canvas");
@@ -748,7 +822,7 @@ const ClosetThumbComponent = {
       if (typeof drawAccessory === "function") {
         drawAccessory(ctx, this.template, this.genome, this.canvasW, this.canvasH, { transparentBackground: true });
       }
-      // FIX 4: Use async toBlob() instead of blocking toDataURL().
+      // Use async toBlob() instead of blocking toDataURL().
       // toBlob() performs the GPU→CPU readback asynchronously, avoiding
       // the synchronous stall that caused visible frame drops on large closets.
       offscreen.toBlob(blob => {

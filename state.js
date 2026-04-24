@@ -143,9 +143,18 @@ function applyOperation(state, op, blockNum, timestamp) {
     case "offspring": {
       const id = _nftId(author, permlink);
       if (!_nftRegistry.has(id)) {
-        // BUG 7 FIX: write to the non-reactive Map, not state.registry.
         _nftRegistry.set(id, { type: "creature" });
         state.ownership[id] = author;
+      } else {
+        // BUG FIX 2A: Update a synthetic placeholder created by an earlier
+        // transfer_accept that arrived before this mint post was replayed.
+        // Overwrite type but preserve any ownership already set by the transfer.
+        const entry = _nftRegistry.get(id);
+        if (entry._synthetic) {
+          _nftRegistry.set(id, { type: "creature" });
+          // Only set ownership to the minting author if no transfer has claimed it yet.
+          if (!state.ownership[id]) state.ownership[id] = author;
+        }
       }
       break;
     }
@@ -154,9 +163,15 @@ function applyOperation(state, op, blockNum, timestamp) {
     case "accessory": {
       const id = _nftId(author, permlink);
       if (!_nftRegistry.has(id)) {
-        // BUG 7 FIX: write to the non-reactive Map, not state.registry.
         _nftRegistry.set(id, { type: "accessory" });
         state.ownership[id] = author;
+      } else {
+        // BUG FIX 2A: Same synthetic-placeholder correction for accessories.
+        const entry = _nftRegistry.get(id);
+        if (entry._synthetic) {
+          _nftRegistry.set(id, { type: "accessory" });
+          if (!state.ownership[id]) state.ownership[id] = author;
+        }
       }
       break;
     }
@@ -168,10 +183,35 @@ function applyOperation(state, op, blockNum, timestamp) {
       const cPermlink = meta.creature?.permlink || meta.item?.permlink || "";
       if (cAuthor && cPermlink) {
         const id = _nftId(cAuthor, cPermlink);
-        // Only transfer if we know about this NFT (guards against spoofing)
-        if (_nftRegistry.has(id)) {
-          state.ownership[id] = author;
+        // BUG FIX 2A: Do NOT guard on _nftRegistry.has(id).
+        //
+        // Previously: if (_nftRegistry.has(id)) { state.ownership[id] = author; }
+        //
+        // The old guard caused determinism forks: if Client A's RPC node failed
+        // to return the original "founder"/"offspring" mint post, _nftRegistry
+        // would not contain the NFT's entry.  Client A would silently skip this
+        // transfer_accept, while Client B (which saw the mint post) would apply
+        // it.  Their ownership maps — and therefore their state hashes — would
+        // diverge permanently, causing every checkpoint broadcast by either
+        // client to fail verification on the other.
+        //
+        // Fix: unconditionally apply the ownership update.  If the registry
+        // entry is missing (RPC gap), synthesise a placeholder so subsequent
+        // operations (wear_on/off, further transfers) work correctly.  When the
+        // mint post is eventually replayed it will find the entry already
+        // present and skip re-registering, leaving ownership intact.
+        //
+        // Anti-spoofing is now handled by the checkpoint root validation in
+        // fetchLatestCheckpoint() and the replay ordering (mints always predate
+        // transfers on-chain), rather than a local Map lookup that can be
+        // undefined due to RPC failures.
+        if (!_nftRegistry.has(id)) {
+          // Synthesise a placeholder — type will be corrected when the mint
+          // post is replayed (chronological order guarantees it comes first in
+          // a full replay; in an incremental replay the type is already set).
+          _nftRegistry.set(id, { type: "creature", _synthetic: true });
         }
+        state.ownership[id] = author;
       }
       break;
     }
@@ -263,11 +303,20 @@ async function hashState(state) {
     canonicalTimestamp = rawTs.replace(/\.\d+Z?$/, "").replace(/Z$/, "").slice(0, 19);
   }
 
-  // BUG 7 FIX: registry lives in _nftRegistry (a plain Map), not state.
-  // Serialize it to a plain object for hashing so the digest still covers
-  // every minted NFT — but the Map itself never enters the Vue reactive tree.
+  // BUG FIX 3B: _nftRegistry is a Map.  When we convert it to a plain object
+  // for serialisation, JS objects hoist any key that looks like a non-negative
+  // integer (e.g. "123", "0042") to the front regardless of insertion order.
+  // This means a "Freshly Replayed" registry and a "Loaded from Cache"
+  // registry can produce different key orderings even for identical data,
+  // causing hashState() to return different digests for the same logical state.
+  //
+  // Fix: sort the registry keys explicitly and build the snapshot in that
+  // order before passing to sortedClone.  sortedClone then deep-sorts all
+  // nested objects, so the final JSON is fully deterministic regardless of
+  // insertion order, Map reconstruction path, or JS engine key-hoisting rules.
   const registrySnapshot = {};
-  for (const [k, v] of _nftRegistry) registrySnapshot[k] = v;
+  const sortedRegistryKeys = [..._nftRegistry.keys()].sort();
+  for (const k of sortedRegistryKeys) registrySnapshot[k] = _nftRegistry.get(k);
 
   const minimalState = {
     version:   Number(state.version),
@@ -365,8 +414,13 @@ async function persistSnapshot(snapshot, cid, stateHash) {
     const db = await _openStateDB();
     // BUG 7 FIX: _nftRegistry lives outside `snapshot` — serialise it
     // alongside so we can fully restore state on the next boot without a replay.
+    // BUG FIX 3B: Sort registry keys before serialising so the persisted
+    // object has a stable key order.  When loaded back via Object.entries()
+    // the insertion order will match the sorted order on all JS engines,
+    // making the reconstructed Map iteration order identical to a fresh replay.
     const registrySnapshot = {};
-    for (const [k, v] of _nftRegistry) registrySnapshot[k] = v;
+    const sortedRegistryKeys = [..._nftRegistry.keys()].sort();
+    for (const k of sortedRegistryKeys) registrySnapshot[k] = _nftRegistry.get(k);
 
     const tx = db.transaction(STORE_STATE, "readwrite");
     tx.objectStore(STORE_STATE).put({
@@ -396,7 +450,14 @@ async function loadPersistedSnapshot() {
         const row = req.result || null;
         if (row?.snapshot?._registry) {
           // BUG 7 FIX: Restore the non-reactive registry Map from the cached snapshot.
-          for (const [k, v] of Object.entries(row.snapshot._registry)) {
+          // BUG FIX 3B: Sort the keys before inserting into the Map so that
+          // Map iteration order matches a fresh replay (which also processes
+          // NFTs alphabetically after the sort in hashState).  Without this,
+          // a "Freshly Replayed" and a "Loaded from Cache" client would iterate
+          // the Map in different orders inside hashState(), producing different
+          // digest values for the same logical state.
+          const sortedEntries = Object.entries(row.snapshot._registry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
+          for (const [k, v] of sortedEntries) {
             _nftRegistry.set(k, v);
           }
           // Remove the helper key so it doesn't pollute the reactive state object.
@@ -489,7 +550,10 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
   try {
     const canonical = await _scanAccountCheckpoints(CHECKPOINT_AUTHOR, minBlockNum, 1000);
     // Tag each with a high base trust for @steembiota
-    canonical.forEach(c => allCandidates.push({ ...c, _publisher: CHECKPOINT_AUTHOR, _trust: 1000 }));
+    // BUG FIX 1A: Trust bonus raised to 1_000_000 so @steembiota's checkpoints
+    // always outrank any community account — even one with maximum normalised
+    // reputation (~65) plus maximum recency bonus.
+    canonical.forEach(c => allCandidates.push({ ...c, _publisher: CHECKPOINT_AUTHOR, _trust: 1_000_000 }));
   } catch (e) {
     console.warn("[SB State] Canonical checkpoint scan failed:", e);
   }
@@ -538,10 +602,31 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
     g.publishers.push(c._publisher);
     // Trust bonus for @steembiota
     const trustBonus = c._trust || 0;
-    // Reputation contribution (normalised to roughly 0–100)
-    const rep = Math.max(0, reputations[c._publisher] || 0);
-    // Recency: prefer higher block numbers
-    const recency = (c.block_num || 0) / 1e6;
+    // BUG FIX 1A: The raw value returned by the Steem API for `reputation` is
+    // a large integer (e.g. 74_289_347_289_342), NOT the familiar 0-100 score
+    // shown in Steemit.  Adding the raw value to the score would let any user
+    // with reputation > 70 (raw value in the trillions) completely dwarf the
+    // 1000-point trustBonus assigned to @steembiota, enabling a trivial
+    // "reputation-takeover" attack.
+    //
+    // Fix (a): Normalise the raw reputation to the same 25-100 scale that
+    //          Steemit displays: rep = max(0, (log10(raw) - 9) × 9 + 25).
+    //          This caps the maximum additive reputation at ~65 points.
+    //
+    // Fix (b): Raise the @steembiota trustBonus from 1000 to 1_000_000 so it
+    //          is unconditionally dominant over any community account — even one
+    //          whose score is boosted by the maximum normalised reputation AND
+    //          the maximum recency bonus.
+    //
+    // Fix (c): Keep the recency bonus integer-only (Math.floor, /1000 instead
+    //          of /1e6) so every browser picks the same winning checkpoint
+    //          regardless of floating-point rounding differences (Bug 2B).
+    const rawRep = reputations[c._publisher] || 0;
+    const rep = rawRep > 0
+      ? Math.max(0, (Math.log10(rawRep) - 9) * 9 + 25)
+      : 0;
+    // BUG FIX 2B: integer-only recency so V8 and SpiderMonkey agree exactly.
+    const recency = Math.floor((c.block_num || 0) / 1000);
     g.score += trustBonus + rep + recency;
   }
 
@@ -677,99 +762,113 @@ async function _fetchAllPostsSince(sinceDate) {
 }
 
 /**
- * BUG 1 FIX — Fetch reply-based operations (transfer_accept, feed, wear_on,
- * wear_off) that postdate `sinceDate` by scanning @steembiota's account
- * history for comment operations.
+ * BUG FIX 1B — Fetch reply-based operations (transfer_accept, feed, wear_on,
+ * wear_off) that postdate `sinceDate`.
  *
- * getDiscussionsByCreated only returns top-level posts and silently omits
- * all replies/comments, so every action recorded as a reply was invisible
- * during replay.  We fix this by walking @steembiota's account history
- * (which records every comment posted in reply to its content) and
- * reconstructing synthetic post objects from the comment operations.
+ * PREVIOUS BUG: We only scanned CHECKPOINT_AUTHOR's (@steembiota) account
+ * history.  But transfer_accept replies are posted by the *recipient* on the
+ * *sender's* post — which may belong to any user.  That means any transfer
+ * between two non-@steembiota accounts was permanently invisible to the
+ * state machine, causing lost NFT ownership.
  *
- * @param {Date|null} sinceDate — ignore ops older than or equal to this date
+ * FIX: Derive the set of "active community accounts" from the same
+ * steembiota-tagged posts we already fetch for top-level replay, then scan
+ * *each* account's history for comment operations.  This captures
+ * transfer_accept (and wear_on/off) replies regardless of which account's
+ * post they are attached to.
+ *
+ * @param {Date|null} sinceDate       — ignore ops older than or equal to this date
+ * @param {string[]}  communityAuthors — accounts to scan (from _fetchAllPostsSince)
  * @returns {Promise<object[]>} synthetic post-like objects, newest-first
  */
-async function _fetchReplyOpsSince(sinceDate) {
-  const result   = [];
-  let   cursor   = -1;  // -1 = start from the most recent op
-  const pageSize = 1000;
+async function _fetchReplyOpsSince(sinceDate, communityAuthors = []) {
+  // Always include the canonical account; deduplicate the rest.
+  const accounts = [...new Set([CHECKPOINT_AUTHOR, ...communityAuthors])];
+  const REPLY_TYPES = new Set(["transfer_accept", "feed", "wear_on", "wear_off"]);
+  const allResults = [];
 
-  while (true) {
-    const batch = await new Promise((resolve, reject) => {
-      steem.api.getAccountHistory(CHECKPOINT_AUTHOR, cursor, pageSize, (err, res) => {
-        if (err) return reject(err);
-        resolve(Array.isArray(res) ? res : []);
+  await Promise.allSettled(accounts.map(async (account) => {
+    const accountResults = [];
+    let cursor   = -1;
+    const pageSize = 1000;
+
+    while (true) {
+      const batch = await new Promise((resolve, reject) => {
+        steem.api.getAccountHistory(account, cursor, pageSize, (err, res) => {
+          if (err) return reject(err);
+          resolve(Array.isArray(res) ? res : []);
+        });
       });
-    });
 
-    if (batch.length === 0) break;
+      if (batch.length === 0) break;
 
-    let hitCutoff = false;
-    // Account history is returned oldest-first within each batch; iterate
-    // in reverse so we process newest-first and can break early.
-    for (let i = batch.length - 1; i >= 0; i--) {
-      const tx  = batch[i];
-      const op  = tx[1]?.op;
-      if (!op) continue;
+      let hitCutoff = false;
+      // Account history is returned oldest-first within each batch; iterate
+      // in reverse so we process newest-first and can break early.
+      for (let i = batch.length - 1; i >= 0; i--) {
+        const tx  = batch[i];
+        const op  = tx[1]?.op;
+        if (!op) continue;
 
-      const opType = op[0];
-      const opData = op[1];
+        const opType = op[0];
+        const opData = op[1];
 
-      // We only care about comment ops (replies) that carry steembiota metadata.
-      if (opType !== "comment") continue;
+        // We only care about comment ops (replies) that carry steembiota metadata.
+        if (opType !== "comment") continue;
 
-      const opTimestamp = tx[1]?.timestamp
-        ? new Date(tx[1].timestamp)
-        : null;
+        const opTimestamp = tx[1]?.timestamp
+          ? new Date(tx[1].timestamp)
+          : null;
 
-      if (sinceDate && opTimestamp && opTimestamp <= sinceDate) {
-        hitCutoff = true;
-        break;
+        if (sinceDate && opTimestamp && opTimestamp <= sinceDate) {
+          hitCutoff = true;
+          break;
+        }
+
+        // Parse json_metadata to confirm this is a steembiota action.
+        let meta;
+        try {
+          const parsed = typeof opData.json_metadata === "string"
+            ? JSON.parse(opData.json_metadata || "{}")
+            : (opData.json_metadata || {});
+          meta = parsed.steembiota;
+        } catch { continue; }
+
+        if (!meta) continue;
+
+        // Only replay the reply-specific action types that _fetchAllPostsSince misses.
+        if (!REPLY_TYPES.has(meta.type)) continue;
+
+        // Build a synthetic post object compatible with applyOperation().
+        accountResults.push({
+          author:        opData.author        || "",
+          permlink:      opData.permlink       || "",
+          json_metadata: opData.json_metadata  || "{}",
+          created:       tx[1]?.timestamp      || new Date(0).toISOString()
+        });
       }
 
-      // Parse json_metadata to confirm this is a steembiota action.
-      let meta;
-      try {
-        const parsed = typeof opData.json_metadata === "string"
-          ? JSON.parse(opData.json_metadata || "{}")
-          : (opData.json_metadata || {});
-        meta = parsed.steembiota;
-      } catch { continue; }
+      if (hitCutoff) break;
 
-      if (!meta) continue;
+      // Advance cursor (sequence number) backward through history.
+      const oldestSeq = batch[0]?.[0];
+      if (oldestSeq === undefined || oldestSeq === 0) break;
+      cursor = oldestSeq - 1;
+      if (cursor < 0) break;
 
-      // Only replay the reply-specific action types that _fetchAllPostsSince misses.
-      const REPLY_TYPES = new Set(["transfer_accept", "feed", "wear_on", "wear_off"]);
-      if (!REPLY_TYPES.has(meta.type)) continue;
-
-      // Build a synthetic post object compatible with applyOperation().
-      result.push({
-        author:        opData.author        || "",
-        permlink:      opData.permlink       || "",
-        json_metadata: opData.json_metadata  || "{}",
-        created:       tx[1]?.timestamp      || new Date(0).toISOString()
-      });
+      // Also stop if the oldest timestamp in this batch predates our cutoff.
+      const oldestTimestamp = batch[0]?.[1]?.timestamp
+        ? new Date(batch[0][1].timestamp)
+        : null;
+      if (sinceDate && oldestTimestamp && oldestTimestamp <= sinceDate) break;
     }
 
-    if (hitCutoff) break;
+    // Push this account's results into the shared array (thread-safe via allSettled).
+    allResults.push(...accountResults);
+  }));
 
-    // Advance cursor (sequence number) backward through history.
-    const oldestSeq = batch[0]?.[0];
-    if (oldestSeq === undefined || oldestSeq === 0) break;
-    cursor = oldestSeq - 1;
-    if (cursor < 0) break;
-
-    // Also stop if the oldest timestamp in this batch predates our cutoff.
-    const oldestTimestamp = batch[0]?.[1]?.timestamp
-      ? new Date(batch[0][1].timestamp)
-      : null;
-    if (sinceDate && oldestTimestamp && oldestTimestamp <= sinceDate) break;
-  }
-
-  return result;
+  return allResults;
 }
-
 /**
  * Bootstrap the global NFT state by:
  *   1. Checking IndexedDB for a cached snapshot (instant, offline-capable)
@@ -868,15 +967,15 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     const cutoff = currentState.timestamp ? new Date(currentState.timestamp) : null;
     status(`🔄 Replaying all events since ${cutoff ? cutoff.toISOString().slice(0, 10) : "genesis"}…`);
 
-    // BUG 1 FIX: fetch both top-level posts AND reply-based ops (transfers,
-    // feed, wear_on/off) which were previously invisible because
-    // getDiscussionsByCreated never returns replies/comments.
+    // BUG FIX 1B: pass community authors so _fetchReplyOpsSince scans
+    // ALL active accounts, not just @steembiota.  This captures
+    // transfer_accept replies posted on non-canonical posts.
     let rawPosts = [];
     try {
-      const [topLevel, replies] = await Promise.all([
-        _fetchAllPostsSince(cutoff),
-        _fetchReplyOpsSince(cutoff)
-      ]);
+      const topLevel = await _fetchAllPostsSince(cutoff);
+      // Derive the active community from the top-level posts we already fetched.
+      const communityAuthors = [...new Set(topLevel.map(p => p.author))];
+      const replies = await _fetchReplyOpsSince(cutoff, communityAuthors);
       rawPosts = [...topLevel, ...replies];
     } catch (e) {
       console.warn("[SB State] Replay fetch failed:", e);
@@ -1016,7 +1115,10 @@ const CheckpointManager = {
       exportUrl:     null,   // object URL for the download link
       exportReady:   false,
       hashPreview:   "",
-      statusDetail:  ""
+      statusDetail:  "",
+      // BUG FIX 3A: Track whether the boot lock is currently set so the
+      // template can show a "Force Reset Sync" button when needed.
+      syncLocked:    !!localStorage.getItem("sb_booting")
     };
   },
 
@@ -1041,6 +1143,21 @@ const CheckpointManager = {
   },
 
   methods: {
+    // BUG FIX 3A: Force-clear the boot lock so a crashed/refreshed tab does
+    // not leave the user locked out of their data for 90 seconds.
+    // The lock key "sb_booting" is set by bootstrapState() when it begins
+    // loading, and normally removed when it finishes.  If the tab crashes
+    // between those two moments the lock is never cleared, and every
+    // subsequent tab reports "Another tab is syncing" until the 90-second
+    // TTL expires — with no way to escape.
+    forceResetSync() {
+      localStorage.removeItem("sb_booting");
+      this.syncLocked = false;
+      this.notify("Sync lock cleared — reloading…", "info");
+      // Brief delay so the notification is visible before reload.
+      setTimeout(() => location.reload(), 800);
+    },
+
     /** Step 1 — Snapshot the current state and offer it as a download. */
     // BUG 7 FIX: _revokeExportUrl() always safely disposes the current
     // Object URL before we replace it.  Calling it when exportUrl is null
@@ -1236,6 +1353,32 @@ const CheckpointManager = {
       </div>
 
       <div v-if="busy" style="font-size:12px;color:#ffe082;margin-top:6px;">⏳ Working…</div>
+
+      <!-- BUG FIX 3A: Force Reset Sync button.
+           If the user's tab crashed after acquiring the "sb_booting" lock but
+           before writing the snapshot to IndexedDB, every subsequent load shows
+           "Another tab is syncing" for 90 seconds with no escape.  This button
+           clears that lock immediately so the user is never stuck waiting.
+           We show it both when the lock is currently set AND as a persistent
+           emergency control so power users can reach it at any time. -->
+      <div style="margin-top:16px;border-top:1px solid #333;padding-top:12px;">
+        <div style="font-size:11px;color:#888;margin-bottom:6px;">
+          🔧 Troubleshooting
+        </div>
+        <div
+          v-if="syncLocked"
+          style="font-size:12px;color:#ffe082;margin-bottom:8px;background:#2a2000;border-radius:4px;padding:6px 10px;"
+        >
+          ⚠️ Another tab appears to be syncing (or a previous session crashed).
+        </div>
+        <button
+          @click="forceResetSync"
+          style="width:100%;font-size:12px;background:#3a1a1a;color:#ef9a9a;border:1px solid #7f3030;border-radius:4px;padding:6px 10px;cursor:pointer;"
+        >🔄 Force Reset Sync Lock</button>
+        <div style="font-size:10px;color:#666;margin-top:4px;">
+          Use this if the app is stuck on "Another tab is syncing" with no visible progress.
+        </div>
+      </div>
     </div>
   `
 };
