@@ -2621,8 +2621,14 @@ function norm(s) {
 // ============================================================
 // INDEXEDDB CACHE (Persistence for large creature data)
 // ============================================================
-const DB_NAME = "SteemBiotaDB";
-const DB_VERSION = 2; // Incremented for new store
+const DB_NAME    = "SteemBiotaDB";
+// BUG 4 FIX: DB_VERSION is the single source of truth for the IndexedDB
+// schema version used by BOTH blockchain.js and state.js.  state.js must
+// never add 1 to this value itself — it should open the same version and
+// add its own object store inside the shared onupgradeneeded handler.
+// Increment this constant (and only this constant) whenever any file needs
+// a new store or index.
+const DB_VERSION  = 3; // v3: added sb_state_snapshot store (state.js)
 const STORE_CREATURES = "creature_pages";
 const STORE_ANCESTRY  = "ancestry_cache";
 const STORE_LISTS     = "list_cache";     // Fix 5a: replaces localStorage for large list data
@@ -2645,6 +2651,13 @@ function openSBDB() {
       // Fix 5a: list cache store (replaces brittle localStorage for large arrays)
       if (!db.objectStoreNames.contains(STORE_LISTS)) {
         db.createObjectStore(STORE_LISTS, { keyPath: "id" });
+      }
+      // BUG 4 FIX: state snapshot store, previously opened in a separate
+      // _openStateDB() call in state.js at DB_VERSION+1.  Centralising it
+      // here means both files always share the same schema version and there
+      // is no risk of one tab blocking another with a conflicting version request.
+      if (!db.objectStoreNames.contains("sb_state_snapshot")) {
+        db.createObjectStore("sb_state_snapshot", { keyPath: "id" });
       }
     };
 

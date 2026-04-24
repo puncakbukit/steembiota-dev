@@ -4244,6 +4244,12 @@ const App = {
     // NFTs not yet processed by the state machine.
     const globalState  = ref(createEmptyState());
     const syncStatus   = ref("⏳ Initialising state machine…");
+    // BUG 6 FIX: stateReady is false until bootstrapState() completes its
+    // first full state update.  Views that show ownership information should
+    // gate on this flag — showing a skeleton loader instead — to prevent the
+    // "Owned by @unknown" flicker that happens while the state machine is
+    // still replaying events.
+    const stateReady   = ref(false);
 
     async function loadProfile(user) {
       if (!user) {
@@ -4336,7 +4342,7 @@ const App = {
       // bootstrapState() is defined in state.js.  It runs the full
       // checkpoint → IPFS snapshot → replay sequence asynchronously.
       // globalState and syncStatus update reactively as the sync progresses.
-      bootstrapState(globalState, syncStatus);
+      bootstrapState(globalState, syncStatus, null, () => { stateReady.value = true; });
 
       // Always load a profile — logged-in user's own, or @steembiota as fallback
       loadProfile(username.value || "");
@@ -4412,6 +4418,9 @@ const App = {
     // instead of scanning reply chains on every render.
     provide("globalState",    globalState);
     provide("syncStatus",     syncStatus);
+    // BUG 6 FIX: expose stateReady so child views can conditionally render
+    // a skeleton loader instead of stale/empty ownership data.
+    provide("stateReady",     stateReady);
 
     return {
       username, hasKeychain, keychainReady,
@@ -4420,7 +4429,7 @@ const App = {
       login, logout, profileData, userLevel,
       notifBadgeCount,
       // Expose for App template
-      globalState, syncStatus
+      globalState, syncStatus, stateReady
     };
   },
 

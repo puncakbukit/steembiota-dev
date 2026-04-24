@@ -29,6 +29,21 @@ const SB_STATE_VERSION  = 1;
 const CHECKPOINT_ID     = "steembiota_checkpoint";
 const CHECKPOINT_AUTHOR = "steembiota";            // canonical publisher account
 
+// BUG 3 FIX: Hard-coded checkpoint roots act as circuit-breakers for the
+// decentralised trust model.  If @steembiota is inactive for a period a
+// high-reputation bad actor could otherwise publish a malicious checkpoint
+// that scores higher than any community entry.  These roots are periodically
+// updated in the source code by the maintainers and give every client an
+// unconditional lower bound on which checkpoints can ever be trusted.
+//
+// Format: { block_num, state_hash, snapshot_cid, note }
+// A candidate checkpoint is REJECTED if its block_num is <= any root's
+// block_num but its state_hash does not match that root's state_hash.
+const CHECKPOINT_ROOTS = [
+  // Example — replace with real values on each periodic release:
+  // { block_num: 90000000, state_hash: "0000…", snapshot_cid: "bafy…", note: "Genesis root" }
+];
+
 // IPFS public gateways, tried in order.
 const IPFS_GATEWAYS = [
   "https://ipfs.io/ipfs/",
@@ -189,7 +204,13 @@ function applyOperation(state, op, blockNum, timestamp) {
   }
 
   state.block_num = blockNum  || state.block_num;
-  state.timestamp = timestamp || state.timestamp;
+  // BUG 2 FIX: Always persist timestamp as an ISO string so hashState()
+  // produces a consistent digest regardless of browser engine.
+  if (timestamp) {
+    state.timestamp = timestamp instanceof Date
+      ? timestamp.toISOString()
+      : String(timestamp);
+  }
   return state;
 }
 
@@ -216,12 +237,23 @@ async function hashState(state) {
   // Bug Fix #6: Explicitly map to a strictly-defined object so that runtime
   // noise (Vue observer internals, _source tags from the image uploader, etc.)
   // never leaks into the fingerprint and causes spurious "Verification Failed".
+  // BUG 2 FIX: Force all primitive fields to their canonical serialised
+  // types before hashing.  Steem timestamps are strings (e.g. "2025-05-01T12:00:00")
+  // but different browsers may have previously stored them as Date objects.
+  // Coercing to an ISO string here ensures the digest is identical across
+  // every engine, preventing spurious "Verification Failed" mismatches.
+  const rawTs = state.timestamp;
+  const canonicalTimestamp = rawTs instanceof Date
+    ? rawTs.toISOString()
+    : (typeof rawTs === "string" ? rawTs : null);
+
   const minimalState = {
-    version:   state.version,
-    block_num: state.block_num,
+    version:   Number(state.version),
+    block_num: Number(state.block_num),
+    timestamp: canonicalTimestamp,
     ownership: state.ownership,
     equipped:  state.equipped,
-    registry:  state.registry  // already genome-free after Fix #1
+    registry:  state.registry  // already genome-free
   };
   const canonical  = JSON.stringify(sortedClone(minimalState));
   const msgUint8   = new TextEncoder().encode(canonical);
@@ -238,11 +270,29 @@ async function hashState(state) {
  * Fetch a JSON document from IPFS, trying each gateway in order.
  * Rejects only when all gateways fail.
  */
+// BUG 5 FIX: Reduced per-gateway timeout from 15 s to 5 s so a rate-limited
+// or stalled gateway fails fast and we move on to the next one.
+// Added explicit 429 / 503 detection for immediate failover instead of
+// waiting out the full timeout on a gateway that is "up" but throttling us.
+const IPFS_GATEWAY_TIMEOUT_MS = 5000;
+const IPFS_IMMEDIATE_FAILOVER_CODES = new Set([429, 503, 504]);
+
 async function fetchSnapshot(cid) {
   let lastErr;
   for (const gateway of IPFS_GATEWAYS) {
     try {
-      const res = await fetch(`${gateway}${cid}`, { signal: AbortSignal.timeout(15000) });
+      const res = await fetch(`${gateway}${cid}`, {
+        signal: AbortSignal.timeout(IPFS_GATEWAY_TIMEOUT_MS)
+      });
+
+      // BUG 5 FIX: Treat rate-limit / overload responses as immediate failover
+      // rather than a hard error — the next gateway may succeed right away.
+      if (IPFS_IMMEDIATE_FAILOVER_CODES.has(res.status)) {
+        console.warn(`[SB State] Gateway ${gateway} returned ${res.status} — trying next.`);
+        lastErr = new Error(`Gateway ${gateway} returned HTTP ${res.status} (immediate failover)`);
+        continue;
+      }
+
       if (res.ok) return await res.json();
       lastErr = new Error(`Gateway ${gateway} returned HTTP ${res.status}`);
     } catch (e) {
@@ -256,22 +306,14 @@ async function fetchSnapshot(cid) {
 // § 6 — INDEXEDDB SNAPSHOT PERSISTENCE
 // ============================================================
 
-/** Open (or upgrade) the SteemBiotaDB, adding the state store if absent. */
-async function _openStateDB() {
-  // Piggy-back on the existing DB (same name, bump version).
-  // DB_VERSION is declared in blockchain.js — we read it and add 1.
-  const targetVersion = (typeof DB_VERSION !== "undefined" ? DB_VERSION : 2) + 1;
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open("SteemBiotaDB", targetVersion);
-    req.onupgradeneeded = (e) => {
-      const db = e.target.result;
-      if (!db.objectStoreNames.contains(STORE_STATE)) {
-        db.createObjectStore(STORE_STATE, { keyPath: "id" });
-      }
-    };
-    req.onsuccess = (e) => resolve(e.target.result);
-    req.onerror   = (e) => reject(e.target.error);
-  });
+// BUG 4 FIX: _openStateDB() no longer opens its own DB version.
+// The sb_state_snapshot store is now created inside openSBDB() in
+// blockchain.js (the single source of truth for the DB schema), so we
+// simply delegate to that shared function.  This eliminates the race
+// condition where two tabs could request version 2 and version 3
+// simultaneously and crash or block each other.
+function _openStateDB() {
+  return openSBDB(); // defined in blockchain.js
 }
 
 /** Persist a state snapshot + its CID + hash to IndexedDB for offline reuse. */
@@ -446,12 +488,40 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
   const best = Object.values(groups).sort((a, b) => b.score - a.score)[0];
   if (!best) return null;
 
+  // BUG 3 FIX: Validate the winning candidate against hard-coded checkpoint
+  // roots.  If a root exists for a block number >= the candidate's block_num,
+  // the candidate's state_hash must match that root — otherwise it is a
+  // potential "poisoned checkpoint" and must be rejected outright.
+  for (const root of CHECKPOINT_ROOTS) {
+    if (best.payload.block_num <= root.block_num) {
+      if (best.payload.state_hash !== root.state_hash) {
+        console.error(
+          `[SB State] SECURITY: Checkpoint rejected — hash ${best.payload.state_hash.slice(0, 16)}… ` +
+          `does not match root ${root.state_hash.slice(0, 16)}… for block ${root.block_num}. ` +
+          `Publishers: ${best.publishers.join(", ")}`
+        );
+        return null;
+      }
+    }
+  }
+
+  // BUG 3 FIX: Attach publisher metadata so the UI can display a
+  // "Verified by @steembiota" badge vs. a community-sourced checkpoint.
+  const isCanonical = best.publishers.includes(CHECKPOINT_AUTHOR);
+  const result = {
+    ...best.payload,
+    _publishers:   best.publishers,
+    _isCanonical:  isCanonical,
+    _score:        best.score
+  };
+
   console.info(
-    `[SB State] Best checkpoint: block ${best.payload.block_num}, ` +
-    `score ${best.score.toFixed(1)}, publishers: ${best.publishers.join(", ")}`
+    `[SB State] Best checkpoint: block ${result.block_num}, ` +
+    `score ${best.score.toFixed(1)}, publishers: ${best.publishers.join(", ")}, ` +
+    `canonical: ${isCanonical}`
   );
 
-  return best.payload;
+  return result;
 }
 
 // ============================================================
@@ -491,12 +561,12 @@ async function publishCheckpoint(username, state, cid, callback) {
 // ============================================================
 
 /**
- * Fetch ALL steembiota-tagged posts since `sinceTimestamp`, walking
- * backwards through pages until the Steem API returns nothing newer.
+ * Fetch ALL steembiota-tagged TOP-LEVEL posts since `sinceDate`, walking
+ * backwards through pages via getDiscussionsByCreated.
  *
- * Bug Fix #2: The plain fetchPostsByTag cap of 100 posts means we can
- * miss hundreds of operations if the snapshot is old.  This helper pages
- * through getDiscussionsByCreated using the last-seen post as the cursor.
+ * NOTE: This only returns top-level posts (creatures / accessories).
+ * Reply-based operations (transfer_accept, feed, wear_on/off) are NOT
+ * returned here — they are captured separately by _fetchReplyOpsSince().
  *
  * @param {Date|null} sinceDate — stop collecting once posts are older than this
  * @returns {Promise<object[]>} posts in newest-first order
@@ -510,7 +580,7 @@ async function _fetchAllPostsSince(sinceDate) {
   while (true) {
     const query = { tag, limit: cursor ? limit + 1 : limit };
     if (cursor) {
-      query.start_author  = cursor.author;
+      query.start_author   = cursor.author;
       query.start_permlink = cursor.permlink;
     }
 
@@ -535,11 +605,105 @@ async function _fetchAllPostsSince(sinceDate) {
       result.push(p);
     }
 
-    if (hitCutoff || posts.length < (cursor ? limit : limit)) break;
+    if (hitCutoff || posts.length < limit) break;
 
     // Advance cursor to the oldest post in this batch
     const oldest = posts[posts.length - 1];
     cursor = { author: oldest.author, permlink: oldest.permlink };
+  }
+
+  return result;
+}
+
+/**
+ * BUG 1 FIX — Fetch reply-based operations (transfer_accept, feed, wear_on,
+ * wear_off) that postdate `sinceDate` by scanning @steembiota's account
+ * history for comment operations.
+ *
+ * getDiscussionsByCreated only returns top-level posts and silently omits
+ * all replies/comments, so every action recorded as a reply was invisible
+ * during replay.  We fix this by walking @steembiota's account history
+ * (which records every comment posted in reply to its content) and
+ * reconstructing synthetic post objects from the comment operations.
+ *
+ * @param {Date|null} sinceDate — ignore ops older than or equal to this date
+ * @returns {Promise<object[]>} synthetic post-like objects, newest-first
+ */
+async function _fetchReplyOpsSince(sinceDate) {
+  const result   = [];
+  let   cursor   = -1;  // -1 = start from the most recent op
+  const pageSize = 1000;
+
+  while (true) {
+    const batch = await new Promise((resolve, reject) => {
+      steem.api.getAccountHistory(CHECKPOINT_AUTHOR, cursor, pageSize, (err, res) => {
+        if (err) return reject(err);
+        resolve(Array.isArray(res) ? res : []);
+      });
+    });
+
+    if (batch.length === 0) break;
+
+    let hitCutoff = false;
+    // Account history is returned oldest-first within each batch; iterate
+    // in reverse so we process newest-first and can break early.
+    for (let i = batch.length - 1; i >= 0; i--) {
+      const tx  = batch[i];
+      const op  = tx[1]?.op;
+      if (!op) continue;
+
+      const opType = op[0];
+      const opData = op[1];
+
+      // We only care about comment ops (replies) that carry steembiota metadata.
+      if (opType !== "comment") continue;
+
+      const opTimestamp = tx[1]?.timestamp
+        ? new Date(tx[1].timestamp)
+        : null;
+
+      if (sinceDate && opTimestamp && opTimestamp <= sinceDate) {
+        hitCutoff = true;
+        break;
+      }
+
+      // Parse json_metadata to confirm this is a steembiota action.
+      let meta;
+      try {
+        const parsed = typeof opData.json_metadata === "string"
+          ? JSON.parse(opData.json_metadata || "{}")
+          : (opData.json_metadata || {});
+        meta = parsed.steembiota;
+      } catch { continue; }
+
+      if (!meta) continue;
+
+      // Only replay the reply-specific action types that _fetchAllPostsSince misses.
+      const REPLY_TYPES = new Set(["transfer_accept", "feed", "wear_on", "wear_off"]);
+      if (!REPLY_TYPES.has(meta.type)) continue;
+
+      // Build a synthetic post object compatible with applyOperation().
+      result.push({
+        author:        opData.author        || "",
+        permlink:      opData.permlink       || "",
+        json_metadata: opData.json_metadata  || "{}",
+        created:       tx[1]?.timestamp      || new Date(0).toISOString()
+      });
+    }
+
+    if (hitCutoff) break;
+
+    // Advance cursor (sequence number) backward through history.
+    const oldestSeq = batch[0]?.[0];
+    if (oldestSeq === undefined || oldestSeq === 0) break;
+    cursor = oldestSeq - 1;
+    if (cursor < 0) break;
+
+    // Also stop if the oldest timestamp in this batch predates our cutoff.
+    const oldestTimestamp = batch[0]?.[1]?.timestamp
+      ? new Date(batch[0][1].timestamp)
+      : null;
+    if (sinceDate && oldestTimestamp && oldestTimestamp <= sinceDate) break;
   }
 
   return result;
@@ -562,7 +726,11 @@ async function _fetchAllPostsSince(sinceDate) {
  * Designed to be called from App.onMounted().  Non-fatal errors are
  * surfaced via syncStatusRef rather than thrown.
  */
-async function bootstrapState(stateRef, syncStatusRef, onProgress) {
+async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
+  // BUG 6 FIX: onReady is an optional callback invoked once — and only once —
+  // after stateRef.value has been assigned the fully-replayed state.
+  // app.js uses this to flip stateReady.value = true, which gates the
+  // rendering of ownership information in child views.
   const status = (msg) => {
     if (syncStatusRef) syncStatusRef.value = msg;
     if (onProgress)    onProgress(msg);
@@ -639,16 +807,24 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress) {
     const cutoff = currentState.timestamp ? new Date(currentState.timestamp) : null;
     status(`🔄 Replaying all events since ${cutoff ? cutoff.toISOString().slice(0, 10) : "genesis"}…`);
 
+    // BUG 1 FIX: fetch both top-level posts AND reply-based ops (transfers,
+    // feed, wear_on/off) which were previously invisible because
+    // getDiscussionsByCreated never returns replies/comments.
     let rawPosts = [];
     try {
-      // Bug Fix #2: use the paginated fetcher instead of a single 100-post call
-      rawPosts = await _fetchAllPostsSince(cutoff);
+      const [topLevel, replies] = await Promise.all([
+        _fetchAllPostsSince(cutoff),
+        _fetchReplyOpsSince(cutoff)
+      ]);
+      rawPosts = [...topLevel, ...replies];
     } catch (e) {
       console.warn("[SB State] Replay fetch failed:", e);
     }
 
-    // Posts come back newest-first; apply oldest first for correct ordering.
-    const ordered = rawPosts.slice().reverse();
+    // Merge and sort by creation time (oldest first) so state transitions
+    // are applied in the correct chronological order regardless of source.
+    rawPosts.sort((a, b) => new Date(a.created) - new Date(b.created));
+    const ordered = rawPosts;
     let applied = 0;
     for (const post of ordered) {
       try {
@@ -662,8 +838,13 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress) {
       } catch { /* skip malformed posts */ }
     }
 
-    // ── Step 5: Single atomic update → no UI flicker (Bug Fix #7) ──────────
+    // ── Step 5: Single atomic update → no UI flicker ────────────────────────
+    // (original Bug Fix #7 + BUG 6 FIX)
+    // stateRef is assigned exactly once here.  The onReady callback then
+    // flips the stateReady flag in app.js, unblocking ownership rendering in
+    // child views and replacing skeleton loaders with real data.
     stateRef.value = { ...currentState };
+    if (typeof onReady === "function") onReady();
     status(`✅ State ready — ${Object.keys(currentState.ownership).length} NFTs tracked, ${applied} new event(s) replayed.`);
 
   } catch (e) {
@@ -793,27 +974,47 @@ const CheckpointManager = {
   },
 
   beforeUnmount() {
-    if (this.exportUrl) URL.revokeObjectURL(this.exportUrl);
+    // BUG 7 FIX: delegate to the shared helper so revocation logic is never duplicated.
+    this._revokeExportUrl();
   },
 
   methods: {
     /** Step 1 — Snapshot the current state and offer it as a download. */
+    // BUG 7 FIX: _revokeExportUrl() always safely disposes the current
+    // Object URL before we replace it.  Calling it when exportUrl is null
+    // (the very first invocation) is a no-op, so there is no special-case
+    // needed at call sites.  It is also called in beforeUnmount() so the
+    // URL is cleaned up when the component is destroyed.
+    _revokeExportUrl() {
+      if (this.exportUrl) {
+        URL.revokeObjectURL(this.exportUrl);
+        this.exportUrl = null;
+      }
+    },
+
     async generateExport() {
       this.busy         = true;
       this.exportReady  = false;
       this.statusDetail = "Hashing state…";
+      // BUG 7 FIX: revoke any previous Object URL *before* we start work so
+      // that repeated clicks never accumulate unreleased URLs, even if the
+      // previous export succeeded.
+      this._revokeExportUrl();
       try {
         const gs        = this.globalState?.value || this.globalState || createEmptyState();
         const hash      = await hashState(gs);
         this.hashPreview = hash.slice(0, 16) + "…";
 
         const blob        = new Blob([JSON.stringify(gs, null, 2)], { type: "application/json" });
-        if (this.exportUrl) URL.revokeObjectURL(this.exportUrl);
         this.exportUrl   = URL.createObjectURL(blob);
         this.exportReady = true;
         this.statusDetail = `State hash: ${this.hashPreview}`;
         this.notify("State exported — pin it to IPFS and paste the CID below.", "success");
       } catch (e) {
+        // BUG 7 FIX: if hashing or blob creation fails, ensure no stale URL
+        // is left behind (exportUrl was already nulled by _revokeExportUrl
+        // above, so this is belt-and-suspenders for any future code path).
+        this._revokeExportUrl();
         this.notify("Export failed: " + e.message, "error");
         this.statusDetail = "";
       } finally {
