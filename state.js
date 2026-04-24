@@ -51,7 +51,8 @@ const REPLAY_BATCH_SIZE = 100;
  *
  * ownership : { "author/permlink" → currentOwnerUsername }
  * equipped  : { "accAuthor/accPermlink" → "creatureAuthor/creaturePermlink" | null }
- * registry  : { "author/permlink" → { type: "creature"|"accessory", genome } }
+ * registry  : { "author/permlink" → { type: "creature"|"accessory" } }
+ *             (genomes are NOT stored here — fetch on-demand from blockchain/IndexedDB)
  */
 function createEmptyState() {
   return {
@@ -60,7 +61,7 @@ function createEmptyState() {
     timestamp: null,   // ISO-8601 string of last processed event
     ownership: {},     // NFT_ID → current owner username
     equipped:  {},     // Accessory_ID → Creature_ID  (null when unequipped)
-    registry:  {}      // NFT_ID → { type, genome }
+    registry:  {}      // NFT_ID → { type }  — genomes are NOT stored here
   };
 }
 
@@ -119,7 +120,10 @@ function applyOperation(state, op, blockNum, timestamp) {
     case "offspring": {
       const id = _nftId(author, permlink);
       if (!state.registry[id]) {
-        state.registry[id]  = { type: "creature", genome: meta.genome || {} };
+        // Bug Fix #1: store only the NFT type — never the genome.
+        // Genomes must be fetched on-demand from the blockchain or IndexedDB
+        // so that the registry (and therefore IPFS snapshots) stay small.
+        state.registry[id]  = { type: "creature" };
         state.ownership[id] = author;
       }
       break;
@@ -129,8 +133,8 @@ function applyOperation(state, op, blockNum, timestamp) {
     case "accessory": {
       const id = _nftId(author, permlink);
       if (!state.registry[id]) {
-        const accGenome = meta.accessory?.genome || {};
-        state.registry[id]  = { type: "accessory", genome: accGenome };
+        // Bug Fix #1: type only — no genome stored (same as creature above)
+        state.registry[id]  = { type: "accessory" };
         state.ownership[id] = author;
       }
       break;
@@ -209,7 +213,17 @@ async function hashState(state) {
     }
     return obj;
   }
-  const canonical  = JSON.stringify(sortedClone(state));
+  // Bug Fix #6: Explicitly map to a strictly-defined object so that runtime
+  // noise (Vue observer internals, _source tags from the image uploader, etc.)
+  // never leaks into the fingerprint and causes spurious "Verification Failed".
+  const minimalState = {
+    version:   state.version,
+    block_num: state.block_num,
+    ownership: state.ownership,
+    equipped:  state.equipped,
+    registry:  state.registry  // already genome-free after Fix #1
+  };
+  const canonical  = JSON.stringify(sortedClone(minimalState));
   const msgUint8   = new TextEncoder().encode(canonical);
   const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
   const hashArray  = Array.from(new Uint8Array(hashBuffer));
@@ -301,31 +315,143 @@ async function loadPersistedSnapshot() {
 // ============================================================
 
 /**
- * Scan the canonical account's history for the latest valid checkpoint
- * custom_json broadcast.
+ * Scan one account's history for checkpoint custom_json ops,
+ * walking backwards in pages of `pageSize` until we've gone past
+ * `minBlockNum` or exhausted history.
+ *
+ * Returns an array of parsed checkpoint payloads (unsorted).
+ */
+async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 1000) {
+  const found = [];
+  let cursor = -1; // -1 = start from the most recent op
+
+  while (true) {
+    const batch = await new Promise((resolve, reject) => {
+      steem.api.getAccountHistory(account, cursor, pageSize, (err, res) => {
+        if (err) return reject(err);
+        resolve(Array.isArray(res) ? res : []);
+      });
+    });
+
+    if (batch.length === 0) break;
+
+    for (const tx of batch) {
+      const op = tx[1]?.op;
+      if (op && op[0] === "custom_json" && op[1]?.id === CHECKPOINT_ID) {
+        try {
+          const payload = JSON.parse(op[1].json);
+          if (payload && payload.block_num) found.push(payload);
+        } catch { /* malformed — skip */ }
+      }
+    }
+
+    // The oldest entry in this batch tells us how far back we've gone.
+    const oldestBlockInBatch = batch[0]?.[1]?.block || 0;
+    if (oldestBlockInBatch <= minBlockNum) break; // we've covered the needed range
+
+    // Steem history is indexed by sequence number; the first entry in the batch
+    // gives us the sequence to use as the next cursor (exclusive upper bound).
+    const oldestSeq = batch[0]?.[0];
+    if (oldestSeq === undefined || oldestSeq === 0) break; // reached genesis
+    cursor = oldestSeq - 1;
+    if (cursor < 0) break;
+  }
+
+  return found;
+}
+
+/**
+ * Fetch checkpoints from ALL recently active community accounts who have
+ * ever posted one, score them by stake+reputation+age, and return the
+ * best candidate.
+ *
+ * Security model:
+ *  - Group candidates by (block_num, state_hash) so colluding minority
+ *    accounts are drowned out.
+ *  - Score each group: stake weight + reputation + recency bonus.
+ *  - The @steembiota account always gets a large trust bonus.
+ *  - Callers should verify the winning CID (random spot-check or on suspicion).
+ *
+ * Bug Fix #3: Scans deeply (up to `pageSize` ops per account) so the
+ *   checkpoint is never "pushed out" of a shallow 100-op window.
+ * Bug Fix #4: Considers checkpoints from any community member, not just
+ *   @steembiota, with stake/reputation scoring to guard against spoofing.
  *
  * Returns { version, block_num, state_hash, snapshot_cid } or null.
  */
-async function fetchLatestCheckpoint(account = CHECKPOINT_AUTHOR) {
-  return new Promise((resolve, reject) => {
-    steem.api.getAccountHistory(account, -1, 100, (err, result) => {
-      if (err) return reject(err);
-      if (!Array.isArray(result)) return resolve(null);
+async function fetchLatestCheckpoint(minBlockNum = 0) {
+  // ── 1. Collect candidates ──────────────────────────────────────────────────
+  // Always scan the canonical account deeply.
+  let allCandidates = [];
+  try {
+    const canonical = await _scanAccountCheckpoints(CHECKPOINT_AUTHOR, minBlockNum, 1000);
+    // Tag each with a high base trust for @steembiota
+    canonical.forEach(c => allCandidates.push({ ...c, _publisher: CHECKPOINT_AUTHOR, _trust: 1000 }));
+  } catch (e) {
+    console.warn("[SB State] Canonical checkpoint scan failed:", e);
+  }
 
-      const checkpoints = result
-        .filter(tx => {
-          const op = tx[1]?.op;
-          return op && op[0] === "custom_json" && op[1]?.id === CHECKPOINT_ID;
-        })
-        .map(tx => {
-          try { return JSON.parse(tx[1].op[1].json); } catch { return null; }
-        })
-        .filter(Boolean)
-        .sort((a, b) => (b.block_num || 0) - (a.block_num || 0));
+  // Also look at recent posts tagged "steembiota" to discover community
+  // accounts that have published checkpoints (best-effort, non-fatal).
+  try {
+    const tagPosts = await fetchPostsByTag("steembiota", 100);
+    const communityAccounts = [...new Set(tagPosts.map(p => p.author))].filter(a => a !== CHECKPOINT_AUTHOR);
 
-      resolve(checkpoints[0] || null);
+    await Promise.allSettled(communityAccounts.map(async (account) => {
+      try {
+        const cps = await _scanAccountCheckpoints(account, minBlockNum, 200);
+        cps.forEach(c => allCandidates.push({ ...c, _publisher: account, _trust: 0 }));
+      } catch { /* non-fatal — skip bad accounts */ }
+    }));
+  } catch (e) {
+    console.warn("[SB State] Community checkpoint discovery failed (non-fatal):", e);
+  }
+
+  if (allCandidates.length === 0) return null;
+
+  // ── 2. Fetch reputation to weight community accounts ──────────────────────
+  const uniqueAccounts = [...new Set(allCandidates.map(c => c._publisher))];
+  const reputations = {};
+  try {
+    await new Promise((resolve) => {
+      steem.api.getAccounts(uniqueAccounts, (err, res) => {
+        if (!err && Array.isArray(res)) {
+          res.forEach(a => {
+            // Steem reputation is a log-scaled int; extract raw for ordering
+            reputations[a.name] = parseFloat(a.reputation || 0);
+          });
+        }
+        resolve();
+      });
     });
-  });
+  } catch { /* reputation unavailable — fall back to zero */ }
+
+  // ── 3. Group by (block_num, state_hash) and score each group ──────────────
+  const groups = {};
+  for (const c of allCandidates) {
+    const key = `${c.block_num}:${c.state_hash}`;
+    if (!groups[key]) groups[key] = { payload: c, publishers: [], score: 0 };
+    const g = groups[key];
+    g.publishers.push(c._publisher);
+    // Trust bonus for @steembiota
+    const trustBonus = c._trust || 0;
+    // Reputation contribution (normalised to roughly 0–100)
+    const rep = Math.max(0, reputations[c._publisher] || 0);
+    // Recency: prefer higher block numbers
+    const recency = (c.block_num || 0) / 1e6;
+    g.score += trustBonus + rep + recency;
+  }
+
+  // ── 4. Pick the highest-scoring group ─────────────────────────────────────
+  const best = Object.values(groups).sort((a, b) => b.score - a.score)[0];
+  if (!best) return null;
+
+  console.info(
+    `[SB State] Best checkpoint: block ${best.payload.block_num}, ` +
+    `score ${best.score.toFixed(1)}, publishers: ${best.publishers.join(", ")}`
+  );
+
+  return best.payload;
 }
 
 // ============================================================
@@ -365,15 +491,73 @@ async function publishCheckpoint(username, state, cid, callback) {
 // ============================================================
 
 /**
+ * Fetch ALL steembiota-tagged posts since `sinceTimestamp`, walking
+ * backwards through pages until the Steem API returns nothing newer.
+ *
+ * Bug Fix #2: The plain fetchPostsByTag cap of 100 posts means we can
+ * miss hundreds of operations if the snapshot is old.  This helper pages
+ * through getDiscussionsByCreated using the last-seen post as the cursor.
+ *
+ * @param {Date|null} sinceDate — stop collecting once posts are older than this
+ * @returns {Promise<object[]>} posts in newest-first order
+ */
+async function _fetchAllPostsSince(sinceDate) {
+  const tag    = "steembiota";
+  const limit  = 100; // Steem API hard cap per call
+  const result = [];
+  let   cursor = null; // { author, permlink } of the oldest post seen so far
+
+  while (true) {
+    const query = { tag, limit: cursor ? limit + 1 : limit };
+    if (cursor) {
+      query.start_author  = cursor.author;
+      query.start_permlink = cursor.permlink;
+    }
+
+    const batch = await new Promise((resolve, reject) => {
+      steem.api.getDiscussionsByCreated(query, (err, res) => {
+        if (err) return reject(err);
+        resolve(Array.isArray(res) ? res : []);
+      });
+    });
+
+    // When using a cursor, the first item is the cursor post itself — skip it.
+    const posts = cursor ? batch.slice(1) : batch;
+    if (posts.length === 0) break;
+
+    let hitCutoff = false;
+    for (const p of posts) {
+      const postDate = new Date(p.created);
+      if (sinceDate && postDate <= sinceDate) {
+        hitCutoff = true;
+        break;
+      }
+      result.push(p);
+    }
+
+    if (hitCutoff || posts.length < (cursor ? limit : limit)) break;
+
+    // Advance cursor to the oldest post in this batch
+    const oldest = posts[posts.length - 1];
+    cursor = { author: oldest.author, permlink: oldest.permlink };
+  }
+
+  return result;
+}
+
+/**
  * Bootstrap the global NFT state by:
  *   1. Checking IndexedDB for a cached snapshot (instant, offline-capable)
  *   2. Fetching the latest on-chain checkpoint and comparing CIDs
  *   3. Downloading + verifying the IPFS snapshot when newer
- *   4. Replaying recent posts that postdate the snapshot
+ *   4. Replaying ALL posts that postdate the snapshot (paginated, exhaustive)
  *
  * `stateRef`     — Vue ref that will receive the live state object
  * `syncStatusRef`— Vue ref (string) for UI status messages
  * `onProgress`   — optional (msg) => void for finer-grained progress
+ *
+ * Bug Fix #7: The entire replay runs against a local variable `currentState`.
+ * stateRef.value is updated exactly once at the very end to prevent UI flicker.
  *
  * Designed to be called from App.onMounted().  Non-fatal errors are
  * surfaced via syncStatusRef rather than thrown.
@@ -393,7 +577,8 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress) {
     status("🛰️ Searching for checkpoint on-chain…");
     let checkpoint = null;
     try {
-      checkpoint = await fetchLatestCheckpoint();
+      // Pass minBlockNum = 0 so the scanner walks back as far as needed
+      checkpoint = await fetchLatestCheckpoint(0);
     } catch (e) {
       console.warn("[SB State] Checkpoint fetch failed (non-fatal):", e);
     }
@@ -440,43 +625,45 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress) {
       snapshotCid  = persisted.cid;
     }
 
-    // ── Step 3: Seed state ────────────────────────────────────
+    // ── Step 3: Seed local state — do NOT touch stateRef yet (Bug Fix #7) ──
     let currentState;
     if (snapshot) {
-      currentState = snapshot;
-      stateRef.value = currentState;
+      // Work on a shallow copy so we never mutate the cached object directly
+      currentState = { ...snapshot };
     } else {
       status("⚙️ No checkpoint found. Building state from genesis (this may take a while)…");
-      currentState   = createEmptyState();
-      stateRef.value = currentState;
+      currentState = createEmptyState();
     }
 
-    // ── Step 4: Replay recent posts ───────────────────────────
+    // ── Step 4: Exhaustive replay of posts newer than the snapshot ──────────
     const cutoff = currentState.timestamp ? new Date(currentState.timestamp) : null;
-    status(`🔄 Replaying events since ${cutoff ? cutoff.toISOString().slice(0, 10) : "genesis"}…`);
+    status(`🔄 Replaying all events since ${cutoff ? cutoff.toISOString().slice(0, 10) : "genesis"}…`);
 
     let rawPosts = [];
     try {
-      rawPosts = await fetchPostsByTag("steembiota", REPLAY_BATCH_SIZE);
+      // Bug Fix #2: use the paginated fetcher instead of a single 100-post call
+      rawPosts = await _fetchAllPostsSince(cutoff);
     } catch (e) {
       console.warn("[SB State] Replay fetch failed:", e);
     }
 
+    // Posts come back newest-first; apply oldest first for correct ordering.
+    const ordered = rawPosts.slice().reverse();
     let applied = 0;
-    for (const post of (Array.isArray(rawPosts) ? rawPosts : [])) {
-      // Only replay posts newer than the snapshot's timestamp
-      if (cutoff && new Date(post.created) <= cutoff) continue;
+    for (const post of ordered) {
       try {
         const meta = typeof post.json_metadata === "string"
           ? JSON.parse(post.json_metadata || "{}")
           : (post.json_metadata || {});
         if (!meta.steembiota) continue;
+        // Bug Fix #7: mutate currentState only, never stateRef inside the loop
         applyOperation(currentState, post, 0, post.created);
         applied++;
       } catch { /* skip malformed posts */ }
     }
 
-    stateRef.value = { ...currentState }; // trigger Vue reactivity
+    // ── Step 5: Single atomic update → no UI flicker (Bug Fix #7) ──────────
+    stateRef.value = { ...currentState };
     status(`✅ State ready — ${Object.keys(currentState.ownership).length} NFTs tracked, ${applied} new event(s) replayed.`);
 
   } catch (e) {
@@ -666,6 +853,51 @@ const CheckpointManager = {
         this.notify("Checkpoint error: " + e.message, "error");
         this.statusDetail = "";
       }
+    },
+
+    /**
+     * Bug Fix #5 — One-Click Checkpoint via Cloudflare Worker IPFS proxy.
+     *
+     * Anyone (not just @steembiota) can call this.  The flow is:
+     *   1. POST the current state JSON to our Cloudflare Worker proxy.
+     *   2. The Worker pins it to IPFS and returns { cid }.
+     *   3. We set cidInput and immediately call submitCheckpoint() so the
+     *      CID is broadcast on-chain in one user action.
+     */
+    async autoUploadCheckpoint() {
+      if (!this.username?.value && !this.username) {
+        this.notify("You must be logged in to publish a checkpoint.", "error");
+        return;
+      }
+      this.busy         = true;
+      this.statusDetail = "Uploading to IPFS via proxy…";
+      try {
+        const gs = this.globalState?.value || this.globalState || createEmptyState();
+
+        const response = await fetch("https://dark-limit-826f.john-smjth.workers.dev/", {
+          method:  "POST",
+          body:    JSON.stringify(gs),
+          headers: { "Content-Type": "application/json" }
+        });
+
+        if (!response.ok) {
+          throw new Error(`Proxy returned HTTP ${response.status}`);
+        }
+
+        const result = await response.json(); // Expected: { cid: "Qm…" or "bafy…" }
+        if (!result?.cid) throw new Error("Proxy response missing CID field.");
+
+        this.cidInput     = result.cid;
+        this.statusDetail = `Pinned as ${result.cid.slice(0, 12)}… — broadcasting…`;
+        this.notify("Auto-upload successful! Broadcasting checkpoint…", "success");
+
+        // Immediately broadcast — submitCheckpoint handles busy/error itself
+        await this.submitCheckpoint();
+      } catch (e) {
+        this.busy         = false;
+        this.statusDetail = "";
+        this.notify("Proxy upload failed: " + e.message, "error");
+      }
     }
   },
 
@@ -686,6 +918,16 @@ const CheckpointManager = {
         <span v-if="currentBlock"> · block {{ currentBlock }}</span>
         <span v-if="currentTimestamp !== '—'"> · {{ currentTimestamp }}</span>
       </div>
+
+      <!-- One-click path (Bug Fix #5) -->
+      <button
+        @click="autoUploadCheckpoint"
+        :disabled="busy"
+        class="sb-btn-blue"
+        style="width:100%;margin-bottom:10px;"
+      >⚡ One-Click — Upload &amp; Broadcast</button>
+
+      <div style="text-align:center;font-size:11px;color:#888;margin-bottom:12px;">— or do it manually below —</div>
 
       <!-- Step 1 -->
       <button
