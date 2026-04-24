@@ -53,7 +53,8 @@ SteemBiota treats every creature and accessory as an **NFT** identified by its c
   timestamp: null,       // ISO-8601 timestamp of the last processed event
   ownership: {},         // "author/permlink" → current owner username
   equipped:  {},         // "accAuthor/accPermlink" → "creatureAuthor/creaturePermlink"
-  registry:  {}          // "author/permlink" → { type: "creature"|"accessory", genome }
+  registry:  {}          // "author/permlink" → { type: "creature"|"accessory" }
+                         //   (genomes are NOT stored here; fetched on-demand from blockchain/IndexedDB)
 }
 ```
 
@@ -63,8 +64,8 @@ All transitions are handled by `applyOperation(state, op, blockNum, timestamp)` 
 
 | Operation type | Effect |
 |---|---|
-| `founder` / `offspring` | Mint creature NFT; set owner to `op.author` |
-| `accessory` | Mint accessory NFT; set owner to `op.author` |
+| `founder` / `offspring` | Mint creature NFT; record `{ type: "creature" }` in registry; set owner to `op.author` |
+| `accessory` | Mint accessory NFT; record `{ type: "accessory" }` in registry; set owner to `op.author` |
 | `transfer_accept` | Transfer ownership of the referenced NFT to `op.author` (the accepting party) |
 | `wear_on` | Record accessory as equipped on creature; enforces exclusivity (removes any prior creature assignment) |
 | `wear_off` | Remove equip record |
@@ -76,16 +77,26 @@ All other reply types (`feed`, `play`, `walk`, `breed_permit`, etc.) do not affe
 On every page load, `bootstrapState()` runs the following sequence asynchronously, updating the `syncStatus` Vue ref at each step (displayed as a slim banner until the sync is complete):
 
 1. **Check IndexedDB** — if a previously persisted snapshot exists, load it instantly (offline-capable, zero RPC calls).
-2. **Fetch on-chain checkpoint** — scan the `@steembiota` account history for `custom_json` ops with id `steembiota_checkpoint`, sorted newest-first.
+2. **Fetch on-chain checkpoint** — scan account history for `custom_json` ops with id `steembiota_checkpoint` using the deep paginated scanner (see [Checkpoint Discovery](#checkpoint-discovery) below). Community checkpoints from all publishers are considered, not only `@steembiota`.
 3. **Compare CIDs** — if the on-chain checkpoint references the same CID as the IDB snapshot, skip the IPFS download; otherwise download and verify.
-4. **Verify IPFS snapshot** — compute `SHA-256` of the downloaded JSON (with keys canonically sorted) and compare against `state_hash` in the checkpoint. A mismatch means the IPFS node served a tampered file — the snapshot is rejected and the IDB cache is used as fallback.
+4. **Verify IPFS snapshot** — compute `SHA-256` of the downloaded JSON (with keys canonically sorted against a strictly-defined minimal object) and compare against `state_hash` in the checkpoint. A mismatch means the IPFS node served a tampered file — the snapshot is rejected and the IDB cache is used as fallback.
 5. **Persist to IndexedDB** — save the verified snapshot so the next boot is instant.
-6. **Replay recent posts** — fetch recent posts tagged `steembiota` and apply any whose `created` timestamp postdates the snapshot's `timestamp`.
-7. **Expose to Vue** — `globalState` and `syncStatus` are provided to all child components.
+6. **Exhaustive replay** — fetch **all** posts tagged `steembiota` whose `created` timestamp postdates the snapshot using `_fetchAllPostsSince()`, a cursor-based paginator that walks backwards through `getDiscussionsByCreated` pages until it reaches the cutoff. The 100-post API cap no longer limits replay coverage.
+7. **Single atomic state update** — the entire replay runs against a local `currentState` variable; `stateRef.value` is assigned exactly **once** at the very end, eliminating UI flicker during large replays.
+8. **Expose to Vue** — `globalState` and `syncStatus` are provided to all child components.
+
+### Checkpoint Discovery
+
+`fetchLatestCheckpoint()` performs an exhaustive, multi-account scan:
+
+- **Deep history scan** — `_scanAccountCheckpoints()` walks the Steem account history in pages of up to 1 000 ops, advancing a cursor backward until the target `minBlockNum` is reached or genesis is hit. This replaces the former single 100-op window that could silently miss older checkpoints.
+- **Community publishers** — in addition to `@steembiota`, any account that has recently posted with the `steembiota` tag is scanned for checkpoint ops, allowing the community to contribute without relying on a single account.
+- **Scoring** — candidates are grouped by `(block_num, state_hash)`. Each group is scored by: a large trust bonus for `@steembiota`, on-chain reputation of each contributing account, and a recency bonus proportional to `block_num`. The highest-scoring group wins.
+- **Security** — minority spoofing attacks are diluted because a bad actor would need to match or exceed the combined stake-weighted score of legitimate publishers. Callers may perform random spot-verification of the winning CID.
 
 ### State Hashing
 
-`hashState(state)` produces a **deterministic SHA-256 hex digest** of the state object. Before serialising to JSON, all keys in every sub-object are sorted recursively. This guarantees that two clients building identical states via different operation orderings produce the same hash, enabling trustless checkpoint verification.
+`hashState(state)` produces a **deterministic SHA-256 hex digest**. Before serialising to JSON, the state is explicitly mapped to a minimal canonical object containing only the five defined fields (`version`, `block_num`, `ownership`, `equipped`, `registry`). This guards against Vue observer internals, `_source` tags injected by the image uploader, or any other runtime metadata leaking into the fingerprint and causing spurious "Verification Failed" errors. All keys inside each sub-object are then sorted recursively before serialisation.
 
 ### IPFS Snapshot Distribution
 
@@ -99,22 +110,35 @@ Any verified snapshot is persisted to the `sb_state_snapshot` IndexedDB store so
 
 ### Checkpoint Broadcasting
 
-Any user can help decentralise the state:
+Any logged-in user can publish a checkpoint. The `CheckpointManager` component (available at `/#/checkpoint`) supports two flows:
+
+**One-click (recommended):**
+
+1. Click **⚡ One-Click — Upload & Broadcast**.
+2. The component POSTs the current GSM state JSON to the Cloudflare Worker proxy (`autoUploadCheckpoint()`), which pins it to IPFS and returns a CID.
+3. The CID is immediately passed to `submitCheckpoint()` and broadcast on-chain via Keychain — all in a single user action.
+
+**Manual (for users who self-pin to Pinata / web3.storage):**
 
 1. Export the current GSM state as `steembiota-state.json` (download link generated client-side).
-2. Pin the file to IPFS (e.g. via [Pinata](https://www.pinata.cloud) or [web3.storage](https://web3.storage)).
-3. Paste the resulting CID into the Checkpoint Authority panel and broadcast it to Steem via Keychain.
+2. Pin the file to IPFS and obtain the CID.
+3. Paste the CID into the Checkpoint Authority panel and click **📡 Broadcast**.
 
-The broadcast is a `custom_json` op with id `steembiota_checkpoint` and payload:
+Both flows use the same `publishCheckpoint()` function, which broadcasts a `custom_json` op:
 
 ```json
 {
-  "version":      1,
-  "block_num":    12345678,
-  "state_hash":   "abc123…",
-  "snapshot_cid": "QmXyz…"
+  "id": "steembiota_checkpoint",
+  "json": {
+    "version": 1,
+    "block_num": 12345678,
+    "state_hash": "sha256hexdigest…",
+    "snapshot_cid": "QmXyz…or bafyXyz…"
+  }
 }
 ```
+
+The resulting checkpoint is visible to all users during the next boot's community checkpoint discovery scan and is scored alongside contributions from other publishers.
 
 ### GSM Convenience Helpers
 
@@ -137,7 +161,12 @@ The broadcast is a `custom_json` op with id `steembiota_checkpoint` and payload:
 
 Available at `/#/checkpoint` and via the 🛠️ Checkpoint nav link. Injected dependencies: `username`, `notify`, `globalState`, `syncStatus`.
 
-The component shows a live summary of the current GSM (NFT count, last block number, last timestamp), provides a one-click export, and a CID input + broadcast button. All Keychain interactions use the existing `publishCheckpoint()` function from `state.js`.
+The component shows a live summary of the current GSM (NFT count, last block number, last timestamp) and provides two publishing paths:
+
+- **⚡ One-Click — Upload & Broadcast** (`autoUploadCheckpoint`) — POSTs the state to the Cloudflare Worker proxy, receives a CID, and immediately broadcasts it on-chain. Available to any logged-in user.
+- **Manual path** — `generateExport()` produces a downloadable JSON blob; the user pins it externally and pastes the CID into the input; `submitCheckpoint()` then broadcasts via Keychain.
+
+All Keychain interactions use the existing `publishCheckpoint()` function from `state.js`.
 
 ---
 
@@ -790,6 +819,8 @@ The `/leaderboard` page ranks all known SteemBiota participants by XP. It fetche
 }
 ```
 
+> **Note:** The `genome` field lives in the Steem post only. The GSM registry stores `{ type: "creature" }` — no genome data — so IPFS snapshots stay small. Genomes are fetched on-demand from the blockchain or IndexedDB when a creature page is rendered.
+
 Offspring adds: `"type": "offspring"`, `"parentA"`, `"parentB"`, `"mutated"`, `"speciated"`.
 Image-inspired founders add `"_source": "image-upload"` inside the genome object.
 Offspring bred through a severed lineage add `"_severedLineage": true` inside the genome object.
@@ -846,9 +877,15 @@ Offspring bred through a severed lineage add `"_severedLineage": true` inside th
 
 **Client-side only** — All logic runs in the browser. No servers or external databases.
 
-**Global State Machine** — Ownership and equip state for all NFTs are maintained in a single in-memory object seeded from a cryptographically verified IPFS snapshot and replayed forward from the Steem chain. O(1) lookups replace per-card reply scans throughout the UI.
+**Global State Machine** — Ownership and equip state for all NFTs are maintained in a single in-memory object seeded from a cryptographically verified IPFS snapshot and replayed exhaustively forward from the Steem chain. O(1) lookups replace per-card reply scans throughout the UI.
 
-**Tamper-evident snapshots** — Every IPFS checkpoint snapshot is verified against a SHA-256 hash anchored on the Steem blockchain before it is accepted. A hash mismatch causes the snapshot to be silently rejected and a fallback used.
+**Lean registry** — The GSM registry stores only `{ type }` per NFT. Genomes are never written into the snapshot, keeping IPFS pin sizes constant regardless of how many creatures have ever been born. Genomes are fetched on-demand from the blockchain or IndexedDB.
+
+**Exhaustive replay** — The boot replay uses a cursor-based paginator (`_fetchAllPostsSince`) that pages through `getDiscussionsByCreated` with no fixed limit. The GSM is always fully consistent with the chain regardless of how many posts have accumulated since the last snapshot.
+
+**Tamper-evident snapshots** — Every IPFS checkpoint snapshot is verified against a SHA-256 hash of a strictly-defined minimal state object, anchored on-chain. Runtime noise (Vue observers, upload metadata tags) is excluded from the fingerprint before hashing. A hash mismatch causes the snapshot to be silently rejected and a fallback used.
+
+**Community checkpoints** — Any logged-in user may publish a checkpoint via one-click upload through the Cloudflare Worker proxy or by self-pinning. Checkpoint discovery scans multiple community accounts and scores candidates by stake weight, reputation, and recency. No single account is a checkpoint single point of failure.
 
 **Diversity enforcement** — The kinship system prevents same-bloodline farming. Genus mismatch is detected at URL-paste time, not just at final submission.
 
