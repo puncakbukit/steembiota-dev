@@ -1749,7 +1749,7 @@ const AboutView = {
 // Two tabs: Creatures (owned via transfer chain) and Accessories (owned via transfer chain).
 const ProfileView = {
   name: "ProfileView",
-  inject: ["username", "notify", "globalState"],
+  inject: ["username", "notify", "globalState", "stateReady"],
   components: { CreatureCardComponent, AccessoryCardComponent, LoadingSpinnerComponent },
   data() {
     return {
@@ -1961,6 +1961,20 @@ const ProfileView = {
 
       <h2 class="sb-section-title" style="margin:0 0 4px;">@{{ profileUser }}</h2>
       <p class="sb-dimmer" style="font-size:13px;margin:0 0 16px;">Items owned by this user <span class="sb-dimmer-2">(includes transfers)</span></p>
+
+      <!-- BUG 6 FIX: Ownership data shown here uses the blockchain reply-chain
+           (effectiveOwner) as its primary source, so it is correct even before
+           the GSM finishes syncing.  This banner is just informational — it tells
+           the user that the GSM is still warming up and that the "Transferred"
+           badges may be temporarily absent for very recent transfers not yet
+           covered by the reply-chain scan. -->
+      <div
+        v-if="stateReady === false || stateReady?.value === false"
+        style="font-size:11px;color:#ffe082;background:#1a1500;border:1px solid #4a3b00;
+               border-radius:6px;padding:5px 12px;margin-bottom:12px;"
+      >
+        ⏳ Ownership index is still syncing — transfer badges may be incomplete.
+      </div>
 
       <!-- Tab bar -->
       <div class="sb-tab-bar" style="gap:0;">
@@ -4339,10 +4353,94 @@ const App = {
       setRPC(0);
 
       // ── Boot the NFT State Machine ──────────────────────────────────────
-      // bootstrapState() is defined in state.js.  It runs the full
-      // checkpoint → IPFS snapshot → replay sequence asynchronously.
-      // globalState and syncStatus update reactively as the sync progresses.
-      bootstrapState(globalState, syncStatus, null, () => { stateReady.value = true; });
+      // BUG 5 FIX: Guard against the "Double-Boot" crash that occurs when two
+      // tabs open simultaneously (or the user rapid-refreshes).  Both tabs
+      // would otherwise call bootstrapState() at the same time, racing on the
+      // IndexedDB schema upgrade and the sb_state_snapshot write.
+      //
+      // Strategy:
+      //   1. Use localStorage as a lightweight "boot lock".  The first tab to
+      //      arrive writes a timestamp and proceeds; subsequent tabs that arrive
+      //      while the flag is set skip the full bootstrap and only poll until
+      //      the primary tab finishes, then read the result from IndexedDB.
+      //   2. A BroadcastChannel message ("sb_state_ready") is sent by the
+      //      winning tab when bootstrapState() calls onReady().  Follower tabs
+      //      listen for it and apply the completed state without re-running the
+      //      expensive checkpoint → IPFS → replay sequence.
+      //   3. The lock is cleared in both the success and error paths so a crash
+      //      never permanently locks out future boots.  We also treat a lock
+      //      that is older than 90 seconds as stale (dead tab / hard-refresh).
+      const BOOT_LOCK_KEY     = "sb_booting";
+      const BOOT_LOCK_MAX_AGE = 90_000; // ms
+
+      function _acquireBootLock() {
+        const existing = localStorage.getItem(BOOT_LOCK_KEY);
+        if (existing) {
+          const age = Date.now() - Number(existing);
+          if (age < BOOT_LOCK_MAX_AGE) return false; // another tab holds the lock
+        }
+        localStorage.setItem(BOOT_LOCK_KEY, String(Date.now()));
+        return true;
+      }
+
+      function _releaseBootLock() {
+        localStorage.removeItem(BOOT_LOCK_KEY);
+      }
+
+      const _bootChannel = typeof BroadcastChannel !== "undefined"
+        ? new BroadcastChannel("sb_state_sync")
+        : null;
+
+      if (_acquireBootLock()) {
+        // ── Primary tab: run full bootstrap ──────────────────────────────
+        bootstrapState(globalState, syncStatus, null, () => {
+          stateReady.value = true;
+          _releaseBootLock();
+          // Notify follower tabs that the state is ready.
+          try { _bootChannel?.postMessage({ type: "sb_state_ready" }); } catch {}
+        });
+
+        // Safety: release lock if bootstrapState throws synchronously or
+        // the tab is closed before onReady fires.
+        window.addEventListener("unload", _releaseBootLock, { once: true });
+      } else {
+        // ── Follower tab: wait for the primary tab to finish ──────────────
+        syncStatus.value = "⏳ Another tab is syncing — waiting…";
+
+        const _onMessage = async (event) => {
+          if (event.data?.type !== "sb_state_ready") return;
+          _bootChannel?.removeEventListener("message", _onMessage);
+          // Re-read the freshly written IndexedDB snapshot instead of re-running
+          // the full replay.  loadPersistedSnapshot() is defined in state.js.
+          try {
+            const persisted = await loadPersistedSnapshot();
+            if (persisted?.snapshot) {
+              globalState.value = { ...persisted.snapshot };
+            }
+          } catch (e) {
+            console.warn("[App] Follower tab state load failed:", e);
+          }
+          stateReady.value  = true;
+          syncStatus.value  = "✅ State synchronised from primary tab.";
+        };
+
+        if (_bootChannel) {
+          _bootChannel.addEventListener("message", _onMessage);
+        } else {
+          // BroadcastChannel not available (e.g. some private-mode browsers):
+          // fall back to polling localStorage for the lock to disappear.
+          const _pollTimer = setInterval(async () => {
+            if (localStorage.getItem(BOOT_LOCK_KEY)) return; // still running
+            clearInterval(_pollTimer);
+            try {
+              const persisted = await loadPersistedSnapshot();
+              if (persisted?.snapshot) globalState.value = { ...persisted.snapshot };
+            } catch {}
+            stateReady.value = true;
+            syncStatus.value = "✅ State synchronised (fallback poll).";
+          }, 500);
+        }
+      }
 
       // Always load a profile — logged-in user's own, or @steembiota as fallback
       loadProfile(username.value || "");

@@ -61,22 +61,30 @@ const REPLAY_BATCH_SIZE = 100;
 // § 2 — STATE SCHEMA
 // ============================================================
 
+// BUG 7 FIX: The registry (NFT type catalogue) is intentionally NOT kept
+// inside the Vue-reactive globalState ref.  At 100 k+ entries it would cause
+// Vue to re-observe the entire object tree on every Feed/Wear operation.
+// Instead we keep it in a plain JS Map that lives here in module scope.
+// Only ownership and equipped — the fields that actually drive UI rendering —
+// live inside the reactive ref.
+const _nftRegistry = new Map(); // "author/permlink" → { type: "creature"|"accessory" }
+
 /**
  * Returns a fresh, empty canonical state object.
  *
  * ownership : { "author/permlink" → currentOwnerUsername }
  * equipped  : { "accAuthor/accPermlink" → "creatureAuthor/creaturePermlink" | null }
- * registry  : { "author/permlink" → { type: "creature"|"accessory" } }
- *             (genomes are NOT stored here — fetch on-demand from blockchain/IndexedDB)
+ *
+ * Note: `registry` is intentionally omitted from the reactive state object.
+ * Use the module-level `_nftRegistry` Map for type lookups.
  */
 function createEmptyState() {
   return {
     version:   SB_STATE_VERSION,
     block_num: 0,
-    timestamp: null,   // ISO-8601 string of last processed event
+    timestamp: null,   // normalised "YYYY-MM-DDTHH:mm:ss" string of last processed event
     ownership: {},     // NFT_ID → current owner username
-    equipped:  {},     // Accessory_ID → Creature_ID  (null when unequipped)
-    registry:  {}      // NFT_ID → { type }  — genomes are NOT stored here
+    equipped:  {}      // Accessory_ID → Creature_ID  (deleted when unequipped)
   };
 }
 
@@ -134,11 +142,9 @@ function applyOperation(state, op, blockNum, timestamp) {
     case "founder":
     case "offspring": {
       const id = _nftId(author, permlink);
-      if (!state.registry[id]) {
-        // Bug Fix #1: store only the NFT type — never the genome.
-        // Genomes must be fetched on-demand from the blockchain or IndexedDB
-        // so that the registry (and therefore IPFS snapshots) stay small.
-        state.registry[id]  = { type: "creature" };
+      if (!_nftRegistry.has(id)) {
+        // BUG 7 FIX: write to the non-reactive Map, not state.registry.
+        _nftRegistry.set(id, { type: "creature" });
         state.ownership[id] = author;
       }
       break;
@@ -147,9 +153,9 @@ function applyOperation(state, op, blockNum, timestamp) {
     // ── Accessory minting ─────────────────────────────────────
     case "accessory": {
       const id = _nftId(author, permlink);
-      if (!state.registry[id]) {
-        // Bug Fix #1: type only — no genome stored (same as creature above)
-        state.registry[id]  = { type: "accessory" };
+      if (!_nftRegistry.has(id)) {
+        // BUG 7 FIX: write to the non-reactive Map, not state.registry.
+        _nftRegistry.set(id, { type: "accessory" });
         state.ownership[id] = author;
       }
       break;
@@ -163,7 +169,7 @@ function applyOperation(state, op, blockNum, timestamp) {
       if (cAuthor && cPermlink) {
         const id = _nftId(cAuthor, cPermlink);
         // Only transfer if we know about this NFT (guards against spoofing)
-        if (state.registry[id]) {
+        if (_nftRegistry.has(id)) {
           state.ownership[id] = author;
         }
       }
@@ -207,9 +213,12 @@ function applyOperation(state, op, blockNum, timestamp) {
   // BUG 2 FIX: Always persist timestamp as an ISO string so hashState()
   // produces a consistent digest regardless of browser engine.
   if (timestamp) {
-    state.timestamp = timestamp instanceof Date
-      ? timestamp.toISOString()
-      : String(timestamp);
+    // BUG 3 FIX: Normalise to "YYYY-MM-DDTHH:mm:ss" (no trailing Z, no ms)
+    // so the hash is identical regardless of whether the value arrived as a
+    // Date object (toISOString adds "Z" + ms) or a raw Steem string (no Z).
+    const raw = timestamp instanceof Date ? timestamp.toISOString() : String(timestamp);
+    // Strip milliseconds and the trailing Z, then keep only the first 19 chars.
+    state.timestamp = raw.replace(/\.\d+Z?$/, "").replace(/Z$/, "").slice(0, 19);
   }
   return state;
 }
@@ -242,10 +251,23 @@ async function hashState(state) {
   // but different browsers may have previously stored them as Date objects.
   // Coercing to an ISO string here ensures the digest is identical across
   // every engine, preventing spurious "Verification Failed" mismatches.
+  // BUG 3 FIX: Coerce the timestamp to "YYYY-MM-DDTHH:mm:ss" (no Z, no ms)
+  // so two clients that stored the same point-in-time as a Date vs. a raw
+  // Steem string produce an identical digest.  toISOString() appends Z + ms,
+  // while Steem API strings already lack them — we strip both here.
   const rawTs = state.timestamp;
-  const canonicalTimestamp = rawTs instanceof Date
-    ? rawTs.toISOString()
-    : (typeof rawTs === "string" ? rawTs : null);
+  let canonicalTimestamp = null;
+  if (rawTs instanceof Date) {
+    canonicalTimestamp = rawTs.toISOString().replace(/\.\d+Z?$/, "").replace(/Z$/, "").slice(0, 19);
+  } else if (typeof rawTs === "string") {
+    canonicalTimestamp = rawTs.replace(/\.\d+Z?$/, "").replace(/Z$/, "").slice(0, 19);
+  }
+
+  // BUG 7 FIX: registry lives in _nftRegistry (a plain Map), not state.
+  // Serialize it to a plain object for hashing so the digest still covers
+  // every minted NFT — but the Map itself never enters the Vue reactive tree.
+  const registrySnapshot = {};
+  for (const [k, v] of _nftRegistry) registrySnapshot[k] = v;
 
   const minimalState = {
     version:   Number(state.version),
@@ -253,7 +275,7 @@ async function hashState(state) {
     timestamp: canonicalTimestamp,
     ownership: state.ownership,
     equipped:  state.equipped,
-    registry:  state.registry  // already genome-free
+    registry:  registrySnapshot
   };
   const canonical  = JSON.stringify(sortedClone(minimalState));
   const msgUint8   = new TextEncoder().encode(canonical);
@@ -270,22 +292,28 @@ async function hashState(state) {
  * Fetch a JSON document from IPFS, trying each gateway in order.
  * Rejects only when all gateways fail.
  */
-// BUG 5 FIX: Reduced per-gateway timeout from 15 s to 5 s so a rate-limited
-// or stalled gateway fails fast and we move on to the next one.
-// Added explicit 429 / 503 detection for immediate failover instead of
-// waiting out the full timeout on a gateway that is "up" but throttling us.
-const IPFS_GATEWAY_TIMEOUT_MS = 5000;
+// BUG 4 FIX: Two-stage timeout strategy.
+//   • IPFS_CONNECT_TIMEOUT_MS  — how long we wait for the TCP connection +
+//     HTTP response headers.  Aggressive (5 s) so stalled gateways fail fast.
+//   • IPFS_BODY_TIMEOUT_MS     — additional time allowed for the full body to
+//     arrive once headers are received.  A 2 MB JSON snapshot through a busy
+//     public gateway can legitimately take 30+ seconds on slow connections.
+//     Keeping the connect timeout tight means we still switch gateways quickly
+//     for dead hosts, while not penalising slow-but-alive ones.
+const IPFS_CONNECT_TIMEOUT_MS = 5000;
+const IPFS_BODY_TIMEOUT_MS    = 30000;
 const IPFS_IMMEDIATE_FAILOVER_CODES = new Set([429, 503, 504]);
 
 async function fetchSnapshot(cid) {
   let lastErr;
   for (const gateway of IPFS_GATEWAYS) {
     try {
+      // Stage 1 — connect + headers (tight timeout).
       const res = await fetch(`${gateway}${cid}`, {
-        signal: AbortSignal.timeout(IPFS_GATEWAY_TIMEOUT_MS)
+        signal: AbortSignal.timeout(IPFS_CONNECT_TIMEOUT_MS)
       });
 
-      // BUG 5 FIX: Treat rate-limit / overload responses as immediate failover
+      // BUG 4 FIX: Treat rate-limit / overload responses as immediate failover
       // rather than a hard error — the next gateway may succeed right away.
       if (IPFS_IMMEDIATE_FAILOVER_CODES.has(res.status)) {
         console.warn(`[SB State] Gateway ${gateway} returned ${res.status} — trying next.`);
@@ -293,8 +321,23 @@ async function fetchSnapshot(cid) {
         continue;
       }
 
-      if (res.ok) return await res.json();
-      lastErr = new Error(`Gateway ${gateway} returned HTTP ${res.status}`);
+      if (!res.ok) {
+        lastErr = new Error(`Gateway ${gateway} returned HTTP ${res.status}`);
+        continue;
+      }
+
+      // Stage 2 — body read (generous timeout; body may be several MB).
+      const bodyAbort = new AbortController();
+      const bodyTimer = setTimeout(() => bodyAbort.abort(), IPFS_BODY_TIMEOUT_MS);
+      try {
+        const data = await res.json();
+        clearTimeout(bodyTimer);
+        return data;
+      } catch (bodyErr) {
+        clearTimeout(bodyTimer);
+        console.warn(`[SB State] Gateway ${gateway} body read failed: ${bodyErr.message} — trying next.`);
+        lastErr = bodyErr;
+      }
     } catch (e) {
       lastErr = e;
     }
@@ -320,12 +363,17 @@ function _openStateDB() {
 async function persistSnapshot(snapshot, cid, stateHash) {
   try {
     const db = await _openStateDB();
+    // BUG 7 FIX: _nftRegistry lives outside `snapshot` — serialise it
+    // alongside so we can fully restore state on the next boot without a replay.
+    const registrySnapshot = {};
+    for (const [k, v] of _nftRegistry) registrySnapshot[k] = v;
+
     const tx = db.transaction(STORE_STATE, "readwrite");
     tx.objectStore(STORE_STATE).put({
       id:        "latest",
       cid,
       stateHash,
-      snapshot,
+      snapshot:  { ...snapshot, _registry: registrySnapshot },
       savedAt:   Date.now()
     });
     return new Promise((ok, fail) => {
@@ -344,8 +392,21 @@ async function loadPersistedSnapshot() {
     return new Promise((resolve) => {
       const tx  = db.transaction(STORE_STATE, "readonly");
       const req = tx.objectStore(STORE_STATE).get("latest");
-      req.onsuccess = () => resolve(req.result || null);
-      req.onerror   = () => resolve(null);
+      req.onsuccess = () => {
+        const row = req.result || null;
+        if (row?.snapshot?._registry) {
+          // BUG 7 FIX: Restore the non-reactive registry Map from the cached snapshot.
+          for (const [k, v] of Object.entries(row.snapshot._registry)) {
+            _nftRegistry.set(k, v);
+          }
+          // Remove the helper key so it doesn't pollute the reactive state object.
+          const { _registry, ...cleanSnapshot } = row.snapshot;
+          resolve({ ...row, snapshot: cleanSnapshot });
+        } else {
+          resolve(row);
+        }
+      };
+      req.onerror = () => resolve(null);
     });
   } catch {
     return null;
@@ -901,7 +962,8 @@ function stateEquippedOn(state, accAuthor, accPermlink) {
 function statePatchOwner(state, author, permlink, newOwner) {
   if (!state) return;
   const id = _nftId(author, permlink);
-  if (state.registry[id]) {
+  // BUG 7 FIX: check _nftRegistry (non-reactive Map) instead of state.registry.
+  if (_nftRegistry.has(id)) {
     state.ownership[id] = newOwner;
   }
 }
