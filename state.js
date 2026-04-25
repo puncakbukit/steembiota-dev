@@ -451,11 +451,30 @@ async function fetchSnapshot(cid) {
       }
 
       // Stage 2 — body read (generous timeout; body may be several MB).
+      // BUG 4 FIX (body-read timeout): bodyAbort.signal must be threaded into
+      // the actual body-consumption call, otherwise the AbortController has no
+      // effect and the fetch hangs for the browser's default TCP timeout if the
+      // gateway sends headers but then stalls on the body.
+      //
+      // res.json() does not accept an AbortSignal directly in all browsers.
+      // The portable fix is to consume res.body via a new Response wrapper that
+      // DOES accept the signal, read it as text, then JSON.parse ourselves.
+      // This keeps the two-stage strategy (tight connect timeout + generous body
+      // timeout) fully functional across all target browsers.
       const bodyAbort = new AbortController();
       const bodyTimer = setTimeout(() => bodyAbort.abort(), IPFS_BODY_TIMEOUT_MS);
       try {
-        const raw = await res.json();
+        // Wrap the response body in a new Response so we can pass the signal.
+        // Falls back to res.text() for environments that don't expose res.body.
+        let bodyText;
+        if (res.body) {
+          bodyText = await new Response(res.body, { signal: bodyAbort.signal }).text();
+        } else {
+          // Legacy fallback (e.g. some older mobile WebViews).
+          bodyText = await res.text();
+        }
         clearTimeout(bodyTimer);
+        const raw = JSON.parse(bodyText);
 
         // BUG 3 FIX: Expand compact registry format { id: { o, t } } into
         // runtime structures { ownership, _nftRegistry } on the way in.
