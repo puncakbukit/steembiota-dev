@@ -427,6 +427,19 @@ function _makeTimeoutSignal(ms) {
   };
 }
 
+/**
+ * Detect whether a snapshot registry is in compact format:
+ *   { id: { t: "c"|"a", o?: "owner" } }
+ * vs legacy split format:
+ *   { id: { type: "creature"|"accessory" } }
+ */
+function _isCompactRegistry(registry) {
+  if (!registry || typeof registry !== "object") return false;
+  const values = Object.values(registry);
+  if (values.length === 0) return false;
+  return values.some(v => v && typeof v === "object" && ("t" in v || "o" in v));
+}
+
 async function fetchSnapshot(cid) {
   let lastErr;
   for (const gateway of IPFS_GATEWAYS) {
@@ -466,14 +479,15 @@ async function fetchSnapshot(cid) {
         // runtime structures { ownership, _nftRegistry } on the way in.
         // Also handle old-format snapshots ({ ownership, registry: { type } })
         // so stale IPFS-pinned files are never silently discarded.
-        const hasOwnershipMap = !!raw.ownership && Object.keys(raw.ownership).length > 0;
-        if (raw.registry && !hasOwnershipMap) {
-          // New compact format — expand into runtime ownership map.
+        if (raw.registry && _isCompactRegistry(raw.registry)) {
+          // Compact format (with or without an explicit ownership map) —
+          // always merge ownership from registry.o fields so profile ownership
+          // never disappears when snapshots include both shapes.
           const ownership = { ...(raw.ownership || {}) };
           for (const [k, v] of Object.entries(raw.registry)) {
-            const type = v.t === "a" ? "accessory" : "creature";
+            const type = v?.t === "a" ? "accessory" : "creature";
             _nftRegistry.set(k, { type });
-            if (v.o) ownership[k] = _normUser(v.o);
+            if (v?.o) ownership[k] = _normUser(v.o);
           }
           return {
             version:   raw.version,
@@ -581,15 +595,15 @@ async function loadPersistedSnapshot() {
         // BUG 3 FIX: Support both the new compact { registry: { o, t } } format
         // and the old { ownership, _registry } split format so existing cached
         // snapshots are not silently discarded after the upgrade.
-        const hasOwnershipMap = !!snap.ownership && Object.keys(snap.ownership).length > 0;
-        if (snap.registry && !snap._registry && !hasOwnershipMap) {
-          // New compact format — expand back into runtime structures.
+        if (snap.registry && !snap._registry && _isCompactRegistry(snap.registry)) {
+          // Compact format (with or without ownership map) — expand back into
+          // runtime structures and merge ownership from registry.o fields.
           const ownership = { ...(snap.ownership || {}) };
           const sortedEntries = Object.entries(snap.registry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
           for (const [k, v] of sortedEntries) {
-            const type = v.t === "a" ? "accessory" : "creature";
+            const type = v?.t === "a" ? "accessory" : "creature";
             _nftRegistry.set(k, { type });
-            if (v.o) ownership[k] = _normUser(v.o);
+            if (v?.o) ownership[k] = _normUser(v.o);
           }
           const cleanSnap = { version: snap.version, block_num: snap.block_num, timestamp: snap.timestamp, ownership, equipped: snap.equipped || {} };
           resolve({ ...row, snapshot: cleanSnap });
@@ -1243,6 +1257,57 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
           status(`🔍 Wear genesis replay done — ${Object.keys(currentState.equipped).length} accessory/creature pair(s) found.`);
         } catch (e) {
           console.warn("[SB State] Wear genesis replay failed (non-fatal):", e);
+        }
+
+        // BUG FIX 8 — Fallback reply crawl by NFT roots when equipped is still empty.
+        //
+        // Some wear_on / wear_off authors never appear in our account-history
+        // discovery set (e.g. transient owners who only ever replied on NFT posts
+        // and never authored top-level steembiota content). In that case
+        // _fetchReplyOpsSince() can miss their account histories, leaving equipped
+        // permanently empty even though replies exist on-chain.
+        //
+        // Fallback strategy: walk replies directly from every known NFT root
+        // post (ownership keys already tell us author/permlink), then replay only
+        // wear_on / wear_off operations found in those reply trees. This is slower
+        // than account-history scanning, so we run it only when the primary replay
+        // still yields zero equips.
+        if (Object.keys(currentState.equipped || {}).length === 0) {
+          status("🧭 No wear events found via account history — crawling NFT reply trees…");
+          try {
+            const wearOps = [];
+            const nftIds = Object.keys(currentState.ownership || {});
+            await Promise.allSettled(nftIds.map(async (id) => {
+              const [rootAuthor, rootPermlink] = String(id).split("/");
+              if (!rootAuthor || !rootPermlink) return;
+              const replies = await fetchAllReplies(rootAuthor, rootPermlink);
+              for (const r of (Array.isArray(replies) ? replies : [])) {
+                let m;
+                try {
+                  const parsed = typeof r.json_metadata === "string"
+                    ? JSON.parse(r.json_metadata || "{}")
+                    : (r.json_metadata || {});
+                  m = parsed.steembiota;
+                } catch {
+                  continue;
+                }
+                if (!m || (m.type !== "wear_on" && m.type !== "wear_off")) continue;
+                wearOps.push(r);
+              }
+            }));
+
+            wearOps.sort((a, b) => new Date(a.created) - new Date(b.created));
+            for (const op of wearOps) {
+              const opBlockNum = Number.isInteger(op.block_num) && op.block_num > 0
+                ? op.block_num
+                : (Number.isInteger(op.block) && op.block > 0 ? op.block : 0);
+              try { applyOperation(currentState, op, opBlockNum, op.created); } catch {}
+            }
+
+            status(`🧭 NFT reply crawl done — ${Object.keys(currentState.equipped).length} accessory/creature pair(s) found.`);
+          } catch (e) {
+            console.warn("[SB State] NFT reply crawl for wear replay failed (non-fatal):", e);
+          }
         }
       }
     } catch (e) {
