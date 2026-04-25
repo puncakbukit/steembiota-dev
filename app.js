@@ -4524,11 +4524,36 @@ const App = {
         if (_bootChannel) {
           _bootChannel.addEventListener("message", _onMessage);
         } else {
-          // BroadcastChannel not available (e.g. some private-mode browsers):
-          // fall back to polling localStorage for the lock to disappear.
+          // BUG 5 FIX (Cross-Tab Sync): Prefer the storage event over polling.
+          // When Tab A finishes bootstrapping it calls _releaseBootLock(), which
+          // removes the "sb_booting" key from localStorage.  This fires a
+          // "storage" event in all other same-origin tabs — exactly when Tab B
+          // should wake up and read the freshly written IndexedDB snapshot.
+          // This is more efficient than a 500 ms polling interval and reacts
+          // instantly rather than up to 500 ms late.
+          let _storageHandled = false;
+          const _onStorage = async (e) => {
+            if (e.key !== BOOT_LOCK_KEY || e.newValue !== null) return; // only fires on removal
+            if (_storageHandled) return;
+            _storageHandled = true;
+            window.removeEventListener("storage", _onStorage);
+            try {
+              const persisted = await loadPersistedSnapshot();
+              if (persisted?.snapshot) globalState.value = { ...persisted.snapshot };
+            } catch {}
+            stateReady.value = true;
+            syncStatus.value = "✅ State synchronised from primary tab.";
+          };
+          window.addEventListener("storage", _onStorage);
+
+          // Belt-and-suspenders: if the storage event is missed (e.g. the primary
+          // tab crashed before releasing the lock), fall back to polling.
           const _pollTimer = setInterval(async () => {
             if (localStorage.getItem(BOOT_LOCK_KEY)) return; // still running
             clearInterval(_pollTimer);
+            if (_storageHandled) return; // storage event already handled it
+            _storageHandled = true;
+            window.removeEventListener("storage", _onStorage);
             try {
               const persisted = await loadPersistedSnapshot();
               if (persisted?.snapshot) globalState.value = { ...persisted.snapshot };
