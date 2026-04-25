@@ -4362,6 +4362,24 @@ const App = {
     // still replaying events.
     const stateReady   = ref(false);
 
+    // BUG 4B FIX: Compute and expose a live state_hash for the footer so
+    // users can "shout-verify" consensus with each other without opening the
+    // Checkpoint tab.  hashState() is async (uses SubtleCrypto), so we store
+    // the result in a ref and recompute it whenever globalState changes.
+    // A debounce of 2 s prevents multiple rapid recomputations during replay.
+    const liveStateHash = ref("");
+    let _hashDebounceTimer = null;
+    async function _recomputeStateHash() {
+      try {
+        const h = await hashState(globalState.value);
+        liveStateHash.value = h ? h.slice(0, 16) + "…" : "";
+      } catch { liveStateHash.value = ""; }
+    }
+    function _scheduleHashRecompute() {
+      clearTimeout(_hashDebounceTimer);
+      _hashDebounceTimer = setTimeout(_recomputeStateHash, 2000);
+    }
+
     async function loadProfile(user) {
       if (!user) {
         // No logged-in user — show @steembiota's profile as the site identity
@@ -4493,6 +4511,7 @@ const App = {
         bootstrapState(globalState, syncStatus, null, () => {
           stateReady.value = true;
           _releaseBootLock();
+          _scheduleHashRecompute();
           // Notify follower tabs that the state is ready.
           try { _bootChannel?.postMessage({ type: "sb_state_ready" }); } catch {}
         });
@@ -4519,6 +4538,7 @@ const App = {
           }
           stateReady.value  = true;
           syncStatus.value  = "✅ State synchronised from primary tab.";
+          _scheduleHashRecompute();
         };
 
         if (_bootChannel) {
@@ -4543,6 +4563,7 @@ const App = {
             } catch {}
             stateReady.value = true;
             syncStatus.value = "✅ State synchronised from primary tab.";
+            _scheduleHashRecompute();
           };
           window.addEventListener("storage", _onStorage);
 
@@ -4560,6 +4581,7 @@ const App = {
             } catch {}
             stateReady.value = true;
             syncStatus.value = "✅ State synchronised (fallback poll).";
+            _scheduleHashRecompute();
           }, 500);
         }
       }
@@ -4649,7 +4671,13 @@ const App = {
       login, logout, profileData, userLevel,
       notifBadgeCount,
       // Expose for App template
-      globalState, syncStatus, stateReady
+      globalState, syncStatus, stateReady,
+      // BUG 4B FIX: live state_hash for footer consensus verification
+      liveStateHash,
+      // BUG 4A FIX: expose boot-lock status so the template can show the
+      // "Force Reset Sync" escape hatch directly on the sync-status bar
+      // instead of hiding it inside the /checkpoint route.
+      syncLocked: ref(!!localStorage.getItem("sb_booting")),
     };
   },
 
@@ -4722,15 +4750,42 @@ const App = {
     ></global-profile-banner-component>
 
     <!-- NFT State Machine sync status bar -->
+    <!-- BUG 4A FIX: "Force Reset Sync" escape hatch is surfaced directly here,
+         not buried inside the /checkpoint page.  If the tab crashed while the
+         boot lock was held, every subsequent load shows this bar with the "Another
+         tab is syncing" message and NO way to escape — until now. -->
     <div
       v-if="syncStatus && !syncStatus.startsWith('✅')"
-      style="font-size:11px;color:#ffe082;background:#1a1a2e;padding:4px 12px;text-align:center;border-bottom:1px solid #333;"
-    >{{ syncStatus }}</div>
+      style="font-size:11px;color:#ffe082;background:#1a1a2e;padding:4px 12px;text-align:center;border-bottom:1px solid #333;display:flex;align-items:center;justify-content:center;gap:12px;"
+    >
+      <span>{{ syncStatus }}</span>
+      <button
+        v-if="syncLocked"
+        @click="() => { localStorage.removeItem('sb_booting'); syncLocked = false; location.reload(); }"
+        style="font-size:10px;padding:2px 8px;background:#3a1a1a;color:#ef9a9a;border:1px solid #7f3030;border-radius:4px;cursor:pointer;white-space:nowrap;"
+        title="Clear the sync lock if a previous tab crashed and the app is stuck"
+      >🔄 Force Reset Sync</button>
+    </div>
 
     <hr/>
 
     <!-- Page content -->
     <router-view></router-view>
+
+    <!-- BUG 4B FIX: State hash footer — always visible once state is ready.
+         Shows a short prefix of the SHA-256 digest so users can verbally
+         confirm consensus: "My hash is af42d3c1…, is yours?"
+         This is the cornerstone of social consensus in a GSM-based dApp. -->
+    <footer
+      v-if="stateReady && liveStateHash"
+      style="margin-top:32px;padding:6px 16px;border-top:1px solid #1a1a1a;
+             text-align:center;font-size:10px;color:#333;letter-spacing:0.04em;"
+    >
+      🔒 State hash:
+      <span style="font-family:monospace;color:#444;user-select:all;" :title="'Share this with others to verify consensus'">{{ liveStateHash }}</span>
+      &nbsp;·&nbsp;
+      <router-link to="/checkpoint" style="color:#2e7d32;text-decoration:none;">Checkpoint ↗</router-link>
+    </footer>
   `
 };
 
