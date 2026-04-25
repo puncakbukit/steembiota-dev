@@ -1940,8 +1940,9 @@ const ProfileView = {
         // Each key in gs.ownership is "author/permlink"; value is the owner.
         let ownedIds = [];
         if (gs && gs.ownership) {
+          const normUser = String(user || "").replace(/^@+/, "").trim().toLowerCase();
           ownedIds = Object.entries(gs.ownership)
-            .filter(([, owner]) => owner === user)
+            .filter(([, owner]) => String(owner || "").replace(/^@+/, "").trim().toLowerCase() === normUser)
             .map(([id]) => id);
         }
 

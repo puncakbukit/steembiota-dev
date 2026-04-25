@@ -104,6 +104,11 @@ function _nftId(author, permlink) {
   return `${String(author).toLowerCase()}/${String(permlink).toLowerCase()}`;
 }
 
+/** Normalise a Steem username for deterministic state comparisons. */
+function _normUser(username) {
+  return String(username || "").replace(/^@+/, "").trim().toLowerCase();
+}
+
 /**
  * Apply a single SteemBiota operation to `state` (mutates in-place).
  *
@@ -148,7 +153,7 @@ function applyOperation(state, op, blockNum, timestamp) {
       const id = _nftId(author, permlink);
       if (!_nftRegistry.has(id)) {
         _nftRegistry.set(id, { type: "creature" });
-        state.ownership[id] = author;
+        state.ownership[id] = _normUser(author);
       } else {
         // BUG FIX 2A: Update a synthetic placeholder created by an earlier
         // transfer_accept that arrived before this mint post was replayed.
@@ -157,7 +162,7 @@ function applyOperation(state, op, blockNum, timestamp) {
         if (entry._synthetic) {
           _nftRegistry.set(id, { type: "creature" });
           // Only set ownership to the minting author if no transfer has claimed it yet.
-          if (!state.ownership[id]) state.ownership[id] = author;
+          if (!state.ownership[id]) state.ownership[id] = _normUser(author);
         }
       }
       break;
@@ -168,13 +173,13 @@ function applyOperation(state, op, blockNum, timestamp) {
       const id = _nftId(author, permlink);
       if (!_nftRegistry.has(id)) {
         _nftRegistry.set(id, { type: "accessory" });
-        state.ownership[id] = author;
+        state.ownership[id] = _normUser(author);
       } else {
         // BUG FIX 2A: Same synthetic-placeholder correction for accessories.
         const entry = _nftRegistry.get(id);
         if (entry._synthetic) {
           _nftRegistry.set(id, { type: "accessory" });
-          if (!state.ownership[id]) state.ownership[id] = author;
+          if (!state.ownership[id]) state.ownership[id] = _normUser(author);
         }
       }
       break;
@@ -221,7 +226,7 @@ function applyOperation(state, op, blockNum, timestamp) {
         // unconditionally, meaning accessories were wiped on every transfer and
         // `equipped` stayed perpetually empty when bootstrapping from history.
         const previousOwner = state.ownership[id];
-        state.ownership[id] = author;
+        state.ownership[id] = _normUser(author);
 
         // Only unequip accessories that belonged to the *previous* owner.
         // Accessories already owned by the new owner (e.g. they previously
@@ -468,7 +473,7 @@ async function fetchSnapshot(cid) {
           for (const [k, v] of Object.entries(raw.registry)) {
             const type = v.t === "a" ? "accessory" : "creature";
             _nftRegistry.set(k, { type });
-            if (v.o) ownership[k] = v.o;
+            if (v.o) ownership[k] = _normUser(v.o);
           }
           return {
             version:   raw.version,
@@ -584,7 +589,7 @@ async function loadPersistedSnapshot() {
           for (const [k, v] of sortedEntries) {
             const type = v.t === "a" ? "accessory" : "creature";
             _nftRegistry.set(k, { type });
-            if (v.o) ownership[k] = v.o;
+            if (v.o) ownership[k] = _normUser(v.o);
           }
           const cleanSnap = { version: snap.version, block_num: snap.block_num, timestamp: snap.timestamp, ownership, equipped: snap.equipped || {} };
           resolve({ ...row, snapshot: cleanSnap });
@@ -926,7 +931,7 @@ async function _fetchAllPostsSince(sinceDate) {
 // so unrelated ops are not re-processed a second time.
 async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes = null) {
   // Always include the canonical account; deduplicate the rest.
-  const accounts = [...new Set([CHECKPOINT_AUTHOR, ...communityAuthors])];
+  const accounts = [...new Set([CHECKPOINT_AUTHOR, ...communityAuthors].map(_normUser).filter(Boolean))];
   const REPLY_TYPES = filterTypes instanceof Set
     ? filterTypes
     : new Set(["transfer_accept", "feed", "wear_on", "wear_off"]);
@@ -1142,7 +1147,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     //       even if they haven't posted anything recently.
     // Source (c) is done without a date cutoff so it covers all-time participants.
     const ownerAuthors = currentState
-      ? [...new Set(Object.values(currentState.ownership))]
+      ? [...new Set(Object.values(currentState.ownership).map(_normUser).filter(Boolean))]
       : [];
 
     // Source (b): extract owners from the compact registry if the snapshot was
@@ -1154,15 +1159,15 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     const registryAuthors = [];
     if (snapshot && snapshot.registry && typeof snapshot.registry === "object") {
       for (const entry of Object.values(snapshot.registry)) {
-        if (entry && entry.o) registryOwners.push(entry.o);
+        if (entry && entry.o) registryOwners.push(_normUser(entry.o));
       }
     }
     // Also harvest from the live _nftRegistry map (populated during snapshot load).
     for (const owner of Object.values(currentState.ownership || {})) {
-      if (owner) registryOwners.push(owner);
+      if (owner) registryOwners.push(_normUser(owner));
     }
     for (const id of _nftRegistry.keys()) {
-      const author = String(id).split("/")[0];
+      const author = _normUser(String(id).split("/")[0]);
       if (author) registryAuthors.push(author);
     }
 
@@ -1196,7 +1201,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
         ...ownerAuthors,
         ...registryOwners,
         ...registryAuthors
-      ])];
+      ].map(_normUser).filter(Boolean))];
       const replies = await _fetchReplyOpsSince(cutoff, allAuthors);
       rawPosts = [...topLevel, ...replies];
 
@@ -1210,8 +1215,8 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
       // historical wear events remain permanently lost — they are "inside" the
       // snapshot but the snapshot recorded them as empty.
       //
-      // Fix: when a snapshot is present (cutoff !== null) AND its equipped map
-      // is empty while its ownership map is non-empty (i.e. there are NFTs that
+      // Fix: whenever the equipped map is empty while ownership is non-empty
+      // (i.e. there are NFTs that could plausibly be wearing something),
       // could plausibly be wearing something), wipe equipped and do a FULL
       // genesis replay of ONLY the wear_on/wear_off event types.  This is cheap
       // because we already have allAuthors computed and _fetchReplyOpsSince
@@ -1223,7 +1228,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
       // equipped map is reset and rebuilt from scratch.
       const snapshotHasNFTs = Object.keys(currentState.ownership || {}).length > 0;
       const snapshotEquippedEmpty = Object.keys(currentState.equipped || {}).length === 0;
-      if (cutoff && snapshotHasNFTs && snapshotEquippedEmpty) {
+      if (snapshotHasNFTs && snapshotEquippedEmpty) {
         status("🔍 Equipped map appears empty — replaying all wear events from genesis…");
         try {
           const wearReplies = await _fetchReplyOpsSince(null, allAuthors, new Set(["wear_on", "wear_off"]));
@@ -1374,7 +1379,7 @@ function statePatchOwner(state, author, permlink, newOwner) {
   const id = _nftId(author, permlink);
   // BUG 7 FIX: check _nftRegistry (non-reactive Map) instead of state.registry.
   if (_nftRegistry.has(id)) {
-    state.ownership[id] = newOwner;
+    state.ownership[id] = _normUser(newOwner);
   }
 }
 
