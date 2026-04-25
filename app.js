@@ -1841,6 +1841,31 @@ const ProfileView = {
         ]);
       }
     },
+    // BUG FIX (Profile creatures missing): ProfileView.created() fires before
+    // bootstrapState() has finished, so globalState.ownership is still {} when
+    // loadCreatures() runs for the first time.  The fast-path guard
+    // (gs.ownership.length > 0) fails, the GSM-driven fetch finds 0 owned IDs,
+    // and no retry is ever scheduled — leaving the creatures list permanently
+    // empty even after the GSM finishes syncing.
+    //
+    // Fix: watch stateReady (injected from the App).  The moment it flips to
+    // true the GSM is fully populated, so we re-run loadCreatures for the
+    // currently displayed user.  The generation counter inside
+    // refreshCreaturesFromGSM prevents any race with an in-flight earlier call.
+    stateReady: {
+      immediate: false,
+      async handler(ready) {
+        if (!ready) return;
+        const user = this.$route.params.user;
+        if (!user) return;
+        // Only re-load if the creatures list is still empty — if the fast path
+        // already succeeded (e.g. GSM was ready by the time created() ran on a
+        // warm page load) we don't want to flash an empty state.
+        if (this.creatures.length === 0) {
+          await this.loadCreatures(user);
+        }
+      }
+    },
     filterGenus()    { this.crePage = 1; },
     filterSex()      { this.crePage = 1; },
     filterAgeOp()    { this.crePage = 1; },
@@ -4765,6 +4790,12 @@ const App = {
     // BUG 6 FIX: expose stateReady so child views can conditionally render
     // a skeleton loader instead of stale/empty ownership data.
     provide("stateReady",     stateReady);
+    // BUG FIX (Sync lock never clears): expose the reactive lock refs and the
+    // single authoritative reset function so CheckpointManager no longer needs
+    // its own stale localStorage snapshot or its own duplicate reset logic.
+    provide("syncLocked",          syncLocked);
+    provide("syncLockOwnedByMe",   syncLockOwnedByMe);
+    provide("forceResetSyncLock",  forceResetSyncLock);
 
     return {
       username, hasKeychain, keychainReady,
