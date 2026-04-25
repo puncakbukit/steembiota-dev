@@ -401,14 +401,41 @@ const IPFS_CONNECT_TIMEOUT_MS = 5000;
 const IPFS_BODY_TIMEOUT_MS    = 30000;
 const IPFS_IMMEDIATE_FAILOVER_CODES = new Set([429, 503, 504]);
 
+/**
+ * Build a timeout-backed AbortSignal with broad browser compatibility.
+ *
+ * Newer browsers support AbortSignal.timeout(ms); older mobile browsers do not.
+ * We feature-detect and fall back to an AbortController + setTimeout so
+ * snapshot bootstrap never hangs silently on legacy clients.
+ *
+ * @returns {{ signal: AbortSignal, cancel: Function }}
+ */
+function _makeTimeoutSignal(ms) {
+  if (typeof AbortSignal !== "undefined" && typeof AbortSignal.timeout === "function") {
+    return { signal: AbortSignal.timeout(ms), cancel: () => {} };
+  }
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  return {
+    signal: controller.signal,
+    cancel: () => clearTimeout(timer)
+  };
+}
+
 async function fetchSnapshot(cid) {
   let lastErr;
   for (const gateway of IPFS_GATEWAYS) {
     try {
       // Stage 1 — connect + headers (tight timeout).
-      const res = await fetch(`${gateway}${cid}`, {
-        signal: AbortSignal.timeout(IPFS_CONNECT_TIMEOUT_MS)
-      });
+      const connectTimeout = _makeTimeoutSignal(IPFS_CONNECT_TIMEOUT_MS);
+      let res;
+      try {
+        res = await fetch(`${gateway}${cid}`, {
+          signal: connectTimeout.signal
+        });
+      } finally {
+        connectTimeout.cancel();
+      }
 
       // BUG 4 FIX: Treat rate-limit / overload responses as immediate failover
       // rather than a hard error — the next gateway may succeed right away.
@@ -1382,6 +1409,7 @@ const CheckpointManager = {
     // subsequent tab reports "Another tab is syncing" until the 90-second
     // TTL expires — with no way to escape.
     forceResetSync() {
+      sessionStorage.setItem("sb_boot_force_takeover", "1");
       localStorage.removeItem("sb_booting");
       this.syncLocked = false;
       this.notify("Sync lock cleared — reloading…", "info");

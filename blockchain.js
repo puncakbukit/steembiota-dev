@@ -2661,8 +2661,18 @@ function openSBDB() {
       }
     };
 
-    request.onsuccess = (e) => resolve(e.target.result);
+    request.onsuccess = (e) => {
+      const db = e.target.result;
+      // Ensure this tab never blocks future upgrades from newer releases.
+      db.onversionchange = () => {
+        try { db.close(); } catch {}
+      };
+      resolve(db);
+    };
     request.onerror = (e) => reject(e.target.error);
+    request.onblocked = () => {
+      reject(new Error("IndexedDB upgrade blocked by another open tab"));
+    };
   });
 }
 

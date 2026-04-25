@@ -4488,9 +4488,10 @@ const App = {
       //   3. The lock is cleared in both the success and error paths so a crash
       //      never permanently locks out future boots.  We also treat a lock
       //      that is older than 90 seconds as stale (dead tab / hard-refresh).
-      const BOOT_LOCK_KEY     = "sb_booting";
-      const BOOT_LOCK_MAX_AGE = 90_000; // ms
-      const BOOT_TAB_ID_KEY   = "sb_boot_tab_id";
+      const BOOT_LOCK_KEY      = "sb_booting";
+      const BOOT_LOCK_MAX_AGE  = 90_000; // ms
+      const BOOT_TAB_ID_KEY    = "sb_boot_tab_id";
+      const BOOT_FORCE_KEY     = "sb_boot_force_takeover";
       const myBootTabId = (() => {
         let id = sessionStorage.getItem(BOOT_TAB_ID_KEY);
         if (!id) {
@@ -4515,10 +4516,12 @@ const App = {
       }
 
       function _acquireBootLock() {
+        const shouldForceTakeover = sessionStorage.getItem(BOOT_FORCE_KEY) === "1";
+        if (shouldForceTakeover) sessionStorage.removeItem(BOOT_FORCE_KEY);
         const existing = _readBootLock();
         if (existing) {
           const age = Date.now() - Number(existing.ts || 0);
-          if (age < BOOT_LOCK_MAX_AGE && existing.owner && existing.owner !== myBootTabId) {
+          if (!shouldForceTakeover && age < BOOT_LOCK_MAX_AGE && existing.owner && existing.owner !== myBootTabId) {
             return false; // another live tab holds the lock
           }
         }
@@ -4817,7 +4820,7 @@ const App = {
       <span>{{ syncStatus }}</span>
       <button
         v-if="syncLocked && !syncLockOwnedByMe"
-        @click="() => { localStorage.removeItem('sb_booting'); syncLocked = false; syncLockOwnedByMe = false; location.reload(); }"
+        @click="() => { sessionStorage.setItem('sb_boot_force_takeover', '1'); localStorage.removeItem('sb_booting'); syncLocked = false; syncLockOwnedByMe = false; location.reload(); }"
         style="font-size:10px;padding:2px 8px;background:#3a1a1a;color:#ef9a9a;border:1px solid #7f3030;border-radius:4px;cursor:pointer;white-space:nowrap;"
         title="Clear the sync lock if a previous tab crashed and the app is stuck"
       >🔄 Force Reset Sync</button>
