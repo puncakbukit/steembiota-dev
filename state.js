@@ -212,6 +212,16 @@ function applyOperation(state, op, blockNum, timestamp) {
           _nftRegistry.set(id, { type: "creature", _synthetic: true });
         }
         state.ownership[id] = author;
+
+        // BUG 4B FIX: Phantom Accessory — when a creature changes hands the
+        // old owner's accessories must not remain "stuck" on it.  Clear any
+        // equipped entries that reference this creature so accessories are
+        // effectively un-equipped on transfer.  The previous owner can re-equip
+        // them on one of their own creatures; the new owner starts with a clean
+        // slate.
+        for (const [aId, cId] of Object.entries(state.equipped)) {
+          if (cId === id) delete state.equipped[aId];
+        }
       }
       break;
     }
@@ -249,7 +259,15 @@ function applyOperation(state, op, blockNum, timestamp) {
       break;
   }
 
-  state.block_num = blockNum  || state.block_num;
+  // BUG 3 FIX: Only advance block_num when the incoming value is a positive
+  // integer.  Passing 0 (which happens when replaying posts via
+  // getDiscussionsByCreated, which never returns block numbers) previously
+  // reset the counter to 0 and kept it there forever, breaking recency scoring
+  // and making the system vulnerable to Sybil attacks.  When no block number is
+  // available, callers should rely on the timestamp as the height indicator.
+  if (blockNum && Number.isInteger(blockNum) && blockNum > 0) {
+    state.block_num = blockNum;
+  }
   // BUG 2 FIX: Always persist timestamp as an ISO string so hashState()
   // produces a consistent digest regardless of browser engine.
   if (timestamp) {
@@ -622,8 +640,14 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
     //          of /1e6) so every browser picks the same winning checkpoint
     //          regardless of floating-point rounding differences (Bug 2B).
     const rawRep = reputations[c._publisher] || 0;
+    // BUG 4C FIX: Math.log10 can produce slightly different results at the
+    // 15th decimal place across CPU architectures and JS engines (V8 vs
+    // SpiderMonkey).  Two clients could therefore compute different `rep`
+    // values and pick different winning checkpoints, forking the state.
+    // Fix: convert to an integer (× 1000, floored) before adding to the
+    // group score.  Both clients will always arrive at the same integer.
     const rep = rawRep > 0
-      ? Math.max(0, (Math.log10(rawRep) - 9) * 9 + 25)
+      ? Math.floor(Math.max(0, (Math.log10(rawRep) - 9) * 9 + 25) * 1000)
       : 0;
     // BUG FIX 2B: integer-only recency so V8 and SpiderMonkey agree exactly.
     const recency = Math.floor((c.block_num || 0) / 1000);
@@ -970,12 +994,23 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     // BUG FIX 1B: pass community authors so _fetchReplyOpsSince scans
     // ALL active accounts, not just @steembiota.  This captures
     // transfer_accept replies posted on non-canonical posts.
+    // BUG 2 FIX: communityAuthors (derived from top-level posts) misses users
+    // who own NFTs but haven't posted a new creature/accessory recently.
+    // Any such user can still perform wear_on/wear_off today, and we'd never
+    // scan their history.  Solution: also include every account that currently
+    // appears in the ownership map — they are the full set of users who can
+    // post reply-based operations against their NFTs.
+    const ownerAuthors = currentState
+      ? [...new Set(Object.values(currentState.ownership))]
+      : [];
     let rawPosts = [];
     try {
       const topLevel = await _fetchAllPostsSince(cutoff);
       // Derive the active community from the top-level posts we already fetched.
       const communityAuthors = [...new Set(topLevel.map(p => p.author))];
-      const replies = await _fetchReplyOpsSince(cutoff, communityAuthors);
+      // Merge with all known NFT owners so no wear_on/off is missed.
+      const allAuthors = [...new Set([...communityAuthors, ...ownerAuthors])];
+      const replies = await _fetchReplyOpsSince(cutoff, allAuthors);
       rawPosts = [...topLevel, ...replies];
     } catch (e) {
       console.warn("[SB State] Replay fetch failed:", e);
@@ -1184,7 +1219,15 @@ const CheckpointManager = {
         const hash      = await hashState(gs);
         this.hashPreview = hash.slice(0, 16) + "…";
 
-        const blob        = new Blob([JSON.stringify(gs, null, 2)], { type: "application/json" });
+        // BUG 1 FIX: merge the module-level _nftRegistry Map into the exported
+        // object.  The Proxy schema requires a `registry` key; JSON.stringify(gs)
+        // alone never includes it because _nftRegistry lives outside the reactive
+        // state ref to avoid Vue observer overhead (see § 2).
+        const registrySnapshot = {};
+        _nftRegistry.forEach((v, k) => { registrySnapshot[k] = v; });
+        const exportData = { ...gs, registry: registrySnapshot };
+
+        const blob        = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
         this.exportUrl   = URL.createObjectURL(blob);
         this.exportReady = true;
         this.statusDetail = `State hash: ${this.hashPreview}`;
@@ -1254,9 +1297,15 @@ const CheckpointManager = {
       try {
         const gs = this.globalState?.value || this.globalState || createEmptyState();
 
+        // BUG 1 FIX: same as generateExport — merge _nftRegistry into the
+        // payload so the Proxy's schema validation passes.
+        const registrySnapshot = {};
+        _nftRegistry.forEach((v, k) => { registrySnapshot[k] = v; });
+        const uploadData = { ...gs, registry: registrySnapshot };
+
         const response = await fetch("https://dark-limit-826f.john-smjth.workers.dev/", {
           method:  "POST",
-          body:    JSON.stringify(gs),
+          body:    JSON.stringify(uploadData),
           headers: { "Content-Type": "application/json" }
         });
 
