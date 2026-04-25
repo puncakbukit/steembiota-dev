@@ -5179,13 +5179,42 @@ const EquipPanelComponent = {
       // the first Steem block confirms the transaction.  We mitigate this by
       // disabling the Equip button for this accPermlink the moment we broadcast,
       // and clearing it once the callback fires (success or failure).
-      const accKey = `${accAuthor}/${accPermlink}`;
+      //
+      // BUG 3 FIX (Cross-Tab Double-Spend): window._sbPendingEquips only guards
+      // within the same JS context.  A second browser tab has its own window
+      // object and its own Set, so both tabs can pass the in-flight check
+      // simultaneously and broadcast two wear_on ops for the same accessory.
+      //
+      // Fix: Use the BroadcastChannel API (supported in all modern browsers) to
+      // notify every other same-origin tab the instant we claim an accessory.
+      // Other tabs listen on mount and add the accKey to their own local Set,
+      // preventing a second equip attempt even if the blockchain hasn't confirmed
+      // yet.  The claim is released (and a release message broadcast) when the
+      // Keychain callback fires, regardless of success or failure.
       if (!window._sbPendingEquips) window._sbPendingEquips = new Set();
+      if (!window._sbEquipChannel) {
+        try {
+          window._sbEquipChannel = new BroadcastChannel("sb_equip_lock");
+          window._sbEquipChannel.onmessage = (evt) => {
+            if (!window._sbPendingEquips) window._sbPendingEquips = new Set();
+            if (evt.data?.type === "claim"   && evt.data.key) window._sbPendingEquips.add(evt.data.key);
+            if (evt.data?.type === "release" && evt.data.key) window._sbPendingEquips.delete(evt.data.key);
+          };
+        } catch {
+          // BroadcastChannel not available (e.g. file:// origin in some browsers).
+          // Fall back gracefully — single-tab guard still applies.
+          window._sbEquipChannel = null;
+        }
+      }
+
+      const accKey = `${accAuthor}/${accPermlink}`;
       if (window._sbPendingEquips.has(accKey)) {
         this.$emit("notify", "A wear transaction for this accessory is already in progress — please wait.", "error");
         return;
       }
+      // Claim locally and broadcast to all other tabs before any async work.
       window._sbPendingEquips.add(accKey);
+      try { window._sbEquipChannel?.postMessage({ type: "claim", key: accKey }); } catch {}
 
       this.publishing = true;
 
@@ -5199,7 +5228,9 @@ const EquipPanelComponent = {
         accName,
         (res) => {
           this.publishing = false;
+          // Release the cross-tab lock regardless of success/failure.
           window._sbPendingEquips && window._sbPendingEquips.delete(accKey);
+          try { window._sbEquipChannel?.postMessage({ type: "release", key: accKey }); } catch {}
 
           if (res.success) {
             this.$emit("notify", `🧢 ${accName} equipped!`, "success");

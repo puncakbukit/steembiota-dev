@@ -948,11 +948,16 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = []) {
         if (!REPLY_TYPES.has(meta.type)) continue;
 
         // Build a synthetic post object compatible with applyOperation().
+        // BUG 2 FIX: getAccountHistory returns the block number in tx[1].block.
+        // Carry it through so applyOperation() can advance state.block_num
+        // correctly even for reply-based ops, preventing the "Block 0 Genesis
+        // Trap" where the state stays at block_num=0 after a genesis replay.
         accountResults.push({
           author:        opData.author        || "",
           permlink:      opData.permlink       || "",
           json_metadata: opData.json_metadata  || "{}",
-          created:       tx[1]?.timestamp      || new Date(0).toISOString()
+          created:       tx[1]?.timestamp      || new Date(0).toISOString(),
+          block_num:     tx[1]?.block          || 0
         });
       }
 
@@ -1084,16 +1089,71 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     // scan their history.  Solution: also include every account that currently
     // appears in the ownership map — they are the full set of users who can
     // post reply-based operations against their NFTs.
+    //
+    // BUG 1 FIX (Discovery Gap): When bootstrapping from genesis (block_num=0,
+    // empty ownership) ownerAuthors is [], and _fetchAllPostsSince only returns
+    // authors who posted a NEW creature/accessory since cutoff=null.  If all
+    // existing participants last posted before `cutoff` (or if there is no
+    // cutoff at all but the snapshot registry already lists owners), neither
+    // communityAuthors nor ownerAuthors will contain them.
+    //
+    // Fix: build a "known participants" set from THREE sources:
+    //   (a) owners already recorded in currentState.ownership (incremental replay)
+    //   (b) all "o" fields in the compact snapshot registry (genesis from snapshot)
+    //   (c) a full steembiota-tag scan (exhaustive, no date cutoff) so every
+    //       account that has ever posted a creature or accessory is included,
+    //       even if they haven't posted anything recently.
+    // Source (c) is done without a date cutoff so it covers all-time participants.
     const ownerAuthors = currentState
       ? [...new Set(Object.values(currentState.ownership))]
       : [];
+
+    // Source (b): extract owners from the compact registry if the snapshot was
+    // loaded in its raw compact form (e.g. from IPFS before expansion into
+    // _nftRegistry + ownership).  After loadPersistedSnapshot() the compact
+    // registry has already been expanded into _nftRegistry and ownership, so
+    // this mainly helps when `snapshot` came straight from fetchSnapshot().
+    const registryOwners = [];
+    if (snapshot && snapshot.registry && typeof snapshot.registry === "object") {
+      for (const entry of Object.values(snapshot.registry)) {
+        if (entry && entry.o) registryOwners.push(entry.o);
+      }
+    }
+    // Also harvest from the live _nftRegistry map (populated during snapshot load).
+    for (const owner of Object.values(currentState.ownership || {})) {
+      if (owner) registryOwners.push(owner);
+    }
+
     let rawPosts = [];
     try {
       const topLevel = await _fetchAllPostsSince(cutoff);
       // Derive the active community from the top-level posts we already fetched.
       const communityAuthors = [...new Set(topLevel.map(p => p.author))];
-      // Merge with all known NFT owners so no wear_on/off is missed.
-      const allAuthors = [...new Set([...communityAuthors, ...ownerAuthors])];
+
+      // Source (c): if we are doing a genesis bootstrap (no cutoff) OR if the
+      // merged author list is suspiciously small (< 3 unique accounts), perform
+      // an exhaustive all-time tag scan so we don't miss historical participants
+      // who haven't posted since `cutoff`.
+      let allTimeAuthors = [];
+      const isGenesis = !cutoff;
+      const mergedSoFar = new Set([...communityAuthors, ...ownerAuthors, ...registryOwners]);
+      if (isGenesis || mergedSoFar.size < 3) {
+        try {
+          status("🔍 Scanning all-time participants for reply discovery…");
+          const allTimePosts = await _fetchAllPostsSince(null); // no cutoff — all history
+          allTimeAuthors = [...new Set(allTimePosts.map(p => p.author))];
+        } catch (e) {
+          console.warn("[SB State] All-time tag scan failed (non-fatal):", e);
+        }
+      }
+
+      // Merge all four sources: recent creators + all-time creators + current owners + registry owners
+      const allAuthors = [...new Set([
+        ...communityAuthors,
+        ...allTimeAuthors,
+        ...ownerAuthors,
+        ...registryOwners
+      ])];
       const replies = await _fetchReplyOpsSince(cutoff, allAuthors);
       rawPosts = [...topLevel, ...replies];
     } catch (e) {
@@ -1117,16 +1177,39 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
         // when bootstrapping from genesis, causing the Proxy's isSaneBlock check
         // (block_num > MIN_BLOCK_NUM) to reject every state uploaded from scratch.
         // getDiscussionsByCreated returns a `block_num` field on each post;
-        // for reply-based synthetic ops we fall back to 0 (acceptable — those
-        // come from getAccountHistory which does carry a block number in
-        // tx[1].block, but we don't currently surface it through the synthetic
-        // post object, so timestamp ordering still applies correctly).
+        // for reply-based synthetic ops, BUG 2 FIX now surfaces tx[1].block
+        // through the synthetic post object's `block_num` field, so all paths
+        // correctly advance state.block_num.
         const postBlockNum = Number.isInteger(post.block_num) && post.block_num > 0
           ? post.block_num
           : (Number.isInteger(post.block) && post.block > 0 ? post.block : 0);
         applyOperation(currentState, post, postBlockNum, post.created);
         applied++;
       } catch { /* skip malformed posts */ }
+    }
+
+    // BUG 2 FIX (Block 0 Genesis Trap): If after a full genesis replay
+    // state.block_num is still 0 (e.g. all RPC nodes omit block_num from
+    // getDiscussionsByCreated AND there were no reply ops with block numbers),
+    // fetch the current Steem dynamic global properties and use the head block
+    // number as a lower-bound floor.  This guarantees the Proxy's MIN_BLOCK_NUM
+    // check passes for any valid live-chain bootstrap.
+    if (!currentState.block_num || currentState.block_num === 0) {
+      try {
+        const dgpo = await new Promise((resolve, reject) => {
+          steem.api.getDynamicGlobalProperties((err, res) => {
+            if (err) return reject(err);
+            resolve(res);
+          });
+        });
+        const headBlock = dgpo?.head_block_number || dgpo?.last_irreversible_block_num || 0;
+        if (headBlock > 0) {
+          currentState.block_num = headBlock;
+          status(`⚙️ block_num was 0 after replay; set to head block ${headBlock} from DGPO.`);
+        }
+      } catch (e) {
+        console.warn("[SB State] DGPO fallback for block_num failed:", e);
+      }
     }
 
     // ── Step 5: Single atomic update → no UI flicker ────────────────────────
