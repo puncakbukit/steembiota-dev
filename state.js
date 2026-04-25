@@ -232,7 +232,7 @@ function applyOperation(state, op, blockNum, timestamp) {
             // Strip only when we can prove the accessory belonged to the previous owner.
             // If ownership is currently unknown during replay bootstrap, keep the equip record
             // and let later mint/transfer events resolve ownership deterministically.
-            if (accOwner && accOwner === previousOwner) {
+            if (previousOwner && accOwner && accOwner === previousOwner) {
               delete state.equipped[aId];
             }
           }
@@ -461,9 +461,10 @@ async function fetchSnapshot(cid) {
         // runtime structures { ownership, _nftRegistry } on the way in.
         // Also handle old-format snapshots ({ ownership, registry: { type } })
         // so stale IPFS-pinned files are never silently discarded.
-        if (raw.registry && !raw.ownership) {
+        const hasOwnershipMap = !!raw.ownership && Object.keys(raw.ownership).length > 0;
+        if (raw.registry && !hasOwnershipMap) {
           // New compact format — expand into runtime ownership map.
-          const ownership = {};
+          const ownership = { ...(raw.ownership || {}) };
           for (const [k, v] of Object.entries(raw.registry)) {
             const type = v.t === "a" ? "accessory" : "creature";
             _nftRegistry.set(k, { type });
@@ -575,9 +576,10 @@ async function loadPersistedSnapshot() {
         // BUG 3 FIX: Support both the new compact { registry: { o, t } } format
         // and the old { ownership, _registry } split format so existing cached
         // snapshots are not silently discarded after the upgrade.
-        if (snap.registry && !snap._registry && !snap.ownership) {
+        const hasOwnershipMap = !!snap.ownership && Object.keys(snap.ownership).length > 0;
+        if (snap.registry && !snap._registry && !hasOwnershipMap) {
           // New compact format — expand back into runtime structures.
-          const ownership = {};
+          const ownership = { ...(snap.ownership || {}) };
           const sortedEntries = Object.entries(snap.registry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
           for (const [k, v] of sortedEntries) {
             const type = v.t === "a" ? "accessory" : "creature";
@@ -1143,6 +1145,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     // registry has already been expanded into _nftRegistry and ownership, so
     // this mainly helps when `snapshot` came straight from fetchSnapshot().
     const registryOwners = [];
+    const registryAuthors = [];
     if (snapshot && snapshot.registry && typeof snapshot.registry === "object") {
       for (const entry of Object.values(snapshot.registry)) {
         if (entry && entry.o) registryOwners.push(entry.o);
@@ -1151,6 +1154,10 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     // Also harvest from the live _nftRegistry map (populated during snapshot load).
     for (const owner of Object.values(currentState.ownership || {})) {
       if (owner) registryOwners.push(owner);
+    }
+    for (const id of _nftRegistry.keys()) {
+      const author = String(id).split("/")[0];
+      if (author) registryAuthors.push(author);
     }
 
     let rawPosts = [];
@@ -1165,7 +1172,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
       // who haven't posted since `cutoff`.
       let allTimeAuthors = [];
       const isGenesis = !cutoff;
-      const mergedSoFar = new Set([...communityAuthors, ...ownerAuthors, ...registryOwners]);
+      const mergedSoFar = new Set([...communityAuthors, ...ownerAuthors, ...registryOwners, ...registryAuthors]);
       if (isGenesis || mergedSoFar.size < 3) {
         try {
           status("🔍 Scanning all-time participants for reply discovery…");
@@ -1176,12 +1183,13 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
         }
       }
 
-      // Merge all four sources: recent creators + all-time creators + current owners + registry owners
+      // Merge all sources: recent creators + all-time creators + current owners + registry owners + registry authors
       const allAuthors = [...new Set([
         ...communityAuthors,
         ...allTimeAuthors,
         ...ownerAuthors,
-        ...registryOwners
+        ...registryOwners,
+        ...registryAuthors
       ])];
       const replies = await _fetchReplyOpsSince(cutoff, allAuthors);
       rawPosts = [...topLevel, ...replies];
@@ -1409,8 +1417,21 @@ const CheckpointManager = {
     // subsequent tab reports "Another tab is syncing" until the 90-second
     // TTL expires — with no way to escape.
     forceResetSync() {
+      const myBootTabId = sessionStorage.getItem("sb_boot_tab_id")
+        || `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem("sb_boot_tab_id", myBootTabId);
+      const forceUntil = Date.now() + 10_000;
       sessionStorage.setItem("sb_boot_force_takeover", "1");
+      localStorage.setItem("sb_boot_force_owner", myBootTabId);
+      localStorage.setItem("sb_boot_force_until", String(forceUntil));
       localStorage.removeItem("sb_booting");
+      try {
+        if (typeof BroadcastChannel !== "undefined") {
+          const bc = new BroadcastChannel("sb_state_sync");
+          bc.postMessage({ type: "FORCE_RELOAD", owner: myBootTabId, until: forceUntil });
+          bc.close();
+        }
+      } catch {}
       this.syncLocked = false;
       this.notify("Sync lock cleared — reloading…", "info");
       // Brief delay so the notification is visible before reload.

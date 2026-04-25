@@ -4492,6 +4492,8 @@ const App = {
       const BOOT_LOCK_MAX_AGE  = 90_000; // ms
       const BOOT_TAB_ID_KEY    = "sb_boot_tab_id";
       const BOOT_FORCE_KEY     = "sb_boot_force_takeover";
+      const BOOT_FORCE_OWNER_KEY = "sb_boot_force_owner";
+      const BOOT_FORCE_UNTIL_KEY = "sb_boot_force_until";
       const myBootTabId = (() => {
         let id = sessionStorage.getItem(BOOT_TAB_ID_KEY);
         if (!id) {
@@ -4518,6 +4520,12 @@ const App = {
       function _acquireBootLock() {
         const shouldForceTakeover = sessionStorage.getItem(BOOT_FORCE_KEY) === "1";
         if (shouldForceTakeover) sessionStorage.removeItem(BOOT_FORCE_KEY);
+        const forceOwner = localStorage.getItem(BOOT_FORCE_OWNER_KEY);
+        const forceUntil = Number(localStorage.getItem(BOOT_FORCE_UNTIL_KEY) || 0);
+        const forceWindowActive = Number.isFinite(forceUntil) && forceUntil > Date.now();
+        if (forceWindowActive && forceOwner && forceOwner !== myBootTabId) {
+          return false;
+        }
         const existing = _readBootLock();
         if (existing) {
           const age = Date.now() - Number(existing.ts || 0);
@@ -4561,6 +4569,10 @@ const App = {
         // ── Primary tab: run full bootstrap ──────────────────────────────
         bootstrapState(globalState, syncStatus, null, () => {
           stateReady.value = true;
+          if (localStorage.getItem(BOOT_FORCE_OWNER_KEY) === myBootTabId) {
+            localStorage.removeItem(BOOT_FORCE_OWNER_KEY);
+            localStorage.removeItem(BOOT_FORCE_UNTIL_KEY);
+          }
           _releaseBootLock();
           _refreshLockUi();
           _scheduleHashRecompute();
@@ -4644,6 +4656,16 @@ const App = {
         }
       }
 
+      const _onGlobalForceReload = (event) => {
+        if (event?.data?.type !== "FORCE_RELOAD") return;
+        const owner = event?.data?.owner || null;
+        if (owner && owner === myBootTabId) return;
+        try { _releaseBootLock(); } catch {}
+        syncStatus.value = "🔄 Another tab forced sync reset — reloading…";
+        setTimeout(() => location.reload(), 120);
+      };
+      _bootChannel?.addEventListener("message", _onGlobalForceReload);
+
       // Always load a profile — logged-in user's own, or @steembiota as fallback
       loadProfile(username.value || "");
       // Start notification badge polling if already logged in
@@ -4661,6 +4683,28 @@ const App = {
         }
       }, 100);
     });
+
+    function forceResetSyncLock() {
+      const myBootTabId = sessionStorage.getItem("sb_boot_tab_id")
+        || `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      sessionStorage.setItem("sb_boot_tab_id", myBootTabId);
+      const forceUntil = Date.now() + 10_000;
+      sessionStorage.setItem("sb_boot_force_takeover", "1");
+      localStorage.setItem("sb_boot_force_owner", myBootTabId);
+      localStorage.setItem("sb_boot_force_until", String(forceUntil));
+      localStorage.removeItem("sb_booting");
+      try {
+        if (typeof BroadcastChannel !== "undefined") {
+          const bc = new BroadcastChannel("sb_state_sync");
+          bc.postMessage({ type: "FORCE_RELOAD", owner: myBootTabId, until: forceUntil });
+          bc.close();
+        }
+      } catch {}
+      syncLocked.value = false;
+      syncLockOwnedByMe.value = false;
+      syncStatus.value = "🔄 Force reset requested — reloading…";
+      setTimeout(() => location.reload(), 120);
+    }
 
     function login(user) {
       loginError.value = "";
@@ -4737,6 +4781,7 @@ const App = {
       // instead of hiding it inside the /checkpoint route.
       syncLocked,
       syncLockOwnedByMe,
+      forceResetSyncLock,
     };
   },
 
@@ -4820,7 +4865,7 @@ const App = {
       <span>{{ syncStatus }}</span>
       <button
         v-if="syncLocked && !syncLockOwnedByMe"
-        @click="() => { sessionStorage.setItem('sb_boot_force_takeover', '1'); localStorage.removeItem('sb_booting'); syncLocked = false; syncLockOwnedByMe = false; location.reload(); }"
+        @click="forceResetSyncLock"
         style="font-size:10px;padding:2px 8px;background:#3a1a1a;color:#ef9a9a;border:1px solid #7f3030;border-radius:4px;cursor:pointer;white-space:nowrap;"
         title="Clear the sync lock if a previous tab crashed and the app is stuck"
       >🔄 Force Reset Sync</button>
