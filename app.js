@@ -2017,6 +2017,45 @@ const ProfileView = {
 
         if (myGen !== this._profileCreatureGen) return;
 
+        // Snapshot-driven fast path can produce valid ownedIds even when
+        // per-ID getContent calls are partially/fully rate-limited by RPC.
+        // If we know the user owns creature IDs but mapped is empty, fall
+        // back to the legacy ownership scan so Profile never renders blank.
+        if (mapped.length === 0 && creatureIds.length > 0) {
+          try {
+            const owned = await fetchCreaturesOwnedBy(user, 100);
+            if (myGen !== this._profileCreatureGen) return;
+            const fallbackMapped = owned
+              .map(({ post, meta, effectiveOwner }) => {
+                const age = calculateAge(post.created);
+                return {
+                  author: post.author,
+                  permlink: post.permlink,
+                  name: meta.name || post.author,
+                  genome: meta.genome,
+                  age,
+                  lifecycleStage: getLifecycleStage(age, meta.genome),
+                  type: meta.type || "founder",
+                  parentA: meta.parentA || null,
+                  parentB: meta.parentB || null,
+                  speciated: meta.speciated || false,
+                  fingerprint: genomeFingerprint(meta.genome),
+                  isDuplicate: false,
+                  isPhantom: false,
+                  originalAuthor: null,
+                  originalPermlink: null,
+                  originalCreated: null,
+                  created: post.created || "",
+                  effectiveOwner
+                };
+              })
+              .sort((a, b) => new Date(b.created) - new Date(a.created));
+            if (fallbackMapped.length > 0) mapped.push(...fallbackMapped);
+          } catch {
+            // Non-fatal: keep mapped as-is.
+          }
+        }
+
         const keepExisting = this.creatures.length > 0 && mapped.length === 0;
         if (!keepExisting) this.creatures = mapped;
         if (mapped.length > 0 || this.creatures.length === 0) {

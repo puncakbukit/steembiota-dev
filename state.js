@@ -440,6 +440,39 @@ function _isCompactRegistry(registry) {
   return values.some(v => v && typeof v === "object" && ("t" in v || "o" in v));
 }
 
+/**
+ * Best-effort registry inflation for mixed/legacy snapshot payloads.
+ * Ensures runtime { ownership, _nftRegistry } are populated even when a
+ * checkpoint carries a non-canonical registry shape.
+ */
+function _inflateSnapshotRegistry(snapshotLike) {
+  const ownership = { ...(snapshotLike?.ownership || {}) };
+  const registry = snapshotLike?.registry;
+  if (!registry || typeof registry !== "object") return ownership;
+
+  for (const [id, v] of Object.entries(registry)) {
+    let type = "creature";
+    let owner = null;
+
+    if (v && typeof v === "object") {
+      // Compact shape: { t, o }
+      if (v.t === "a") type = "accessory";
+      else if (v.t === "c") type = "creature";
+      // Legacy shape: { type: "creature"|"accessory", owner?: "..." }
+      if (v.type === "accessory") type = "accessory";
+      else if (v.type === "creature") type = "creature";
+      owner = v.o || v.owner || null;
+    } else if (typeof v === "string") {
+      // Rare legacy shape: registry value as owner username directly.
+      owner = v;
+    }
+
+    _nftRegistry.set(id, { type });
+    if (owner) ownership[id] = _normUser(owner);
+  }
+  return ownership;
+}
+
 async function fetchSnapshot(cid) {
   let lastErr;
   for (const gateway of IPFS_GATEWAYS) {
@@ -1127,6 +1160,12 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     if (snapshot) {
       // Work on a shallow copy so we never mutate the cached object directly
       currentState = { ...snapshot };
+      // Defensive: if a checkpoint snapshot reaches us with an unusual mixed
+      // schema and ownership ended up empty, recover from registry directly so
+      // Profile ownership queries and wear replay are never starved.
+      if (Object.keys(currentState.ownership || {}).length === 0 && currentState.registry) {
+        currentState.ownership = _inflateSnapshotRegistry(currentState);
+      }
     } else {
       status("⚙️ No checkpoint found. Building state from genesis (this may take a while)…");
       currentState = createEmptyState();
