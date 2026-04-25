@@ -229,8 +229,10 @@ function applyOperation(state, op, blockNum, timestamp) {
         for (const [aId, cId] of Object.entries(state.equipped)) {
           if (cId === id) {
             const accOwner = state.ownership[aId];
-            // Strip if the accessory owner is unknown or matches the old owner.
-            if (!accOwner || accOwner === previousOwner) {
+            // Strip only when we can prove the accessory belonged to the previous owner.
+            // If ownership is currently unknown during replay bootstrap, keep the equip record
+            // and let later mint/transfer events resolve ownership deterministically.
+            if (accOwner && accOwner === previousOwner) {
               delete state.equipped[aId];
             }
           }
@@ -1242,6 +1244,19 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
  * @param {string} permlink   — post permlink
  * @param {string} fallback   — default if not found
  */
+/**
+ * Return NFT registry entry/type for a canonical id ("author/permlink").
+ * Exposed for consumers outside this file (e.g. app.js Profile filtering)
+ * so they never need direct access to the module-scoped _nftRegistry Map.
+ */
+function stateRegistryEntry(id) {
+  return _nftRegistry.get(String(id || "").toLowerCase()) || null;
+}
+
+function stateRegistryType(id) {
+  return stateRegistryEntry(id)?.type || null;
+}
+
 function stateOwnerOf(state, author, permlink, fallback) {
   if (!state) return fallback || author;
   const id = _nftId(author, permlink);

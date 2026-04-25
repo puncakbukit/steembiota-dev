@@ -1925,13 +1925,14 @@ const ProfileView = {
         // Step 2 — fetch post content for each owned creature ID.
         // We only want creatures (not accessories); filter by registry type.
         const creatureIds = ownedIds.filter(id => {
-          // _nftRegistry is a module-level Map exported from state.js.
-          // If the entry is missing (synthetic placeholder) we include it
-          // and let the post fetch determine the actual type.
-          const entry = typeof _nftRegistry !== "undefined"
-            ? _nftRegistry.get(id)
+          // Read via the helper exported by state.js instead of reaching into
+          // module-scoped internals that may be unavailable in some load paths.
+          // Missing/unknown entries are treated as creatures so replay order
+          // cannot temporarily hide valid owned creatures from Profile view.
+          const type = (typeof stateRegistryType === "function")
+            ? stateRegistryType(id)
             : null;
-          return !entry || entry.type === "creature";
+          return !type || type === "creature";
         });
 
         // Batch getContent calls (Steem API supports individual calls; we
@@ -4361,6 +4362,8 @@ const App = {
     // "Owned by @unknown" flicker that happens while the state machine is
     // still replaying events.
     const stateReady   = ref(false);
+    const syncLocked   = ref(!!localStorage.getItem("sb_booting"));
+    const syncLockOwnedByMe = ref(false);
 
     // BUG 4B FIX: Compute and expose a live state_hash for the footer so
     // users can "shout-verify" consensus with each other without opening the
@@ -4487,30 +4490,76 @@ const App = {
       //      that is older than 90 seconds as stale (dead tab / hard-refresh).
       const BOOT_LOCK_KEY     = "sb_booting";
       const BOOT_LOCK_MAX_AGE = 90_000; // ms
+      const BOOT_TAB_ID_KEY   = "sb_boot_tab_id";
+      const myBootTabId = (() => {
+        let id = sessionStorage.getItem(BOOT_TAB_ID_KEY);
+        if (!id) {
+          id = `tab-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+          sessionStorage.setItem(BOOT_TAB_ID_KEY, id);
+        }
+        return id;
+      })();
+
+      function _readBootLock() {
+        const raw = localStorage.getItem(BOOT_LOCK_KEY);
+        if (!raw) return null;
+        // Backward compatibility: old lock format stored just a numeric timestamp.
+        if (/^\d+$/.test(raw)) return { owner: null, ts: Number(raw), raw };
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && typeof parsed.ts === "number") {
+            return { owner: parsed.owner || null, ts: parsed.ts, raw };
+          }
+        } catch {}
+        return null;
+      }
 
       function _acquireBootLock() {
-        const existing = localStorage.getItem(BOOT_LOCK_KEY);
+        const existing = _readBootLock();
         if (existing) {
-          const age = Date.now() - Number(existing);
-          if (age < BOOT_LOCK_MAX_AGE) return false; // another tab holds the lock
+          const age = Date.now() - Number(existing.ts || 0);
+          if (age < BOOT_LOCK_MAX_AGE && existing.owner && existing.owner !== myBootTabId) {
+            return false; // another live tab holds the lock
+          }
         }
-        localStorage.setItem(BOOT_LOCK_KEY, String(Date.now()));
+        localStorage.setItem(BOOT_LOCK_KEY, JSON.stringify({ owner: myBootTabId, ts: Date.now() }));
         return true;
       }
 
       function _releaseBootLock() {
-        localStorage.removeItem(BOOT_LOCK_KEY);
+        const existing = _readBootLock();
+        if (!existing || !existing.owner || existing.owner === myBootTabId) {
+          localStorage.removeItem(BOOT_LOCK_KEY);
+        }
+      }
+
+      function _bootLockOwnedByCurrentTab() {
+        const existing = _readBootLock();
+        if (!existing) return false;
+        const age = Date.now() - Number(existing.ts || 0);
+        return existing.owner === myBootTabId && age < BOOT_LOCK_MAX_AGE;
       }
 
       const _bootChannel = typeof BroadcastChannel !== "undefined"
         ? new BroadcastChannel("sb_state_sync")
         : null;
 
+      syncLocked.value = !!_readBootLock();
+      syncLockOwnedByMe.value = _bootLockOwnedByCurrentTab();
+      const _refreshLockUi = () => {
+        syncLocked.value = !!_readBootLock();
+        syncLockOwnedByMe.value = _bootLockOwnedByCurrentTab();
+      };
+      window.addEventListener("storage", (e) => {
+        if (e.key === BOOT_LOCK_KEY) _refreshLockUi();
+      });
+
       if (_acquireBootLock()) {
         // ── Primary tab: run full bootstrap ──────────────────────────────
         bootstrapState(globalState, syncStatus, null, () => {
           stateReady.value = true;
           _releaseBootLock();
+          _refreshLockUi();
           _scheduleHashRecompute();
           // Notify follower tabs that the state is ready.
           try { _bootChannel?.postMessage({ type: "sb_state_ready" }); } catch {}
@@ -4521,7 +4570,9 @@ const App = {
         window.addEventListener("unload", _releaseBootLock, { once: true });
       } else {
         // ── Follower tab: wait for the primary tab to finish ──────────────
-        syncStatus.value = "⏳ Another tab is syncing — waiting…";
+        syncStatus.value = _bootLockOwnedByCurrentTab()
+          ? "⏳ Sync in progress in this tab…"
+          : "⏳ Another tab is syncing — waiting…";
 
         const _onMessage = async (event) => {
           if (event.data?.type !== "sb_state_ready") return;
@@ -4538,6 +4589,7 @@ const App = {
           }
           stateReady.value  = true;
           syncStatus.value  = "✅ State synchronised from primary tab.";
+          _refreshLockUi();
           _scheduleHashRecompute();
         };
 
@@ -4563,6 +4615,7 @@ const App = {
             } catch {}
             stateReady.value = true;
             syncStatus.value = "✅ State synchronised from primary tab.";
+            _refreshLockUi();
             _scheduleHashRecompute();
           };
           window.addEventListener("storage", _onStorage);
@@ -4570,7 +4623,8 @@ const App = {
           // Belt-and-suspenders: if the storage event is missed (e.g. the primary
           // tab crashed before releasing the lock), fall back to polling.
           const _pollTimer = setInterval(async () => {
-            if (localStorage.getItem(BOOT_LOCK_KEY)) return; // still running
+            const lock = _readBootLock();
+            if (lock && (Date.now() - Number(lock.ts || 0)) < BOOT_LOCK_MAX_AGE) return; // still running
             clearInterval(_pollTimer);
             if (_storageHandled) return; // storage event already handled it
             _storageHandled = true;
@@ -4581,6 +4635,7 @@ const App = {
             } catch {}
             stateReady.value = true;
             syncStatus.value = "✅ State synchronised (fallback poll).";
+            _refreshLockUi();
             _scheduleHashRecompute();
           }, 500);
         }
@@ -4677,7 +4732,8 @@ const App = {
       // BUG 4A FIX: expose boot-lock status so the template can show the
       // "Force Reset Sync" escape hatch directly on the sync-status bar
       // instead of hiding it inside the /checkpoint route.
-      syncLocked: ref(!!localStorage.getItem("sb_booting")),
+      syncLocked,
+      syncLockOwnedByMe,
     };
   },
 
@@ -4760,8 +4816,8 @@ const App = {
     >
       <span>{{ syncStatus }}</span>
       <button
-        v-if="syncLocked"
-        @click="() => { localStorage.removeItem('sb_booting'); syncLocked = false; location.reload(); }"
+        v-if="syncLocked && !syncLockOwnedByMe"
+        @click="() => { localStorage.removeItem('sb_booting'); syncLocked = false; syncLockOwnedByMe = false; location.reload(); }"
         style="font-size:10px;padding:2px 8px;background:#3a1a1a;color:#ef9a9a;border:1px solid #7f3030;border-radius:4px;cursor:pointer;white-space:nowrap;"
         title="Clear the sync lock if a previous tab crashed and the app is stuck"
       >🔄 Force Reset Sync</button>
