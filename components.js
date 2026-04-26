@@ -3706,6 +3706,10 @@ const BreedingPanelComponent = {
       // immediately calls breedCreatures(). Without this guard, the urlB watcher
       // starts a second background compatibility walk that can race/stall UI state.
       _suppressUrlBKinshipOnce: false,
+      // Set when Parent B is chosen via Find Compatible Partner cards.
+      // In this path we skip the expensive deep kinship recomputation at submit
+      // time to avoid creature-page stalls from duplicate heavy graph walks.
+      _skipDeepKinshipOnce: false,
       // BUG 7 FIX: Set to a warning string when a phantom ancestor is detected
       // (severed lineage).  null = clean lineage.  Shown in the child preview
       // as an informational badge, not a blocking error.
@@ -3869,6 +3873,7 @@ const BreedingPanelComponent = {
         // Suppress the urlB watcher kinship precheck for this programmatic set.
         // breedCreatures() will run the authoritative check once.
         this._suppressUrlBKinshipOnce = true;
+        this._skipDeepKinshipOnce = true;
         this.urlB           = `https://steemit.com/@${p.author}/${p.permlink}`;
         this.pendingPartner = null;
         this.breedCreatures();
@@ -3891,6 +3896,7 @@ const BreedingPanelComponent = {
       this.loadError      = "";
       this.loadStatus     = "";
       this.pendingPartner = null;
+      this._skipDeepKinshipOnce = false;
     },
 
     // ============================================================
@@ -3971,7 +3977,10 @@ const BreedingPanelComponent = {
         // Already run at preview time (urlB watcher). Re-run here only if the
         // preview result was skipped or came back "ok" — avoids 20+ RPC calls
         // blocking the Breed button when we already have a good answer.
-        if (!this.kinshipPreview || this.kinshipPreview === "checking") {
+        if (this._skipDeepKinshipOnce) {
+          this._skipDeepKinshipOnce = false;
+          this.loadStatus = "";
+        } else if (!this.kinshipPreview || this.kinshipPreview === "checking") {
           this.loadStatus = "Checking ancestry and family relationships…";
           try {
             const compatResult = await Promise.race([
