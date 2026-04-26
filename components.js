@@ -3702,6 +3702,10 @@ const BreedingPanelComponent = {
       // Early kinship preview (fix 3b): set when urlB is filled and valid
       kinshipPreview: null,   // null | "checking" | "ok" | { error: string }
       _kinshipTimer:  null,
+      // Prevent duplicate kinship checks when matchmaker auto-fills urlB and
+      // immediately calls breedCreatures(). Without this guard, the urlB watcher
+      // starts a second background compatibility walk that can race/stall UI state.
+      _suppressUrlBKinshipOnce: false,
       // BUG 7 FIX: Set to a warning string when a phantom ancestor is detected
       // (severed lineage).  null = clean lineage.  Shown in the child preview
       // as an informational badge, not a blocking error.
@@ -3717,6 +3721,12 @@ const BreedingPanelComponent = {
     },
     // Fix 3b: trigger early kinship check as soon as Parent B URL looks complete.
     urlB(val) {
+      if (this._suppressUrlBKinshipOnce) {
+        this._suppressUrlBKinshipOnce = false;
+        this.kinshipPreview = null;
+        clearTimeout(this._kinshipTimer);
+        return;
+      }
       this.kinshipPreview = null;
       clearTimeout(this._kinshipTimer);
       const trimmed = val.trim();
@@ -3856,6 +3866,9 @@ const BreedingPanelComponent = {
     selectPartner(p) {
       if (this.pendingPartner && this.pendingPartner.permlink === p.permlink) {
         // Second click on the same card — confirmed, proceed to breed.
+        // Suppress the urlB watcher kinship precheck for this programmatic set.
+        // breedCreatures() will run the authoritative check once.
+        this._suppressUrlBKinshipOnce = true;
         this.urlB           = `https://steemit.com/@${p.author}/${p.permlink}`;
         this.pendingPartner = null;
         this.breedCreatures();
