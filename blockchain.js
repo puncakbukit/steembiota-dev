@@ -1204,10 +1204,11 @@ function publishTransferCancel(username, creatureAuthor, creaturePermlink, creat
 // ============================================================
 
 const MAX_ANCESTOR_DEPTH = 12;   // max generations to walk upward
-const POSTS_PER_AUTHOR   = 500;  // posts to fetch per author for kinship corpus.
-                                  // 100 was too low: prolific breeders' early offspring
-                                  // could fall outside the window, causing missed sibling/
-                                  // descendant relationships in the inbreeding check.
+const POSTS_PER_AUTHOR   = 150;  // posts to fetch per author for kinship corpus.
+                                  // Kept above the historical 100 baseline while avoiding
+                                  // large per-breed CPU spikes on creature pages that could
+                                  // stall "Checking ancestry and family relationships…".
+const KINSHIP_AUTHOR_CONCURRENCY = 4;
 
 // Parse json_metadata from a raw Steem post object.
 // Returns the steembiota sub-object, or null if not a SteemBiota post.
@@ -1375,7 +1376,7 @@ async function fetchAncestors(startAuthor, startPermlink) {
 // Fetch all SteemBiota posts by a set of authors and return as a Map<key, node>.
 async function fetchCorpusByAuthors(authorSet) {
   const corpus = new Map();
-  await Promise.all([...authorSet].map(async author => {
+  await _throttledMap([...authorSet], KINSHIP_AUTHOR_CONCURRENCY, async (author) => {
     try {
       const posts = await fetchPostsByUser(author, POSTS_PER_AUTHOR);
       if (!Array.isArray(posts)) return;
@@ -1386,7 +1387,7 @@ async function fetchCorpusByAuthors(authorSet) {
         corpus.set(key, { key, author: post.author, permlink: post.permlink, meta });
       }
     } catch { /* skip author on error */ }
-  }));
+  });
   return corpus;
 }
 
@@ -1522,6 +1523,24 @@ async function checkBreedingCompatibility(resA, resB) {
   const nodeB = await fetchSteembiotaPost(resB.author, resB.permlink);
   if (nodeA) corpus.set(keyA, nodeA);
   if (nodeB) corpus.set(keyB, nodeB);
+
+  // Guardrail: cap corpus size so kinship graph operations stay responsive on
+  // older/mobile browsers. The full-family checks are still applied, but on a
+  // bounded local graph to prevent UI lockups during matchmaker auto-breed flow.
+  const MAX_KINSHIP_CORPUS = 2500;
+  if (corpus.size > MAX_KINSHIP_CORPUS) {
+    const trimmed = new Map();
+    let i = 0;
+    for (const [k, v] of corpus) {
+      trimmed.set(k, v);
+      if (++i >= MAX_KINSHIP_CORPUS) break;
+    }
+    // Keep the two candidate nodes regardless of trim order.
+    if (nodeA) trimmed.set(keyA, nodeA);
+    if (nodeB) trimmed.set(keyB, nodeB);
+    corpus.clear();
+    for (const [k, v] of trimmed) corpus.set(k, v);
+  }
 
   // Build forbidden sets for each creature
   const forbiddenA = buildForbiddenSet(keyA, ancestorsA, corpus);
