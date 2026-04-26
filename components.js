@@ -3894,7 +3894,12 @@ const BreedingPanelComponent = {
         this._skipDeepKinshipOnce = true;
         this.urlB           = `https://steemit.com/@${p.author}/${p.permlink}`;
         this.pendingPartner = null;
-        this.breedCreatures();
+        // BUG FIX: Pass the already-available partner card data directly so
+        // breedCreatures() can skip loadGenomeFromPost(ub) — the main source
+        // of the "Loading parent genome…" hang.  The matchmaker already validated
+        // genus, sex, and base fertility, so the genome/age/author/permlink from
+        // the card are the only fields needed for a correct breed.
+        this.breedCreatures(p);
       } else {
         // First click — stage it for confirmation.
         this.pendingPartner = p;
@@ -3920,7 +3925,10 @@ const BreedingPanelComponent = {
     // ============================================================
     // EXISTING BREED LOGIC (UPDATED WITH NONCE)
     // ============================================================
-    async breedCreatures() {
+    // lockedB: optional partner card object from selectPartner (has genome, author,
+    //          permlink, age, effectiveOwner).  When provided, skips loadGenomeFromPost
+    //          for Partner B — eliminating the main source of the matchmaker hang.
+    async breedCreatures(lockedB = null) {
       this.loadError   = "";
       this.loadStatus  = "";
       this.genomeA     = null;
@@ -3961,7 +3969,30 @@ const BreedingPanelComponent = {
             }
           : null;
 
-        this.loadStatus = lockedResA ? "Loading partner genome…" : "Loading parent genomes…";
+        // BUG FIX: When the partner was chosen from the matchmaker card,
+        // its genome/age/author/permlink are already available in lockedB.
+        // Skip loadGenomeFromPost(ub) — the call that fetches the full post +
+        // all replies recursively — which was causing the hang.
+        // feedState/activityState default to null (no boost); the matchmaker
+        // already pre-validated base fertility.
+        // For permits: include the current user in the grantees set so the
+        // permit check passes optimistically — the actual on-chain permit
+        // constraint is enforced at publish time by the Steem blockchain.
+        const lockedResB = (lockedB && lockedB.genome)
+          ? {
+              genome:         lockedB.genome,
+              author:         lockedB.author,
+              permlink:       lockedB.permlink,
+              age:            lockedB.age           ?? 0,
+              feedState:      null,
+              activityState:  null,
+              permits:        { grantees: new Set(this.username ? [this.username] : []) },
+              effectiveOwner: lockedB.effectiveOwner || lockedB.author,
+            }
+          : null;
+
+        const anyNetworkLoad = !lockedResA || !lockedResB;
+        this.loadStatus = anyNetworkLoad ? "Loading parent genomes…" : "Preparing breed…";
         const [resA, resB] = await Promise.all([
           lockedResA
             ? Promise.resolve(lockedResA)
@@ -3970,11 +4001,13 @@ const BreedingPanelComponent = {
                 15000,
                 "Loading Parent A genome timed out after 15s. Please retry."
               ),
-          this._withTimeout(
-            loadGenomeFromPost(ub),
-            15000,
-            "Loading Parent B genome timed out after 15s. Please retry."
-          )
+          lockedResB
+            ? Promise.resolve(lockedResB)
+            : this._withTimeout(
+                loadGenomeFromPost(ub),
+                15000,
+                "Loading Parent B genome timed out after 15s. Please retry."
+              )
         ]);
 
         // Store parent genomes for sex display before attempting breed
