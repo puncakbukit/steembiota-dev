@@ -220,28 +220,12 @@ function applyOperation(state, op, blockNum, timestamp) {
           // a full replay; in an incremental replay the type is already set).
           _nftRegistry.set(id, { type: "creature", _synthetic: true });
         }
-        // BUG 2A FIX (Transfer Wipe): capture the previous owner BEFORE
-        // overwriting ownership so we can selectively strip only their accessories.
-        // The old code deleted ALL equipped entries referencing this creature
-        // unconditionally, meaning accessories were wiped on every transfer and
-        // `equipped` stayed perpetually empty when bootstrapping from history.
-        const previousOwner = state.ownership[id];
         state.ownership[id] = _normUser(author);
-
-        // Only unequip accessories that belonged to the *previous* owner.
-        // Accessories already owned by the new owner (e.g. they previously
-        // traded back-and-forth) are left intact so no legitimate equip is lost.
-        for (const [aId, cId] of Object.entries(state.equipped)) {
-          if (cId === id) {
-            const accOwner = state.ownership[aId];
-            // Strip only when we can prove the accessory belonged to the previous owner.
-            // If ownership is currently unknown during replay bootstrap, keep the equip record
-            // and let later mint/transfer events resolve ownership deterministically.
-            if (previousOwner && accOwner && accOwner === previousOwner) {
-              delete state.equipped[aId];
-            }
-          }
-        }
+        // Keep equipped relations untouched on creature transfer.
+        // Source-of-truth for wearing is wear_on / wear_off event history.
+        // Auto-pruning on transfer causes deterministic data loss when history
+        // is replayed from mixed snapshots and is the primary reason `equipped`
+        // can collapse to {} even when creatures are visibly wearing accessories.
       }
       break;
     }

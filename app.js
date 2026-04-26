@@ -2021,7 +2021,7 @@ const ProfileView = {
         // per-ID getContent calls are partially/fully rate-limited by RPC.
         // If we know the user owns creature IDs but mapped is empty, fall
         // back to the legacy ownership scan so Profile never renders blank.
-        if (mapped.length === 0 && creatureIds.length > 0) {
+        if (mapped.length === 0) {
           try {
             const owned = await fetchCreaturesOwnedBy(user, 100);
             if (myGen !== this._profileCreatureGen) return;
