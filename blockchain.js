@@ -1240,6 +1240,12 @@ async function fetchAncestors(startAuthor, startPermlink) {
   const visited = new Map();
   const queue = [{ author: startAuthor, permlink: startPermlink, depth: 0 }];
 
+  // Maximum milliseconds to spend on a single BFS node (cache read + optional
+  // RPC fetch + cache write).  If a node exceeds this budget we treat it as a
+  // phantom (severed lineage) so the BFS can continue rather than hanging.
+  // 12 s covers the worst-case Steem RPC cold-hit + IDB round-trip.
+  const NODE_TIMEOUT_MS = 12_000;
+
   while (queue.length > 0) {
     const { author, permlink, depth } = queue.shift();
     const key = nodeKey(author, permlink);
@@ -1251,31 +1257,50 @@ async function fetchAncestors(startAuthor, startPermlink) {
     let phantom = false;
     let meta = null;
 
-    // 1. TRY CACHE FIRST
-    const cached = await readAncestryDB(key);
+    // Wrap each node's work in a per-node timeout.  The root cause of the
+    // breed-page hang was writeAncestryDB never awaiting tx.oncomplete (now
+    // fixed), but a belt-and-suspenders timeout here ensures a slow RPC node
+    // or a stalled IDB write can never block the BFS indefinitely regardless
+    // of future changes to the helper functions.
+    const nodeWorkPromise = (async () => {
+      // 1. TRY CACHE FIRST
+      const cached = await readAncestryDB(key);
 
-    if (cached) {
-      parentA = cached.parentA;
-      parentB = cached.parentB;
-      phantom = cached.isPhantom;
-
-      // Minimal meta reconstruction (enough for traversal)
-      meta = { parentA, parentB };
-    } else {
-      // 2. CACHE MISS → FETCH FROM BLOCKCHAIN
-      const node = await fetchSteembiotaPost(author, permlink);
-      if (!node) continue;
-
-      phantom = node.phantom;
-
-      if (!phantom) {
-        meta = node.meta;
-        parentA = meta.parentA;
-        parentB = meta.parentB;
+      if (cached) {
+        parentA = cached.parentA;
+        parentB = cached.parentB;
+        phantom = cached.isPhantom;
+        meta = { parentA, parentB };
+      } else {
+        // 2. CACHE MISS → FETCH FROM BLOCKCHAIN
+        const node = await fetchSteembiotaPost(author, permlink);
+        if (!node) {
+          // Treat unfetchable nodes as phantoms so the BFS continues.
+          phantom = true;
+        } else {
+          phantom = node.phantom;
+          if (!phantom) {
+            meta = node.meta;
+            parentA = meta.parentA;
+            parentB = meta.parentB;
+          }
+        }
+        // 3. STORE RESULT (including phantom) — now properly awaited.
+        await writeAncestryDB(key, parentA, parentB, phantom);
       }
+    })();
 
-      // 3. STORE RESULT (including phantom)
-      await writeAncestryDB(key, parentA, parentB, phantom);
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error(`BFS node timeout: ${key}`)), NODE_TIMEOUT_MS)
+    );
+
+    try {
+      await Promise.race([nodeWorkPromise, timeoutPromise]);
+    } catch (e) {
+      // Node timed out or failed — mark as severed phantom so the BFS
+      // continues past it rather than leaving children stranded in the queue.
+      console.warn("[SB Ancestry] Node skipped (timeout/error):", key, e.message);
+      phantom = true;
     }
 
     // BUG 7 FIX: Phantom ancestor — "Severed Lineage" instead of hard block.
@@ -2681,20 +2706,40 @@ function openSBDB() {
 // ============================================================
 
 async function writeAncestryDB(key, parentA, parentB, isPhantom) {
+  // Root cause of the breed hang: the old implementation called store.put()
+  // but never awaited tx.oncomplete.  writeAncestryDB returned before the IDB
+  // transaction had committed, so the very next readAncestryDB (opened in a
+  // separate transaction on the next BFS iteration) could race the write and
+  // return null.  That triggered a redundant fetchSteembiotaPost RPC call;
+  // under rate-limiting or node errors that call returned null, the BFS silently
+  // skipped the node with `continue` but left its children permanently in the
+  // queue — causing fetchAncestors' while-loop to spin or hang indefinitely,
+  // keeping "Checking ancestry and family relationships…" on screen forever.
+  //
+  // Fix: await a Promise that resolves on tx.oncomplete and rejects on
+  // tx.onerror, guaranteeing the data is durable before the caller proceeds.
+  // Also close the DB handle after use to prevent connection accumulation that
+  // triggers onblocked events and starves subsequent openSBDB() calls.
+  let db;
   try {
-    const db = await openSBDB();
+    db = await openSBDB();
     const tx = db.transaction(STORE_ANCESTRY, "readwrite");
-    const store = tx.objectStore(STORE_ANCESTRY);
-
-    store.put({
+    tx.objectStore(STORE_ANCESTRY).put({
       id: key,
       parentA,
       parentB,
       isPhantom,
       ts: Date.now()
     });
+    await new Promise((resolve, reject) => {
+      tx.oncomplete = resolve;
+      tx.onerror    = () => reject(tx.error);
+      tx.onabort    = () => reject(tx.error ?? new Error("IDB transaction aborted"));
+    });
   } catch (err) {
-    console.warn("Ancestry Cache Write Error:", err);
+    console.warn("[SB Ancestry] writeAncestryDB failed for key", key, ":", err);
+  } finally {
+    try { db?.close(); } catch {}
   }
 }
 
