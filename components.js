@@ -3744,7 +3744,12 @@ const BreedingPanelComponent = {
               `Both parents must be the same genus.`
             );
           }
-          await checkBreedingCompatibility(resA, resB);
+          await Promise.race([
+            checkBreedingCompatibility(resA, resB),
+            new Promise((_, reject) =>
+              setTimeout(() => reject(new Error("Kinship verification timed out after 30s. Please retry.")), 30000)
+            )
+          ]);
           this.kinshipPreview = "ok";
         } catch (e) {
           this.kinshipPreview = { error: e.message || String(e) };
@@ -3956,7 +3961,12 @@ const BreedingPanelComponent = {
         if (!this.kinshipPreview || this.kinshipPreview === "checking") {
           this.loadStatus = "Checking ancestry and family relationships…";
           try {
-            const compatResult = await checkBreedingCompatibility(resA, resB);
+            const compatResult = await Promise.race([
+              checkBreedingCompatibility(resA, resB),
+              new Promise((_, reject) =>
+                setTimeout(() => reject(new Error("Ancestry verification timed out after 30s. Please retry.")), 30000)
+              )
+            ]);
             // BUG 7 FIX: A non-null result means severed lineage (phantom ancestor).
             // Store the warning so the UI can display it; do NOT block breeding.
             if (compatResult && compatResult.severedLineage) {

@@ -2744,9 +2744,10 @@ async function writeAncestryDB(key, parentA, parentB, isPhantom) {
 }
 
 async function readAncestryDB(key) {
+  let db;
   try {
-    const db = await openSBDB();
-    return new Promise((resolve) => {
+    db = await openSBDB();
+    return await new Promise((resolve) => {
       const tx = db.transaction(STORE_ANCESTRY, "readonly");
       const store = tx.objectStore(STORE_ANCESTRY);
       const request = store.get(key);
@@ -2756,6 +2757,8 @@ async function readAncestryDB(key) {
     });
   } catch {
     return null;
+  } finally {
+    try { db?.close(); } catch {}
   }
 }
 
