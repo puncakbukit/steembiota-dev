@@ -34,13 +34,34 @@ steem.api.setOptions({ url: RPC_NODES[currentRPCIndex] });
 
 // Safe API wrapper with automatic RPC fallback on error.
 function callWithFallback(apiCall, args, callback, attempt = 0) {
-  apiCall(...args, (err, result) => {
-    if (!err) return callback(null, result);
-    console.warn("RPC error on", RPC_NODES[currentRPCIndex], err);
+  // Prevent indefinite hangs when an RPC endpoint never invokes its callback.
+  // This was one root cause behind breed checks staying at
+  // "Checking kinship…" / "Checking ancestry and family relationships…".
+  const RPC_CALL_TIMEOUT_MS = 12000;
+  let done = false;
+
+  const handleFailure = (err) => {
     const nextIndex = currentRPCIndex + 1;
     if (nextIndex >= RPC_NODES.length) return callback(err, null);
     setRPC(nextIndex);
     callWithFallback(apiCall, args, callback, attempt + 1);
+  };
+
+  const timeoutId = setTimeout(() => {
+    if (done) return;
+    done = true;
+    const err = new Error(`RPC timeout after ${RPC_CALL_TIMEOUT_MS}ms on ${RPC_NODES[currentRPCIndex]}`);
+    console.warn("RPC timeout on", RPC_NODES[currentRPCIndex], "attempt", attempt);
+    handleFailure(err);
+  }, RPC_CALL_TIMEOUT_MS);
+
+  apiCall(...args, (err, result) => {
+    if (done) return;
+    done = true;
+    clearTimeout(timeoutId);
+    if (!err) return callback(null, result);
+    console.warn("RPC error on", RPC_NODES[currentRPCIndex], err);
+    handleFailure(err);
   });
 }
 
