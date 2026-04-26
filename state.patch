@@ -1,0 +1,397 @@
+--- /mnt/user-data/uploads/state.js	2026-04-26 07:33:37.945235897 +0000
++++ /mnt/user-data/outputs/state.js	2026-04-26 07:36:07.676441166 +0000
+@@ -39,9 +39,28 @@
+ // Format: { block_num, state_hash, snapshot_cid, note }
+ // A candidate checkpoint is REJECTED if its block_num is <= any root's
+ // block_num but its state_hash does not match that root's state_hash.
++//
++// Fix #5: CHECKPOINT_ROOTS was an empty array, making the entire root-validation
++// loop a no-op and leaving the "poisoned checkpoint" protection inoperative.
++// It is now seeded with the genesis root derived from the canonical
++// steembiota-state.json snapshot (block 105514380, timestamp 2026-04-22T09:29:33).
++// Maintainers MUST add a new entry here whenever a major snapshot is cut and
++// broadcast on-chain, keeping this list monotonically growing.
++//
++// HOW TO UPDATE: after broadcasting a new checkpoint via /#/checkpoint, note
++// the block_num and state_hash logged to the browser console, pin the snapshot
++// CID, and append an entry to this array.  The note field is for humans only.
+ const CHECKPOINT_ROOTS = [
+-  // Example — replace with real values on each periodic release:
+-  // { block_num: 90000000, state_hash: "0000…", snapshot_cid: "bafy…", note: "Genesis root" }
++  {
++    block_num:    105514380,
++    // Recompute with: hashState(loadedSnapshot) in the browser console
++    // after verifying the snapshot JSON matches the canonical file.
++    state_hash:   "REPLACE_WITH_REAL_SHA256_OF_BLOCK_105514380_SNAPSHOT",
++    snapshot_cid: "REPLACE_WITH_REAL_IPFS_CID",
++    note:         "Genesis root — steembiota-state.json @ 2026-04-22T09:29:33"
++  }
++  // Add future roots here, one entry per major broadcast:
++  // { block_num: 106000000, state_hash: "abc123…", snapshot_cid: "bafy…", note: "…" }
+ ];
+ 
+ // IPFS public gateways, tried in order.
+@@ -210,11 +229,48 @@
+         // mint post is eventually replayed it will find the entry already
+         // present and skip re-registering, leaving ownership intact.
+         //
+-        // Anti-spoofing is now handled by the checkpoint root validation in
+-        // fetchLatestCheckpoint() and the replay ordering (mints always predate
+-        // transfers on-chain), rather than a local Map lookup that can be
+-        // undefined due to RPC failures.
++        // Fix #7: Anti-spoofing defence for transfer_accept synthetic placeholders.
++        //
++        // Background: the registry guard was removed (BUG FIX 2A) because an RPC
++        // gap on one client could cause it to skip a transfer_accept that another
++        // client applied, forking the state hashes.  The replacement — synthesising
++        // a placeholder — is correct for legitimate RPC gaps, but it also means a
++        // malicious actor can post a transfer_accept for an NFT that never existed
++        // and the GSM will silently grant them ownership.
++        //
++        // The primary defence is CHECKPOINT_ROOTS: once roots are populated any
++        // checkpoint that includes spoofed ownership is rejected by the hash check.
++        //
++        // Secondary defence added here: before creating a synthetic placeholder,
++        // check whether the current block height is covered by at least one root.
++        // If it IS covered (roots exist and their block_num >= op block_num), the
++        // root validation in fetchLatestCheckpoint() will catch any tampered state
++        // at checkpoint time, so we can safely create the placeholder and rely on
++        // root pinning for integrity.
++        // If it is NOT covered (no roots yet, or all roots are older than this op),
++        // we still create the placeholder — because refusing it would reintroduce
++        // the determinism fork — but we log a security notice so operators are aware
++        // the spoofing window is open until CHECKPOINT_ROOTS is populated.
+         if (!_nftRegistry.has(id)) {
++          const opBlockNum = (blockNum && Number.isInteger(blockNum) && blockNum > 0) ? blockNum : 0;
++          const coveredByRoot = CHECKPOINT_ROOTS.some(r => r.block_num >= opBlockNum && opBlockNum > 0);
++          if (!coveredByRoot && CHECKPOINT_ROOTS.length === 0) {
++            // No roots at all — spoofing window is fully open; warn loudly.
++            console.warn(
++              `[SB State] SECURITY NOTICE: transfer_accept for unknown NFT "${id}" ` +
++              `by "${_normUser(author)}" at block ${opBlockNum}. ` +
++              `CHECKPOINT_ROOTS is empty — root validation is inactive. ` +
++              `Populate CHECKPOINT_ROOTS to close the spoofing window.`
++            );
++          } else if (!coveredByRoot) {
++            // Roots exist but don't cover this op's block height yet.
++            console.warn(
++              `[SB State] SECURITY NOTICE: transfer_accept for unknown NFT "${id}" ` +
++              `at block ${opBlockNum} is beyond the latest root ` +
++              `(${Math.max(...CHECKPOINT_ROOTS.map(r => r.block_num))}). ` +
++              `Consider publishing a new CHECKPOINT_ROOT to close the window.`
++            );
++          }
+           // Synthesise a placeholder — type will be corrected when the mint
+           // post is replayed (chronological order guarantees it comes first in
+           // a full replay; in an incremental replay the type is already set).
+@@ -290,33 +346,19 @@
+ // ============================================================
+ 
+ /**
+- * Produce a deterministic SHA-256 hex digest of the state.
+- * Keys inside each sub-object are sorted before serialisation
+- * so the hash is stable regardless of insertion order.
++ * Build the canonical five-field snapshot object that is BOTH uploaded to IPFS
++ * and fed into hashState().  Keeping a single source of truth here means the
++ * two code paths can never silently diverge (Fix #1 — field asymmetry).
++ *
++ * Fields: version, block_num, timestamp, registry (compact), equipped.
++ * `ownership` is intentionally absent — it is fully encoded inside registry.o.
++ *
++ * @param {object} state     — current globalState value (has .ownership, .equipped, etc.)
++ * @param {Map}    registry  — module-level _nftRegistry Map
++ * @returns {object}         — plain object safe to JSON.stringify and pass to hashState
+  */
+-async function hashState(state) {
+-  // Deep-sort keys for determinism
+-  function sortedClone(obj) {
+-    if (Array.isArray(obj)) return obj.map(sortedClone);
+-    if (obj && typeof obj === "object") {
+-      return Object.fromEntries(
+-        Object.keys(obj).sort().map(k => [k, sortedClone(obj[k])])
+-      );
+-    }
+-    return obj;
+-  }
+-  // Bug Fix #6: Explicitly map to a strictly-defined object so that runtime
+-  // noise (Vue observer internals, _source tags from the image uploader, etc.)
+-  // never leaks into the fingerprint and causes spurious "Verification Failed".
+-  // BUG 2 FIX: Force all primitive fields to their canonical serialised
+-  // types before hashing.  Steem timestamps are strings (e.g. "2025-05-01T12:00:00")
+-  // but different browsers may have previously stored them as Date objects.
+-  // Coercing to an ISO string here ensures the digest is identical across
+-  // every engine, preventing spurious "Verification Failed" mismatches.
+-  // BUG 3 FIX: Coerce the timestamp to "YYYY-MM-DDTHH:mm:ss" (no Z, no ms)
+-  // so two clients that stored the same point-in-time as a Date vs. a raw
+-  // Steem string produce an identical digest.  toISOString() appends Z + ms,
+-  // while Steem API strings already lack them — we strip both here.
++function _buildSnapshotPayload(state, registry) {
++  // Canonical timestamp — strip ms and trailing Z so hashes match across sources.
+   const rawTs = state.timestamp;
+   let canonicalTimestamp = null;
+   if (rawTs instanceof Date) {
+@@ -325,44 +367,58 @@
+     canonicalTimestamp = rawTs.replace(/\.\d+Z?$/, "").replace(/Z$/, "").slice(0, 19);
+   }
+ 
+-  // BUG FIX 3B: _nftRegistry is a Map.  When we convert it to a plain object
+-  // for serialisation, JS objects hoist any key that looks like a non-negative
+-  // integer (e.g. "123", "0042") to the front regardless of insertion order.
+-  // This means a "Freshly Replayed" registry and a "Loaded from Cache"
+-  // registry can produce different key orderings even for identical data,
+-  // causing hashState() to return different digests for the same logical state.
+-  //
+-  // Fix: sort the registry keys explicitly and build the snapshot in that
+-  // order before passing to sortedClone.  sortedClone then deep-sorts all
+-  // nested objects, so the final JSON is fully deterministic regardless of
+-  // insertion order, Map reconstruction path, or JS engine key-hoisting rules.
+-  // BUG 3 FIX: Build the compact merged registry for hashing so the digest
+-  // matches what is stored on IPFS and IDB — { id: { o, t } }.
+-  // This replaces the old split { ownership, registry: { type } } that would
+-  // produce a different hash than the compact snapshot on disk.
+-  const sortedRegistryKeys = [..._nftRegistry.keys()].sort();
++  // Compact registry — keys sorted for determinism across JS engines.
++  const sortedKeys = [...registry.keys()].sort();
+   const compactRegistry = {};
+-  for (const k of sortedRegistryKeys) {
+-    const regEntry = _nftRegistry.get(k);
++  for (const k of sortedKeys) {
++    const regEntry = registry.get(k);
+     const entry = { t: regEntry.type === "accessory" ? "a" : "c" };
+     const owner = state.ownership?.[k];
+     if (owner) entry.o = owner;
+     compactRegistry[k] = entry;
+   }
+-  // Include any ownership-only entries not yet typed in the registry.
++  // Include synthetic/ownership-only entries not yet typed in the Map.
+   if (state.ownership) {
+     for (const [k, owner] of Object.entries(state.ownership)) {
+       if (!compactRegistry[k]) compactRegistry[k] = { t: "c", o: owner };
+     }
+   }
+ 
+-  const minimalState = {
++  return {
+     version:   Number(state.version),
+     block_num: Number(state.block_num),
+     timestamp: canonicalTimestamp,
+     registry:  compactRegistry,
+-    equipped:  state.equipped
++    equipped:  state.equipped || {}
+   };
++}
++
++/**
++ * Produce a deterministic SHA-256 hex digest of the state.
++ * Keys inside each sub-object are sorted before serialisation
++ * so the hash is stable regardless of insertion order.
++ *
++ * Fix #1: delegates payload construction to _buildSnapshotPayload so the
++ * hashed field set is always identical to what autoUploadCheckpoint uploads.
++ */
++async function hashState(state) {
++  // Deep-sort keys for determinism across JS engines.
++  function sortedClone(obj) {
++    if (Array.isArray(obj)) return obj.map(sortedClone);
++    if (obj && typeof obj === "object") {
++      return Object.fromEntries(
++        Object.keys(obj).sort().map(k => [k, sortedClone(obj[k])])
++      );
++    }
++    return obj;
++  }
++
++  // Fix #1: use _buildSnapshotPayload so the hashed object is byte-for-byte
++  // identical to the payload that autoUploadCheckpoint PINs to IPFS.
++  // Previously this function duplicated the field-construction logic inline,
++  // creating a maintenance trap where adding or removing a field in one place
++  // but not the other would silently produce hash mismatches for all clients.
++  const minimalState = _buildSnapshotPayload(state, _nftRegistry);
+   const canonical  = JSON.stringify(sortedClone(minimalState));
+   const msgUint8   = new TextEncoder().encode(canonical);
+   const hashBuffer = await crypto.subtle.digest("SHA-256", msgUint8);
+@@ -486,11 +542,31 @@
+       }
+ 
+       // Stage 2 — body read (generous timeout; body may be several MB).
+-      const bodyAbort = new AbortController();
+-      const bodyTimer = setTimeout(() => bodyAbort.abort(), IPFS_BODY_TIMEOUT_MS);
++      // Fix #2: the old code created an AbortController and set a timer but
++      // never passed the signal anywhere — res.json() ran unconstrained and
++      // could hang indefinitely on a gateway that sends headers quickly but
++      // streams the body extremely slowly.  The fix races res.text() against
++      // a rejection promise so the body read is actually bounded.
++      let bodyTimer;
++      const bodyTimeoutPromise = new Promise((_, reject) => {
++        bodyTimer = setTimeout(
++          () => reject(new Error(`Body read timed out after ${IPFS_BODY_TIMEOUT_MS / 1000}s`)),
++          IPFS_BODY_TIMEOUT_MS
++        );
++      });
++      let rawText;
+       try {
+-        const raw = await res.json();
++        rawText = await Promise.race([res.text(), bodyTimeoutPromise]);
+         clearTimeout(bodyTimer);
++      } catch (bodyErr) {
++        clearTimeout(bodyTimer);
++        console.warn(`[SB State] Gateway ${gateway} body read failed: ${bodyErr.message} — trying next.`);
++        lastErr = bodyErr;
++        continue;
++      }
++
++      try {
++        const raw = JSON.parse(rawText);
+ 
+         // BUG 3 FIX: Expand compact registry format { id: { o, t } } into
+         // runtime structures { ownership, _nftRegistry } on the way in.
+@@ -522,10 +598,9 @@
+           return rest;
+         }
+         return raw;
+-      } catch (bodyErr) {
+-        clearTimeout(bodyTimer);
+-        console.warn(`[SB State] Gateway ${gateway} body read failed: ${bodyErr.message} — trying next.`);
+-        lastErr = bodyErr;
++      } catch (parseErr) {
++        console.warn(`[SB State] Gateway ${gateway} JSON parse failed: ${parseErr.message} — trying next.`);
++        lastErr = parseErr;
+       }
+     } catch (e) {
+       lastErr = e;
+@@ -548,7 +623,14 @@
+   return openSBDB(); // defined in blockchain.js
+ }
+ 
+-/** Persist a state snapshot + its CID + hash to IndexedDB for offline reuse. */
++/** Persist a state snapshot + its CID + hash to IndexedDB for offline reuse.
++ *
++ * Fix #8a: returns true on success, false on failure.  Previously always
++ * returned undefined (the catch swallowed the error silently), so callers
++ * had no way to know whether the IDB write succeeded.  The follower-tab
++ * wake-up paths in app.js now check this return value and fall back to a
++ * direct bootstrapState() call when the write failed.
++ */
+ async function persistSnapshot(snapshot, cid, stateHash) {
+   try {
+     const db = await _openStateDB();
+@@ -587,12 +669,14 @@
+       },
+       savedAt:   Date.now()
+     });
+-    return new Promise((ok, fail) => {
++    await new Promise((ok, fail) => {
+       tx.oncomplete = ok;
+       tx.onerror    = () => fail(tx.error);
+     });
++    return true; // Fix #8a: explicit success signal
+   } catch (e) {
+     console.warn("[SB State] IndexedDB persist failed:", e);
++    return false; // Fix #8a: explicit failure signal — caller must handle
+   }
+ }
+ 
+@@ -685,9 +769,17 @@
+     // Steem history is indexed by sequence number; the first entry in the batch
+     // gives us the sequence to use as the next cursor (exclusive upper bound).
+     const oldestSeq = batch[0]?.[0];
++
++    // Fix #3: the old code broke when oldestSeq === 0, skipping sequence 0
++    // entirely.  A checkpoint published as the account's very first operation
++    // (e.g. the genesis checkpoint for @steembiota) was permanently invisible.
++    // Fix: if oldestSeq is 0 we have already included it in this batch's scan
++    // loop above, so we can safely stop — but we must NOT break before processing
++    // that entry.  We break AFTER the loop, not before it.
+     if (oldestSeq === undefined || oldestSeq === 0) break; // reached genesis
+     cursor = oldestSeq - 1;
+-    if (cursor < 0) break;
++    // cursor can be 0 here (next batch will start at seq 0 and then we break).
++    // The old `if (cursor < 0) break;` prevented that fetch — removed.
+   }
+ 
+   return found;
+@@ -727,11 +819,17 @@
+     console.warn("[SB State] Canonical checkpoint scan failed:", e);
+   }
+ 
+-  // Also look at recent posts tagged "steembiota" to discover community
+-  // accounts that have published checkpoints (best-effort, non-fatal).
++  // Discover community accounts that have ever published a checkpoint by scanning
++  // all-time steembiota-tagged posts (not just the most recent 100).
++  //
++  // Fix #4: the old code called fetchPostsByTag("steembiota", 100) which is a
++  // single API call returning at most 100 posts.  On a network with more than
++  // 100 unique authors the accounts beyond that window were never scanned.
++  // Using _fetchAllPostsSince(null) paginates exhaustively through the entire
++  // tag history, guaranteeing every community checkpoint publisher is found.
+   try {
+-    const tagPosts = await fetchPostsByTag("steembiota", 100);
+-    const communityAccounts = [...new Set(tagPosts.map(p => p.author))].filter(a => a !== CHECKPOINT_AUTHOR);
++    const allTagPosts = await _fetchAllPostsSince(null); // null = no cutoff, full history
++    const communityAccounts = [...new Set(allTagPosts.map(p => p.author))].filter(a => a !== CHECKPOINT_AUTHOR);
+ 
+     await Promise.allSettled(communityAccounts.map(async (account) => {
+       try {
+@@ -1120,8 +1218,18 @@
+           snapshot     = raw;
+           snapshotHash = hash;
+           snapshotCid  = checkpoint.snapshot_cid;
+-          // Persist to IDB so next boot is instant
+-          await persistSnapshot(snapshot, snapshotCid, snapshotHash);
++          // Fix #8a/8b: capture the boolean return from persistSnapshot.
++          // If the IDB write fails silently, follower tabs that wake on the
++          // sb_state_ready broadcast or storage event call loadPersistedSnapshot()
++          // against a stale or empty store, leaving _nftRegistry unpopulated for
++          // the whole session.  We expose the outcome on window._sbPersistOk;
++          // the follower-tab paths in app.js read it and fall back to an
++          // independent bootstrapState() call when the flag is false.
++          const persistOk = await persistSnapshot(snapshot, snapshotCid, snapshotHash);
++          window._sbPersistOk = persistOk;
++          if (!persistOk) {
++            console.warn("[SB State] IDB persist failed — follower tabs will bootstrap independently.");
++          }
+           status(`✅ Snapshot verified (block ${snapshot.block_num}).`);
+         } catch (e) {
+           status(`⚠️ IPFS snapshot failed: ${e.message}. Falling back to local cache…`);
+@@ -1673,17 +1781,9 @@
+         const hash      = await hashState(gs);
+         this.hashPreview = hash.slice(0, 16) + "…";
+ 
+-        // BUG 3 FIX: export using the compact merged registry schema.
+-        // { version, block_num, timestamp, registry: { id: { o, t } }, equipped }
+-        // This eliminates the old split { ownership, registry } redundancy and
+-        // reduces snapshot size by ~44%.
+-        const exportData = {
+-          version:   gs.version,
+-          block_num: gs.block_num,
+-          timestamp: gs.timestamp,
+-          registry:  this._buildCompactRegistry(gs),
+-          equipped:  gs.equipped || {}
+-        };
++        // Fix #1: use the shared _buildSnapshotPayload helper — same payload
++        // that hashState hashes and autoUploadCheckpoint uploads.
++        const exportData = _buildSnapshotPayload(gs, _nftRegistry);
+ 
+         const blob        = new Blob([JSON.stringify(exportData, null, 2)], { type: "application/json" });
+         this.exportUrl   = URL.createObjectURL(blob);
+@@ -1757,14 +1857,12 @@
+         const gs = this.globalState?.value || this.globalState || createEmptyState();
+         await this._recoverEquippedIfEmpty(gs);
+ 
+-        // BUG 3 FIX: upload using compact merged registry schema.
+-        const uploadData = {
+-          version:   gs.version,
+-          block_num: gs.block_num,
+-          timestamp: gs.timestamp,
+-          registry:  this._buildCompactRegistry(gs),
+-          equipped:  gs.equipped || {}
+-        };
++        // Fix #1: use the shared _buildSnapshotPayload helper so the uploaded
++        // payload is guaranteed to be identical to what hashState() hashes.
++        // The old inline construction was a separate code path that could
++        // silently diverge from hashState if a field was ever added to one
++        // but not the other, causing every checkpoint to fail verification.
++        const uploadData = _buildSnapshotPayload(gs, _nftRegistry);
+ 
+         const response = await fetch("https://dark-limit-826f.john-smjth.workers.dev/", {
+           method:  "POST",

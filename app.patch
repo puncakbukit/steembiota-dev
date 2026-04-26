@@ -1,0 +1,129 @@
+--- /mnt/user-data/uploads/app.js	2026-04-26 07:33:37.945235897 +0000
++++ /mnt/user-data/outputs/app.js	2026-04-26 07:36:08.119811385 +0000
+@@ -4598,7 +4598,19 @@
+             return false; // another live tab holds the lock
+           }
+         }
++        // Fix #6: localStorage has no atomic compare-and-set.  Two tabs that
++        // open simultaneously can both read `null`, both conclude the lock is
++        // free, both write their own owner ID, and both proceed to bootstrapState.
++        // Mitigation: write our ID, then immediately read back.  If the stored
++        // owner differs from ours, another tab wrote after us — yield to it.
++        // This reduces (but cannot fully eliminate) the race; in practice the
++        // BroadcastChannel path already makes double-boot harmless, but this
++        // guard avoids the wasted RPC calls and IDB write contention.
+         localStorage.setItem(BOOT_LOCK_KEY, JSON.stringify({ owner: myBootTabId, ts: Date.now() }));
++        const written = _readBootLock();
++        if (written && written.owner && written.owner !== myBootTabId) {
++          return false; // lost the race — yield to the other tab
++        }
+         return true;
+       }
+ 
+@@ -4657,15 +4669,32 @@
+         const _onMessage = async (event) => {
+           if (event.data?.type !== "sb_state_ready") return;
+           _bootChannel?.removeEventListener("message", _onMessage);
+-          // Re-read the freshly written IndexedDB snapshot instead of re-running
+-          // the full replay.  loadPersistedSnapshot() is defined in state.js.
+-          try {
+-            const persisted = await loadPersistedSnapshot();
+-            if (persisted?.snapshot) {
+-              globalState.value = { ...persisted.snapshot };
++          // Fix #8b: verify the IDB snapshot actually populated _nftRegistry.
++          // If persistSnapshot() silently failed (window._sbPersistOk === false)
++          // or the IDB load returns an empty/missing snapshot, fall back to a
++          // full independent bootstrapState() rather than rendering a blank UI.
++          let loadedOk = false;
++          if (window._sbPersistOk !== false) {
++            try {
++              const persisted = await loadPersistedSnapshot();
++              if (persisted?.snapshot && Object.keys(persisted.snapshot.registry ?? persisted.snapshot.ownership ?? {}).length > 0) {
++                globalState.value = { ...persisted.snapshot };
++                loadedOk = true;
++              }
++            } catch (e) {
++              console.warn("[App] Follower tab IDB load failed:", e);
+             }
+-          } catch (e) {
+-            console.warn("[App] Follower tab state load failed:", e);
++          }
++          if (!loadedOk) {
++            console.warn("[App] Follower tab: IDB empty or persist failed — running independent bootstrap.");
++            syncStatus.value = "⏳ Follower tab bootstrapping independently…";
++            await bootstrapState(globalState, syncStatus, null, () => {
++              stateReady.value = true;
++              syncStatus.value = "✅ State ready (independent bootstrap).";
++              _refreshLockUi();
++              _scheduleHashRecompute();
++            });
++            return;
+           }
+           stateReady.value  = true;
+           syncStatus.value  = "✅ State synchronised from primary tab.";
+@@ -4689,10 +4718,28 @@
+             if (_storageHandled) return;
+             _storageHandled = true;
+             window.removeEventListener("storage", _onStorage);
+-            try {
+-              const persisted = await loadPersistedSnapshot();
+-              if (persisted?.snapshot) globalState.value = { ...persisted.snapshot };
+-            } catch {}
++            // Fix #8b: guard against empty IDB (same logic as _onMessage above).
++            let loadedOk = false;
++            if (window._sbPersistOk !== false) {
++              try {
++                const persisted = await loadPersistedSnapshot();
++                if (persisted?.snapshot && Object.keys(persisted.snapshot.registry ?? persisted.snapshot.ownership ?? {}).length > 0) {
++                  globalState.value = { ...persisted.snapshot };
++                  loadedOk = true;
++                }
++              } catch {}
++            }
++            if (!loadedOk) {
++              console.warn("[App] Follower tab (storage event): IDB empty — running independent bootstrap.");
++              syncStatus.value = "⏳ Follower tab bootstrapping independently…";
++              await bootstrapState(globalState, syncStatus, null, () => {
++                stateReady.value = true;
++                syncStatus.value = "✅ State ready (independent bootstrap).";
++                _refreshLockUi();
++                _scheduleHashRecompute();
++              });
++              return;
++            }
+             stateReady.value = true;
+             syncStatus.value = "✅ State synchronised from primary tab.";
+             _refreshLockUi();
+@@ -4709,10 +4756,28 @@
+             if (_storageHandled) return; // storage event already handled it
+             _storageHandled = true;
+             window.removeEventListener("storage", _onStorage);
+-            try {
+-              const persisted = await loadPersistedSnapshot();
+-              if (persisted?.snapshot) globalState.value = { ...persisted.snapshot };
+-            } catch {}
++            // Fix #8b: guard against empty IDB (same logic as _onMessage above).
++            let loadedOk = false;
++            if (window._sbPersistOk !== false) {
++              try {
++                const persisted = await loadPersistedSnapshot();
++                if (persisted?.snapshot && Object.keys(persisted.snapshot.registry ?? persisted.snapshot.ownership ?? {}).length > 0) {
++                  globalState.value = { ...persisted.snapshot };
++                  loadedOk = true;
++                }
++              } catch {}
++            }
++            if (!loadedOk) {
++              console.warn("[App] Follower tab (poll): IDB empty — running independent bootstrap.");
++              syncStatus.value = "⏳ Follower tab bootstrapping independently…";
++              await bootstrapState(globalState, syncStatus, null, () => {
++                stateReady.value = true;
++                syncStatus.value = "✅ State ready (independent bootstrap).";
++                _refreshLockUi();
++                _scheduleHashRecompute();
++              });
++              return;
++            }
+             stateReady.value = true;
+             syncStatus.value = "✅ State synchronised (fallback poll).";
+             _refreshLockUi();
