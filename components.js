@@ -3742,8 +3742,16 @@ const BreedingPanelComponent = {
         this.kinshipPreview = "checking";
         try {
           const [resA, resB] = await Promise.all([
-            loadGenomeFromPost(this.urlA.trim()),
-            loadGenomeFromPost(trimmed),
+            this._withTimeout(
+              loadGenomeFromPost(this.urlA.trim()),
+              15000,
+              "Loading Parent A genome timed out after 15s. Please retry."
+            ),
+            this._withTimeout(
+              loadGenomeFromPost(trimmed),
+              15000,
+              "Loading Parent B genome timed out after 15s. Please retry."
+            ),
           ]);
           // FIX 1B (Genus Mismatch): Explicitly verify GEN matches before running
           // the full ancestor walk.  Without this, pasting a URL for an incompatible
@@ -3799,6 +3807,16 @@ const BreedingPanelComponent = {
   },
 
   methods: {
+    _withTimeout(promise, ms, message) {
+      let timer = null;
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      });
+      return Promise.race([promise, timeout]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+    },
+
     // ============================================================
     // NEW: Matchmaker Logic
     // ============================================================
@@ -3926,8 +3944,16 @@ const BreedingPanelComponent = {
       try {
         this.loadStatus = "Loading parent genomes…";
         const [resA, resB] = await Promise.all([
-          loadGenomeFromPost(ua),
-          loadGenomeFromPost(ub)
+          this._withTimeout(
+            loadGenomeFromPost(ua),
+            15000,
+            "Loading Parent A genome timed out after 15s. Please retry."
+          ),
+          this._withTimeout(
+            loadGenomeFromPost(ub),
+            15000,
+            "Loading Parent B genome timed out after 15s. Please retry."
+          )
         ]);
 
         // Store parent genomes for sex display before attempting breed
