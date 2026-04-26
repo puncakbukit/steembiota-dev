@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "block_num": 105503933,
+  "block_num": 105521214,
   "timestamp": "2026-04-22T09:29:33",
   "registry": {
     "alms/aerelon-sparklynx-born-at-8-in-the-evening-utc-on-saturday-march-21-2026-1774125522800": {
@@ -200,5 +200,15 @@
       "o": "testuser1"
     }
   },
-  "equipped": {}
+  "equipped": {
+    "steembiota/crimson-cape-steembiota-accessory-1775489721807": "steembiota/graverix-aurelwing-born-at-3-in-the-morning-utc-on-monday-march-9-2026-1773026573047",
+    "steembiota/crimson-pendant-steembiota-accessory-1775482813729": "steembiota/varaeeus-ripplearchivist-born-at-2-in-the-afternoon-utc-on-friday-march-13-2026-1773412648204",
+    "steembiota/verdant-plumes-steembiota-accessory-1775489064756": "steembiota/graverix-aurelwing-born-at-3-in-the-morning-utc-on-monday-march-9-2026-1773026573047",
+    "steembiota/ember-tiara-steembiota-accessory-1774963488640": "steembiota/graverix-aurelwing-born-at-3-in-the-morning-utc-on-monday-march-9-2026-1773026573047",
+    "testuser1/obsidian-cape-steembiota-accessory-1775532970413": "michelangelo3/lumierel-chronmantis-born-at-7-in-the-morning-utc-on-monday-march-16-2026-1773645471233",
+    "steembiota/arcane-wings-steembiota-accessory-1775741638735": "steembiota/aurerieus-corvhowl-founder-born-at-noon-utc-on-saturday-march-7-2026-1772887253246",
+    "testuser1/cobalt-locket-steembiota-accessory-1776456102063": "testuser1/voxoryx-voltmind-born-at-7-in-the-evening-utc-on-tuesday-march-17-2026-1773777066160",
+    "steembiota/crimson-chain-steembiota-accessory-1776779751325": "steembiota/graverix-aurelwing-born-at-3-in-the-morning-utc-on-monday-march-9-2026-1773026573047",
+    "steembiota/obsidian-cap-steembiota-accessory-1775482373240": "steembiota/graverix-aurelwing-born-at-3-in-the-morning-utc-on-monday-march-9-2026-1773026573047"
+  }
 }
