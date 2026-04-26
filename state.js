@@ -1613,6 +1613,52 @@ const CheckpointManager = {
       return reg;
     },
 
+    async _recoverEquippedIfEmpty(gs) {
+      const hasOwnership = Object.keys(gs?.ownership || {}).length > 0;
+      const equippedCount = Object.keys(gs?.equipped || {}).length;
+      if (!hasOwnership || equippedCount > 0) return gs.equipped || {};
+
+      const temp = {
+        version: gs.version,
+        block_num: gs.block_num,
+        timestamp: gs.timestamp,
+        ownership: { ...(gs.ownership || {}) },
+        equipped: {}
+      };
+
+      const wearOps = [];
+      const nftIds = Object.keys(temp.ownership);
+      await Promise.allSettled(nftIds.map(async (id) => {
+        const [rootAuthor, rootPermlink] = String(id).split("/");
+        if (!rootAuthor || !rootPermlink) return;
+        const replies = await fetchAllReplies(rootAuthor, rootPermlink);
+        for (const r of (Array.isArray(replies) ? replies : [])) {
+          let m;
+          try {
+            const parsed = typeof r.json_metadata === "string"
+              ? JSON.parse(r.json_metadata || "{}")
+              : (r.json_metadata || {});
+            m = parsed.steembiota;
+          } catch { continue; }
+          if (!m || (m.type !== "wear_on" && m.type !== "wear_off")) continue;
+          wearOps.push(r);
+        }
+      }));
+
+      wearOps.sort((a, b) => new Date(a.created) - new Date(b.created));
+      for (const op of wearOps) {
+        const opBlockNum = Number.isInteger(op.block_num) && op.block_num > 0
+          ? op.block_num
+          : (Number.isInteger(op.block) && op.block > 0 ? op.block : 0);
+        try { applyOperation(temp, op, opBlockNum, op.created); } catch {}
+      }
+
+      if (Object.keys(temp.equipped).length > 0) {
+        gs.equipped = { ...temp.equipped };
+      }
+      return gs.equipped || {};
+    },
+
     async generateExport() {
       this.busy         = true;
       this.exportReady  = false;
@@ -1623,6 +1669,7 @@ const CheckpointManager = {
       this._revokeExportUrl();
       try {
         const gs        = this.globalState?.value || this.globalState || createEmptyState();
+        await this._recoverEquippedIfEmpty(gs);
         const hash      = await hashState(gs);
         this.hashPreview = hash.slice(0, 16) + "…";
 
@@ -1670,6 +1717,7 @@ const CheckpointManager = {
       this.statusDetail = "Verifying CID against local state…";
       try {
         const gs = this.globalState?.value || this.globalState || createEmptyState();
+        await this._recoverEquippedIfEmpty(gs);
         const user = this.username?.value || this.username;
         publishCheckpoint(user, gs, cid, (res) => {
           this.busy = false;
@@ -1707,6 +1755,7 @@ const CheckpointManager = {
       this.statusDetail = "Uploading to IPFS via proxy…";
       try {
         const gs = this.globalState?.value || this.globalState || createEmptyState();
+        await this._recoverEquippedIfEmpty(gs);
 
         // BUG 3 FIX: upload using compact merged registry schema.
         const uploadData = {
