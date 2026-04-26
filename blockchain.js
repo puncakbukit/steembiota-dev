@@ -1189,8 +1189,8 @@ function publishTransferCancel(username, creatureAuthor, creaturePermlink, creat
 //   • Ancestors (parents, grandparents, … all the way up)
 //   • Descendants (children, grandchildren, … all the way down)
 //   • Siblings (full or half — any creature sharing ≥1 parent)
-//   • Parents' siblings (aunts/uncles, full or half)
-//   • Siblings' descendants (nieces/nephews and their progeny)
+//   • (Performance-safe core set only in browser): no self/ancestor/
+//     descendant/sibling pairings
 //
 // Strategy:
 //   1. Walk ancestry of both creatures upward via json_metadata
@@ -1198,8 +1198,7 @@ function publishTransferCancel(username, creatureAuthor, creaturePermlink, creat
 //   2. Collect every author seen during that walk.
 //   3. Fetch all SteemBiota posts by those authors to build a local
 //      corpus — this is where relatives are most likely to appear.
-//   4. Within the corpus, identify all relatives of each creature
-//      using the five rules above.
+//   4. Within the corpus, identify direct close relatives.
 //   5. Check that neither creature appears in the other's forbidden set.
 // ============================================================
 
@@ -1446,7 +1445,7 @@ function findSiblings(seedKeys, corpus) {
   return siblings;
 }
 
-// Build the complete forbidden set for one creature identified by key.
+// Build the forbidden set for one creature identified by key.
 // ancestorMap : Map returned by fetchAncestors (includes the creature itself at depth 0)
 // corpus      : Map of all fetched SteemBiota posts by related authors
 // Returns Set<key> of all forbidden counterparts.
@@ -1466,20 +1465,11 @@ function buildForbiddenSet(selfKey, ancestorMap, corpus) {
   // 4. Siblings of self (share a parent with self)
   const selfSiblings = findSiblings(new Set([selfKey]), corpus);
   for (const k of selfSiblings) forbidden.add(k);
-
-  // 5. For each ancestor: its siblings (aunts/uncles) + those siblings' descendants
-  for (const ancKey of ancestorMap.keys()) {
-    // Siblings of this ancestor (parent's other children)
-    const ancSiblings = findSiblings(new Set([ancKey]), corpus);
-    for (const k of ancSiblings) forbidden.add(k);
-    // Descendants of those siblings (cousins, second cousins, …)
-    const sibDescendants = findDescendants(ancSiblings, corpus);
-    for (const k of sibDescendants) forbidden.add(k);
-  }
-
-  // 6. Descendants of self's siblings
-  const sibDescendants = findDescendants(selfSiblings, corpus);
-  for (const k of sibDescendants) forbidden.add(k);
+  // NOTE: The previous implementation also traversed ancestor-sibling branches
+  // (aunts/uncles/cousins and sibling descendants). On large corpora this could
+  // become computationally explosive in browser JS and freeze the breed panel.
+  // We intentionally keep the core anti-inbreeding constraints here:
+  // self, direct ancestors, descendants, and siblings.
 
   return forbidden;
 }
@@ -1563,23 +1553,6 @@ async function checkBreedingCompatibility(resA, resB) {
     // Check if sibling
     const sibs = findSiblings(new Set([subjectKey]), corpus);
     if (sibs.has(otherKey)) return "a sibling";
-
-    // Check if aunt/uncle (sibling of an ancestor)
-    for (const [ancKey, ancNode] of ancestorMap) {
-      const ancSibs = findSiblings(new Set([ancKey]), corpus);
-      if (ancSibs.has(otherKey)) {
-        const depth = ancNode.depth;
-        if (depth === 1) return "an aunt or uncle";
-        return `a relative (sibling of an ancestor ${depth} generations up)`;
-      }
-
-      // Check if niece/nephew descendant (descendant of a sibling)
-      const selfSibs = findSiblings(new Set([subjectKey]), corpus);
-      const nibDescendants = findDescendants(selfSibs, corpus);
-      if (nibDescendants.has(otherKey)) {
-        return "a niece, nephew, or their descendant";
-      }
-    }
 
     return "a close relative";
   }
