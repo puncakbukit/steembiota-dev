@@ -2519,12 +2519,20 @@ const CreatureView = {
     lockedA() {
       if (!this.genome || !this.breedPrefilledUrl) return null;
       return {
-        url:      this.breedPrefilledUrl,
-        name:     this.name || this.author,
-        sex:      this.genome.SX === 0 ? "♂ Male" : "♀ Female",
-        genome:   this.genome,
-        author:   this.author,
-        permlink: this.permlink
+        url:           this.breedPrefilledUrl,
+        name:          this.name || this.author,
+        sex:           this.genome.SX === 0 ? "♂ Male" : "♀ Female",
+        genome:        this.genome,
+        author:        this.author,
+        permlink:      this.permlink,
+        // BUG FIX: Pass the already-loaded creature data so BreedingPanelComponent
+        // can skip re-fetching Parent A via loadGenomeFromPost(), which was causing
+        // "Loading parent genomes…" to hang when the single RPC node was slow/busy.
+        age:           this.postAge ?? 0,
+        feedState:     this.feedState   || null,
+        activityState: this.activityState || null,
+        permits:       this.permitState  || null,
+        effectiveOwner: this.effectiveOwner || this.author,
       };
     }
   },

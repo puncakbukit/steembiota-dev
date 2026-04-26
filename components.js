@@ -3942,13 +3942,34 @@ const BreedingPanelComponent = {
 
       this.loading = true;
       try {
-        this.loadStatus = "Loading parent genomes…";
+        // BUG FIX: When the creature page already loaded Parent A's data (lockedA),
+        // skip the redundant loadGenomeFromPost(ua) network round-trip.  That call
+        // fetches the post + all replies recursively, which was causing "Loading
+        // parent genomes…" to hang indefinitely on a slow/busy single RPC node.
+        // lockedA now carries age, feedState, activityState, permits, effectiveOwner
+        // — everything breedCreatures needs for fertility and permit checks.
+        const lockedResA = (this.lockedA && this.lockedA.genome && ua === (this.lockedA.url || "").trim())
+          ? {
+              genome:         this.lockedA.genome,
+              author:         this.lockedA.author,
+              permlink:       this.lockedA.permlink,
+              age:            this.lockedA.age           ?? 0,
+              feedState:      this.lockedA.feedState     || null,
+              activityState:  this.lockedA.activityState || null,
+              permits:        this.lockedA.permits       || null,
+              effectiveOwner: this.lockedA.effectiveOwner || this.lockedA.author,
+            }
+          : null;
+
+        this.loadStatus = lockedResA ? "Loading partner genome…" : "Loading parent genomes…";
         const [resA, resB] = await Promise.all([
-          this._withTimeout(
-            loadGenomeFromPost(ua),
-            15000,
-            "Loading Parent A genome timed out after 15s. Please retry."
-          ),
+          lockedResA
+            ? Promise.resolve(lockedResA)
+            : this._withTimeout(
+                loadGenomeFromPost(ua),
+                15000,
+                "Loading Parent A genome timed out after 15s. Please retry."
+              ),
           this._withTimeout(
             loadGenomeFromPost(ub),
             15000,
