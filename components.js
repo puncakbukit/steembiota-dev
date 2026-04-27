@@ -3717,11 +3717,25 @@ const BreedingPanelComponent = {
     };
   },
   watch: {
-    // Keep urlA in sync if the locked creature changes (e.g. navigation)
-    lockedA(val) {
+    // Keep urlA in sync if the locked creature changes (e.g. navigation).
+    // Use a deep-equality check on the creature identity (author + permlink) so
+    // that re-renders which return a new object reference for the same creature
+    // (e.g. when postAge or feedState updates) do NOT clear pendingPartner.
+    // Clearing pendingPartner on every re-render was the root cause of the
+    // "second click does nothing" bug: the first click set pendingPartner, Vue
+    // re-rendered (new lockedA object reference), the watcher fired, cleared
+    // pendingPartner, and the second click treated it as a first click again.
+    lockedA(val, oldVal) {
       if (val?.url) this.urlA = val.url;
-      this.partners       = [];
-      this.pendingPartner = null;
+      // Only reset the matchmaker state when the creature itself changed,
+      // not just when a field like postAge produced a new object reference.
+      const sameCreature = val && oldVal
+        && val.author   === oldVal.author
+        && val.permlink === oldVal.permlink;
+      if (!sameCreature) {
+        this.partners       = [];
+        this.pendingPartner = null;
+      }
     },
     // Fix 3b: trigger early kinship check as soon as Parent B URL looks complete.
     urlB(val) {
