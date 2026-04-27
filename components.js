@@ -3734,6 +3734,7 @@ const BreedingPanelComponent = {
         && val.author   === oldVal.author
         && val.permlink === oldVal.permlink;
       if (!sameCreature) {
+        console.log("[SteemBiota] lockedA watcher clearing pendingPartnerKey. val:", val?.author+"/"+val?.permlink, "oldVal:", oldVal?.author+"/"+oldVal?.permlink);
         this.partners          = [];
         this.pendingPartnerKey = null;
         this._pendingPartnerData = null;
@@ -3905,6 +3906,7 @@ const BreedingPanelComponent = {
     // Fix #9: two-step confirm — first click stages the partner, second click breeds.
     selectPartner(p) {
       const pKey = p.author + "/" + p.permlink;
+      console.log("[SteemBiota] selectPartner called. pKey:", pKey, "pendingPartnerKey:", this.pendingPartnerKey, "match:", this.pendingPartnerKey === pKey);
 
       if (this.pendingPartnerKey && this.pendingPartnerKey === pKey) {
         // Second click — confirmed. Use the raw partner data stored at first click.
