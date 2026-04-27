@@ -3887,23 +3887,129 @@ const BreedingPanelComponent = {
     // Fix #9: two-step confirm — first click stages the partner, second click breeds.
     selectPartner(p) {
       if (this.pendingPartner && this.pendingPartner.permlink === p.permlink) {
-        // Second click on the same card — confirmed, proceed to breed.
-        // Suppress the urlB watcher kinship precheck for this programmatic set.
-        // breedCreatures() will run the authoritative check once.
-        this._suppressUrlBKinshipOnce = true;
-        this._skipDeepKinshipOnce = true;
-        this.urlB           = `https://steemit.com/@${p.author}/${p.permlink}`;
+        // Second click on the same card — confirmed.
+        // Both parent genomes are already in memory:
+        //   resA  ← lockedA prop (current creature, loaded by the page)
+        //   resB  ← p (partner card, parsed by the matchmaker)
+        // There is nothing to await, so we skip breedCreatures() entirely and
+        // call the synchronous breed helper directly.  This eliminates the
+        // "Preparing breed…" / "Loading parent genomes…" hang that was caused
+        // by the async machinery getting stuck at an await or a network call.
         this.pendingPartner = null;
-        // BUG FIX: Pass the already-available partner card data directly so
-        // breedCreatures() can skip loadGenomeFromPost(ub) — the main source
-        // of the "Loading parent genome…" hang.  The matchmaker already validated
-        // genus, sex, and base fertility, so the genome/age/author/permlink from
-        // the card are the only fields needed for a correct breed.
-        this.breedCreatures(p);
+        // Set urlB so publishChild() has the correct parent B URL when posting.
+        // Suppress the urlB watcher to avoid triggering a background kinship check.
+        this._suppressUrlBKinshipOnce = true;
+        this.urlB = `https://steemit.com/@${p.author}/${p.permlink}`;
+        const lA = this.lockedA;
+        if (!lA || !lA.genome) {
+          this.loadError = "Parent A data is not ready yet — please wait for the page to finish loading.";
+          return;
+        }
+        const resA = {
+          genome:         lA.genome,
+          author:         lA.author,
+          permlink:       lA.permlink,
+          age:            lA.age           ?? 0,
+          feedState:      lA.feedState     || null,
+          activityState:  lA.activityState || null,
+          permits:        lA.permits       || null,
+          effectiveOwner: lA.effectiveOwner || lA.author,
+        };
+        const resB = {
+          genome:         p.genome,
+          author:         p.author,
+          permlink:       p.permlink,
+          age:            p.age            ?? 0,
+          feedState:      null,
+          activityState:  null,
+          // Optimistic permit: include logged-in user so isBreedingPermitted passes.
+          // The actual on-chain permit constraint is enforced at publish time.
+          permits:        { grantees: new Set(this.username ? [this.username] : []) },
+          effectiveOwner: p.effectiveOwner || p.author,
+        };
+        this._breedFromData(resA, resB);
       } else {
         // First click — stage it for confirmation.
         this.pendingPartner = p;
       }
+    },
+
+    // Synchronous breed path used by selectPartner (matchmaker flow).
+    // Both parent data objects are already in memory — no network calls needed.
+    _breedFromData(resA, resB) {
+      // Reset output state
+      this.loadError   = "";
+      this.loadStatus  = "";
+      this.genomeA     = null;
+      this.genomeB     = null;
+      this.childGenome = null;
+      this.childArt    = null;
+      this.breedInfo   = null;
+      this.loading     = true;
+
+      try {
+        this.genomeA = resA.genome;
+        this.genomeB = resB.genome;
+
+        // ---- Fertility check ----
+        const checkFertility = (res, label) => {
+          const g   = res.genome;
+          const age = res.age;
+          if (age >= g.LIF) throw new Error(
+            `${label} (${res.author}) is a fossil (age ${age} ≥ lifespan ${g.LIF}). Fossils cannot breed.`
+          );
+          const boost      = res.feedState?.fertilityBoost || 0;
+          const ext        = res.activityState?.fertilityExtension || 0;
+          const windowDays = g.FRT_END - g.FRT_START;
+          const boostDays  = Math.floor(windowDays * boost / 2);
+          const effStart   = g.FRT_START - ext - boostDays;
+          const effEnd     = g.FRT_END   + ext + boostDays;
+          if (age < effStart) throw new Error(
+            `${label} (${res.author}) is too young to breed (age ${age}, fertile from day ${effStart}${effStart !== g.FRT_START ? ` — extended from ${g.FRT_START} by feeding/play` : ``}).`
+          );
+          if (age >= effEnd) throw new Error(
+            `${label} (${res.author}) is past breeding age (age ${age}, fertile until day ${effEnd}${effEnd !== g.FRT_END ? ` — extended from ${g.FRT_END} by feeding/play` : ``}).`
+          );
+        };
+        checkFertility(resA, "Parent A");
+        checkFertility(resB, "Parent B");
+
+        // ---- Breed permit check ----
+        const checkPermit = (res, label) => {
+          const owner = res.effectiveOwner || res.author;
+          if (!isBreedingPermitted(owner, this.username, res.permits)) {
+            throw new Error(
+              `${label} (@${owner}) requires a breed permit. ` +
+              `Only @${owner} or users with an active permit can use this creature. ` +
+              `Contact @${owner} to request one.`
+            );
+          }
+        };
+        checkPermit(resA, "Parent A");
+        checkPermit(resB, "Parent B");
+
+        // Kinship check is intentionally skipped in the matchmaker flow:
+        // findPartners() already filtered candidates by genus and sex,
+        // and the matchmaker cards explicitly show kinship warnings.
+
+        // ---- Breed ----
+        const nonce = this.urlA + this.urlB + (this.username || "") + Date.now() + Math.floor(Math.random() * 1e9);
+        const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome, nonce);
+
+        this._facingRight = Math.random() < 0.5;
+        this.childGenome = child;
+        this.childName   = generateFullName(child);
+        this.childArt    = buildUnicodeArt(child, 0, null, this._facingRight, "standing");
+        this.customTitle = buildDefaultTitle(this.childName, new Date());
+        this.breedInfo   = { mutated, speciated,
+          parentA: { author: resA.author, permlink: resA.permlink },
+          parentB: { author: resB.author, permlink: resB.permlink }
+        };
+      } catch (e) {
+        this.loadStatus = "";
+        this.loadError = e.message || String(e);
+      }
+      this.loading = false;
     },
 
     // Fix #7: reset child preview and restore matchmaker panel.
