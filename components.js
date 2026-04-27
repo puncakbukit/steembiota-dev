@@ -3797,6 +3797,9 @@ const BreedingPanelComponent = {
   },
   computed: {
     sexLabel() {
+      if (!this.childGenome) return "";
+      return this.childGenome.SX === 0 ? "♂ Male" : "♀ Female";
+    },
     parentASex() {
       if (!this.genomeA) return "";
       return this.genomeA.SX === 0 ? "♂ Male" : "♀ Female";
