@@ -3698,7 +3698,10 @@ const BreedingPanelComponent = {
       // Matchmaker state
       partners: [],
       searchingPartners: false,
-      pendingPartner: null,
+      // Key of the partner card awaiting second-click confirmation ("author/permlink").
+      // Storing a plain string (not the reactive partner object) makes this immune to
+      // Vue proxy identity issues that caused the "second click does nothing" bug.
+      pendingPartnerKey: null,
       // Early kinship preview (fix 3b): set when urlB is filled and valid
       kinshipPreview: null,   // null | "checking" | "ok" | { error: string }
       _kinshipTimer:  null,
@@ -3727,14 +3730,13 @@ const BreedingPanelComponent = {
     // pendingPartner, and the second click treated it as a first click again.
     lockedA(val, oldVal) {
       if (val?.url) this.urlA = val.url;
-      // Only reset the matchmaker state when the creature itself changed,
-      // not just when a field like postAge produced a new object reference.
       const sameCreature = val && oldVal
         && val.author   === oldVal.author
         && val.permlink === oldVal.permlink;
       if (!sameCreature) {
-        this.partners       = [];
-        this.pendingPartner = null;
+        this.partners          = [];
+        this.pendingPartnerKey = null;
+        this._pendingPartnerData = null;
       }
     },
     // Fix 3b: trigger early kinship check as soon as Parent B URL looks complete.
@@ -3795,9 +3797,6 @@ const BreedingPanelComponent = {
   },
   computed: {
     sexLabel() {
-      if (!this.childGenome) return "";
-      return this.childGenome.SX === 0 ? "♂ Male" : "♀ Female";
-    },
     parentASex() {
       if (!this.genomeA) return "";
       return this.genomeA.SX === 0 ? "♂ Male" : "♀ Female";
@@ -3837,8 +3836,9 @@ const BreedingPanelComponent = {
     async findPartners() {
       if (!this.lockedA) return;
       this.searchingPartners = true;
-      this.partners       = [];
-      this.pendingPartner = null;
+      this.partners            = [];
+      this.pendingPartnerKey   = null;
+      this._pendingPartnerData = null;
       try {
         const targetGEN  = this.lockedA.genome.GEN;
         const targetSex  = this.lockedA.genome.SX === 0 ? 1 : 0;
@@ -3899,21 +3899,19 @@ const BreedingPanelComponent = {
     },
 
     // Fix #9: two-step confirm — first click stages the partner, second click breeds.
+    // Fix #9: two-step confirm — first click stages the partner, second click breeds.
     selectPartner(p) {
-      if (this.pendingPartner && this.pendingPartner.permlink === p.permlink) {
-        // Second click on the same card — confirmed.
-        // Both parent genomes are already in memory:
-        //   resA  ← lockedA prop (current creature, loaded by the page)
-        //   resB  ← p (partner card, parsed by the matchmaker)
-        // There is nothing to await, so we skip breedCreatures() entirely and
-        // call the synchronous breed helper directly.  This eliminates the
-        // "Preparing breed…" / "Loading parent genomes…" hang that was caused
-        // by the async machinery getting stuck at an await or a network call.
-        this.pendingPartner = null;
+      const pKey = p.author + "/" + p.permlink;
+
+      if (this.pendingPartnerKey && this.pendingPartnerKey === pKey) {
+        // Second click — confirmed. Use the raw partner data stored at first click.
+        const partner = this._pendingPartnerData;
+        this.pendingPartnerKey   = null;
+        this._pendingPartnerData = null;
         // Set urlB so publishChild() has the correct parent B URL when posting.
         // Suppress the urlB watcher to avoid triggering a background kinship check.
         this._suppressUrlBKinshipOnce = true;
-        this.urlB = `https://steemit.com/@${p.author}/${p.permlink}`;
+        this.urlB = `https://steemit.com/@${partner.author}/${partner.permlink}`;
         const lA = this.lockedA;
         if (!lA || !lA.genome) {
           this.loadError = "Parent A data is not ready yet — please wait for the page to finish loading.";
@@ -3930,21 +3928,23 @@ const BreedingPanelComponent = {
           effectiveOwner: lA.effectiveOwner || lA.author,
         };
         const resB = {
-          genome:         p.genome,
-          author:         p.author,
-          permlink:       p.permlink,
-          age:            p.age            ?? 0,
+          genome:         partner.genome,
+          author:         partner.author,
+          permlink:       partner.permlink,
+          age:            partner.age      ?? 0,
           feedState:      null,
           activityState:  null,
-          // Optimistic permit: include logged-in user so isBreedingPermitted passes.
-          // The actual on-chain permit constraint is enforced at publish time.
           permits:        { grantees: new Set(this.username ? [this.username] : []) },
-          effectiveOwner: p.effectiveOwner || p.author,
+          effectiveOwner: partner.effectiveOwner || partner.author,
         };
         this._breedFromData(resA, resB);
       } else {
         // First click — stage it for confirmation.
-        this.pendingPartner = p;
+        // Store the key in reactive data (for template highlight/confirm-text),
+        // and store the full raw object outside Vue reactivity so proxy identity
+        // issues cannot cause the second-click comparison to silently fail.
+        this.pendingPartnerKey   = pKey;
+        this._pendingPartnerData = { ...p };  // plain copy, not a reactive proxy
       }
     },
 
@@ -4038,7 +4038,8 @@ const BreedingPanelComponent = {
       this.genomeB        = null;
       this.loadError      = "";
       this.loadStatus     = "";
-      this.pendingPartner = null;
+      this.pendingPartnerKey   = null;
+      this._pendingPartnerData = null;
       this._skipDeepKinshipOnce = false;
     },
 
@@ -4353,9 +4354,9 @@ const BreedingPanelComponent = {
 
         <!-- Partner cards -->
         <div v-if="!searchingPartners && partners.length" class="sb-mm-cards">
-          <div v-for="p in partners" :key="p.permlink"
+          <div v-for="p in partners" :key="p.author + '/' + p.permlink"
             @click="selectPartner(p)"
-            :class="pendingPartner && pendingPartner.permlink === p.permlink ? 'sb-mm-card sb-mm-card-selected' : 'sb-mm-card sb-mm-card-default'">
+            :class="pendingPartnerKey === p.author + '/' + p.permlink ? 'sb-mm-card sb-mm-card-selected' : 'sb-mm-card sb-mm-card-default'">
             <div class="sb-mm-card-name-row">
               <div class="sb-mm-name">{{ p.name }}</div>
               <span :class="p.genome.SX === 0 ? 'sb-sex-male' : 'sb-sex-female'" style="font-size:11px;font-weight:bold;">
@@ -4377,7 +4378,7 @@ const BreedingPanelComponent = {
             <div v-if="username && username !== p.author && !p._permitOwned" class="sb-mm-permit">
               🔑 Permit may be needed
             </div>
-            <div v-if="pendingPartner && pendingPartner.permlink === p.permlink" class="sb-mm-confirm">
+            <div v-if="pendingPartnerKey === p.author + '/' + p.permlink" class="sb-mm-confirm">
               Tap again to breed ✓
             </div>
           </div>
