@@ -3693,7 +3693,7 @@ const BreedingPanelComponent = {
       breedInfo:   null,
       publishing:  false,
       customTitle: "",
-      _facingRight: false,
+      facingRight: false,
 
       // Matchmaker state
       partners: [],
@@ -3704,19 +3704,19 @@ const BreedingPanelComponent = {
       pendingPartnerKey: null,
       // Early kinship preview (fix 3b): set when urlB is filled and valid
       kinshipPreview: null,   // null | "checking" | "ok" | { error: string }
-      _kinshipTimer:  null,
+      kinshipTimer:  null,
       // Prevent duplicate kinship checks when matchmaker auto-fills urlB and
       // immediately calls breedCreatures(). Without this guard, the urlB watcher
       // starts a second background compatibility walk that can race/stall UI state.
-      _suppressUrlBKinshipOnce: false,
+      suppressUrlBKinshipOnce: false,
       // Set when Parent B is chosen via Find Compatible Partner cards.
       // In this path we skip the expensive deep kinship recomputation at submit
       // time to avoid creature-page stalls from duplicate heavy graph walks.
-      _skipDeepKinshipOnce: false,
+      skipDeepKinshipOnce: false,
       // BUG 7 FIX: Set to a warning string when a phantom ancestor is detected
       // (severed lineage).  null = clean lineage.  Shown in the child preview
       // as an informational badge, not a blocking error.
-      _severedLineageWarning: null,
+      severedLineageWarning: null,
     };
   },
   watch: {
@@ -3734,27 +3734,26 @@ const BreedingPanelComponent = {
         && val.author   === oldVal.author
         && val.permlink === oldVal.permlink;
       if (!sameCreature) {
-        console.log("[SteemBiota] lockedA watcher clearing pendingPartnerKey. val:", val?.author+"/"+val?.permlink, "oldVal:", oldVal?.author+"/"+oldVal?.permlink);
         this.partners          = [];
         this.pendingPartnerKey = null;
-        this._pendingPartnerData = null;
+        this.pendingPartnerData = null;
       }
     },
     // Fix 3b: trigger early kinship check as soon as Parent B URL looks complete.
     urlB(val) {
-      if (this._suppressUrlBKinshipOnce) {
-        this._suppressUrlBKinshipOnce = false;
+      if (this.suppressUrlBKinshipOnce) {
+        this.suppressUrlBKinshipOnce = false;
         this.kinshipPreview = null;
-        clearTimeout(this._kinshipTimer);
+        clearTimeout(this.kinshipTimer);
         return;
       }
       this.kinshipPreview = null;
-      clearTimeout(this._kinshipTimer);
+      clearTimeout(this.kinshipTimer);
       const trimmed = val.trim();
       // Only bother if the URL has the @author/permlink shape.
       if (!trimmed || !/@[a-z0-9.-]+\/[a-z0-9-]+/i.test(trimmed)) return;
       // Debounce 800 ms so we don't fire on every keystroke.
-      this._kinshipTimer = setTimeout(async () => {
+      this.kinshipTimer = setTimeout(async () => {
         if (!this.urlA) return;
         this.kinshipPreview = "checking";
         try {
@@ -3842,7 +3841,7 @@ const BreedingPanelComponent = {
       this.searchingPartners = true;
       this.partners            = [];
       this.pendingPartnerKey   = null;
-      this._pendingPartnerData = null;
+      this.pendingPartnerData = null;
       try {
         const targetGEN  = this.lockedA.genome.GEN;
         const targetSex  = this.lockedA.genome.SX === 0 ? 1 : 0;
@@ -3906,16 +3905,15 @@ const BreedingPanelComponent = {
     // Fix #9: two-step confirm — first click stages the partner, second click breeds.
     selectPartner(p) {
       const pKey = p.author + "/" + p.permlink;
-      console.log("[SteemBiota] selectPartner called. pKey:", pKey, "pendingPartnerKey:", this.pendingPartnerKey, "match:", this.pendingPartnerKey === pKey);
 
       if (this.pendingPartnerKey && this.pendingPartnerKey === pKey) {
         // Second click — confirmed. Use the raw partner data stored at first click.
-        const partner = this._pendingPartnerData;
+        const partner = this.pendingPartnerData;
         this.pendingPartnerKey   = null;
-        this._pendingPartnerData = null;
+        this.pendingPartnerData = null;
         // Set urlB so publishChild() has the correct parent B URL when posting.
         // Suppress the urlB watcher to avoid triggering a background kinship check.
-        this._suppressUrlBKinshipOnce = true;
+        this.suppressUrlBKinshipOnce = true;
         this.urlB = `https://steemit.com/@${partner.author}/${partner.permlink}`;
         const lA = this.lockedA;
         if (!lA || !lA.genome) {
@@ -3949,14 +3947,13 @@ const BreedingPanelComponent = {
         // and store the full raw object outside Vue reactivity so proxy identity
         // issues cannot cause the second-click comparison to silently fail.
         this.pendingPartnerKey   = pKey;
-        this._pendingPartnerData = { ...p };  // plain copy, not a reactive proxy
+        this.pendingPartnerData = { ...p };  // plain copy, not a reactive proxy
       }
     },
 
     // Synchronous breed path used by selectPartner (matchmaker flow).
     // Both parent data objects are already in memory — no network calls needed.
     _breedFromData(resA, resB) {
-      console.log("[SteemBiota] _breedFromData called. resA:", resA?.author, "resB:", resB?.author, "genome A:", !!resA?.genome, "genome B:", !!resB?.genome);
       // Reset output state
       this.loadError   = "";
       this.loadStatus  = "";
@@ -4016,21 +4013,19 @@ const BreedingPanelComponent = {
         const nonce = this.urlA + this.urlB + (this.username || "") + Date.now() + Math.floor(Math.random() * 1e9);
         const { child, mutated, speciated } = breedGenomes(resA.genome, resB.genome, nonce);
 
-        this._facingRight = Math.random() < 0.5;
+        this.facingRight = Math.random() < 0.5;
         this.childGenome = child;
         this.childName   = generateFullName(child);
-        this.childArt    = buildUnicodeArt(child, 0, null, this._facingRight, "standing");
+        this.childArt    = buildUnicodeArt(child, 0, null, this.facingRight, "standing");
         this.customTitle = buildDefaultTitle(this.childName, new Date());
         this.breedInfo   = { mutated, speciated,
           parentA: { author: resA.author, permlink: resA.permlink },
           parentB: { author: resB.author, permlink: resB.permlink }
         };
       } catch (e) {
-        console.log("[SteemBiota] _breedFromData caught error:", e);
         this.loadStatus = "";
         this.loadError = e.message || String(e);
       }
-      console.log("[SteemBiota] _breedFromData done. childGenome:", !!this.childGenome, "loadError:", this.loadError);
       this.loading = false;
     },
 
@@ -4047,8 +4042,8 @@ const BreedingPanelComponent = {
       this.loadError      = "";
       this.loadStatus     = "";
       this.pendingPartnerKey   = null;
-      this._pendingPartnerData = null;
-      this._skipDeepKinshipOnce = false;
+      this.pendingPartnerData = null;
+      this.skipDeepKinshipOnce = false;
     },
 
     // ============================================================
@@ -4186,8 +4181,8 @@ const BreedingPanelComponent = {
         // Already run at preview time (urlB watcher). Re-run here only if the
         // preview result was skipped or came back "ok" — avoids 20+ RPC calls
         // blocking the Breed button when we already have a good answer.
-        if (this._skipDeepKinshipOnce) {
-          this._skipDeepKinshipOnce = false;
+        if (this.skipDeepKinshipOnce) {
+          this.skipDeepKinshipOnce = false;
           this.loadStatus = "";
         } else if (!this.kinshipPreview || this.kinshipPreview === "checking") {
           this.loadStatus = "Checking ancestry and family relationships…";
@@ -4201,9 +4196,9 @@ const BreedingPanelComponent = {
             // BUG 7 FIX: A non-null result means severed lineage (phantom ancestor).
             // Store the warning so the UI can display it; do NOT block breeding.
             if (compatResult && compatResult.severedLineage) {
-              this._severedLineageWarning = compatResult.warning;
+              this.severedLineageWarning = compatResult.warning;
             } else {
-              this._severedLineageWarning = null;
+              this.severedLineageWarning = null;
             }
           } catch (e) {
             // FIX 1C: If the check fails mid-way (e.g. 429 rate-limit or CORS
@@ -4236,14 +4231,14 @@ const BreedingPanelComponent = {
         // a phantom ancestor was encountered during the compatibility check.
         // This is stored in json_metadata so it can be displayed on the creature
         // page without affecting any gameplay mechanics.
-        if (this._severedLineageWarning) {
+        if (this.severedLineageWarning) {
           child._severedLineage = true;
         }
 
-        this._facingRight = Math.random() < 0.5;
+        this.facingRight = Math.random() < 0.5;
         this.childGenome = child;
         this.childName   = generateFullName(child);
-        this.childArt    = buildUnicodeArt(child, 0, null, this._facingRight, "standing");
+        this.childArt    = buildUnicodeArt(child, 0, null, this.facingRight, "standing");
         this.customTitle = buildDefaultTitle(this.childName, new Date());
         this.breedInfo   = { mutated, speciated,
           parentA: { author: resA.author, permlink: resA.permlink },
@@ -4454,10 +4449,10 @@ const BreedingPanelComponent = {
           <!-- BUG 7 FIX: Severed Lineage warning — shown instead of a hard error when
                a phantom (deleted) ancestor is found.  Breeding is allowed; the child
                carries the trait permanently on-chain as json_metadata._severedLineage. -->
-          <div v-if="_severedLineageWarning"
+          <div v-if="severedLineageWarning"
             style="margin-bottom:12px;padding:10px 14px;border-radius:8px;
                    background:#1a1200;border:1px solid #7a5800;color:#ffe082;font-size:12px;line-height:1.5;">
-            🌿 {{ _severedLineageWarning }}
+            🌿 {{ severedLineageWarning }}
           </div>
           <div class="sb-child-title">🧬 {{ childName }}</div>
           <div class="sb-child-subtitle">
