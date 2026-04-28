@@ -3956,6 +3956,7 @@ const BreedingPanelComponent = {
     // Synchronous breed path used by selectPartner (matchmaker flow).
     // Both parent data objects are already in memory — no network calls needed.
     _breedFromData(resA, resB) {
+      console.log("[SteemBiota] _breedFromData called. resA:", resA?.author, "resB:", resB?.author, "genome A:", !!resA?.genome, "genome B:", !!resB?.genome);
       // Reset output state
       this.loadError   = "";
       this.loadStatus  = "";
@@ -4025,9 +4026,11 @@ const BreedingPanelComponent = {
           parentB: { author: resB.author, permlink: resB.permlink }
         };
       } catch (e) {
+        console.log("[SteemBiota] _breedFromData caught error:", e);
         this.loadStatus = "";
         this.loadError = e.message || String(e);
       }
+      console.log("[SteemBiota] _breedFromData done. childGenome:", !!this.childGenome, "loadError:", this.loadError);
       this.loading = false;
     },
 
