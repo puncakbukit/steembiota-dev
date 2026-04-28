@@ -1,0 +1,24 @@
+name: checkpoint-roots-guard
+
+on:
+  push:
+    paths:
+      - 'state.js'
+      - 'scripts/checkpoint-roots-guard.js'
+      - '.github/workflows/checkpoint-roots-guard.yml'
+  pull_request:
+    paths:
+      - 'state.js'
+      - 'scripts/checkpoint-roots-guard.js'
+      - '.github/workflows/checkpoint-roots-guard.yml'
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Validate CHECKPOINT_ROOTS
+        run: node scripts/checkpoint-roots-guard.js
