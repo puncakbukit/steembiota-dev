@@ -86,7 +86,7 @@ const STORE_STATE = "sb_state_snapshot";
 // Maximum number of posts fetched per replay batch (Steem API cap is 100).
 const REPLAY_BATCH_SIZE = 100;
 const DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const DISCOVERY_PAGE_BUDGET = 12;                  // bounded for optional discovery cache refreshes only
+const DISCOVERY_PAGE_BUDGET = 12;                  // per-slice budget; full discovery iterates slices until exhausted
 const DISCOVERY_CACHE_KEY_PARTICIPANTS = "steembiota:discovery:participants:v1";
 const DISCOVERY_CACHE_KEY_CHECKPOINTS  = "steembiota:discovery:checkpoint_publishers:v1";
 
@@ -117,7 +117,8 @@ function createEmptyState() {
     block_num: 0,
     timestamp: null,   // normalised "YYYY-MM-DDTHH:mm:ss" string of last processed event
     ownership: {},     // NFT_ID → current owner username
-    equipped:  {}      // Accessory_ID → Creature_ID  (deleted when unequipped)
+    equipped:  {},     // Accessory_ID → Creature_ID  (deleted when unequipped)
+    transfer_intents: {}
   };
 }
 
@@ -214,13 +215,66 @@ function applyOperation(state, op, blockNum, timestamp) {
       break;
     }
 
-    // ── Ownership transfer (the accept leg of the handshake) ──
+    // ── Ownership transfer handshake ───────────────────────────
+    case "transfer_offer": {
+      const cAuthor   = meta.creature?.author   || meta.item?.author   || "";
+      const cPermlink = meta.creature?.permlink || meta.item?.permlink || "";
+      const toUser    = _normUser(meta.to || "");
+      if (cAuthor && cPermlink && toUser) {
+        const id = _nftId(cAuthor, cPermlink);
+        const authorNorm = _normUser(author);
+        const currentOwner = _normUser(state.ownership[id] || "");
+        if (authorNorm && currentOwner && authorNorm === currentOwner && authorNorm !== toUser) {
+          state.transfer_intents = state.transfer_intents || {};
+          state.transfer_intents[id] = {
+            to: toUser,
+            offer_permlink: permlink || "",
+            offered_by: authorNorm,
+            ts: (timestamp instanceof Date ? timestamp.toISOString() : String(timestamp || "")).slice(0, 19)
+          };
+        }
+      }
+      break;
+    }
+
+    case "transfer_cancel": {
+      const cAuthor   = meta.creature?.author   || meta.item?.author   || "";
+      const cPermlink = meta.creature?.permlink || meta.item?.permlink || "";
+      if (cAuthor && cPermlink) {
+        const id = _nftId(cAuthor, cPermlink);
+        const authorNorm = _normUser(author);
+        const currentOwner = _normUser(state.ownership[id] || "");
+        if (authorNorm && currentOwner && authorNorm === currentOwner) {
+          state.transfer_intents = state.transfer_intents || {};
+          delete state.transfer_intents[id];
+        }
+      }
+      break;
+    }
+
+    // ── Ownership transfer (accept leg) ───────────────────────
     case "transfer_accept": {
       // op.author is the *recipient* posting the accept reply
       const cAuthor   = meta.creature?.author   || meta.item?.author   || "";
       const cPermlink = meta.creature?.permlink || meta.item?.permlink || "";
       if (cAuthor && cPermlink) {
         const id = _nftId(cAuthor, cPermlink);
+        const recipient = _normUser(author);
+        const currentOwner = _normUser(state.ownership[id] || "");
+        const pending = (state.transfer_intents || {})[id];
+        const offerPermlink = String(meta.offer_permlink || "").trim();
+        const pendingOfferPermlink = String(pending?.offer_permlink || "").trim();
+
+        // Deterministic transfer handshake validation:
+        //   1) an open transfer_offer must exist
+        //   2) accept author must be the named recipient
+        //   3) offer_permlink must match pending offer when provided
+        //   4) offer author must still be current owner at acceptance time
+        if (!pending) break;
+        if (!recipient || recipient !== _normUser(pending.to || "")) break;
+        if (offerPermlink && pendingOfferPermlink && offerPermlink !== pendingOfferPermlink) break;
+        if (currentOwner && _normUser(pending.offered_by || "") !== currentOwner) break;
+
         // BUG FIX 2A: Do NOT guard on _nftRegistry.has(id).
         //
         // Previously: if (_nftRegistry.has(id)) { state.ownership[id] = author; }
@@ -286,7 +340,9 @@ function applyOperation(state, op, blockNum, timestamp) {
           // a full replay; in an incremental replay the type is already set).
           _nftRegistry.set(id, { type: "creature", _synthetic: true });
         }
-        state.ownership[id] = _normUser(author);
+        state.ownership[id] = recipient;
+        state.transfer_intents = state.transfer_intents || {};
+        delete state.transfer_intents[id];
         // Keep equipped relations untouched on creature transfer.
         // Source-of-truth for wearing is wear_on / wear_off event history.
         // Auto-pruning on transfer causes deterministic data loss when history
@@ -307,6 +363,13 @@ function applyOperation(state, op, blockNum, timestamp) {
         meta.accessory?.permlink || ""
       );
       if (cId && aId) {
+        const actor = _normUser(author);
+        const accOwner = _normUser(state.ownership[aId] || "");
+        const creatureOwner = _normUser(state.ownership[cId] || "");
+        const accType = _nftRegistry.get(aId)?.type || null;
+        const creatureType = _nftRegistry.get(cId)?.type || null;
+        if (!actor || actor !== accOwner || actor !== creatureOwner) break;
+        if (accType !== "accessory" || creatureType !== "creature") break;
         // Exclusivity: remove from any previous creature first
         state.equipped[aId] = cId;
       }
@@ -319,7 +382,14 @@ function applyOperation(state, op, blockNum, timestamp) {
         meta.accessory?.author   || "",
         meta.accessory?.permlink || ""
       );
-      if (aId) delete state.equipped[aId];
+      if (aId) {
+        const actor = _normUser(author);
+        const equippedOn = state.equipped[aId] || null;
+        const accOwner = _normUser(state.ownership[aId] || "");
+        const creatureOwner = equippedOn ? _normUser(state.ownership[equippedOn] || "") : "";
+        if (!actor || actor !== accOwner || (equippedOn && actor !== creatureOwner)) break;
+        delete state.equipped[aId];
+      }
       break;
     }
 
@@ -399,7 +469,8 @@ function _buildSnapshotPayload(state, registry) {
     block_num: Number(state.block_num),
     timestamp: canonicalTimestamp,
     registry:  compactRegistry,
-    equipped:  state.equipped || {}
+    equipped:  state.equipped || {},
+    transfer_intents: state.transfer_intents || {}
   };
 }
 
@@ -517,6 +588,43 @@ function _saveDiscoveryCache(key, payload) {
   } catch {
     // non-fatal cache write failure
   }
+}
+
+// Resume-able all-time discovery:
+// reads cached cursor, fetches in bounded slices, persists progress after
+// every slice, and can resume in the next session until exhausted.
+async function _discoverAllTimeAuthors(cacheKey, { onSlice } = {}) {
+  const cached = _loadDiscoveryCache(cacheKey);
+  let cursor = cached?.cursor || null;
+  let exhausted = !!cached?.exhausted;
+  const authors = new Set((cached?.authors || []).map(_normUser).filter(Boolean));
+  let slices = 0;
+
+  while (!exhausted) {
+    const slice = await _fetchAllPostsSince(null, {
+      maxPages: DISCOVERY_PAGE_BUDGET,
+      startCursor: cursor
+    });
+    slices++;
+    for (const p of (slice.posts || [])) {
+      const u = _normUser(p.author);
+      if (u) authors.add(u);
+    }
+    cursor = slice.nextCursor || null;
+    exhausted = !!slice.exhausted;
+    _saveDiscoveryCache(cacheKey, {
+      authors: [...authors],
+      cursor,
+      exhausted
+    });
+    if (typeof onSlice === "function") {
+      try { onSlice({ slices, authors: authors.size, exhausted }); } catch {}
+    }
+    // Safety brake: keep each invocation bounded; resume later from cursor.
+    if (slices >= 100) break;
+  }
+
+  return { authors: [...authors], cursor, exhausted, slices };
 }
 
 async function _getAccountHistoryAsync(account, cursor, limit) {
@@ -702,7 +810,8 @@ async function fetchSnapshot(cid) {
             block_num: raw.block_num,
             timestamp: raw.timestamp,
             ownership,
-            equipped:  raw.equipped || {}
+            equipped:  raw.equipped || {},
+            transfer_intents: raw.transfer_intents || {}
           };
         } else if (raw.ownership && raw.registry) {
           // Full snapshot hydration: replace runtime registry atomically.
@@ -712,8 +821,10 @@ async function fetchSnapshot(cid) {
             _nftRegistry.set(k, v);
           }
           const { registry: _ignored, ...rest } = raw;
+          if (!rest.transfer_intents) rest.transfer_intents = {};
           return rest;
         }
+        if (!raw.transfer_intents) raw.transfer_intents = {};
         return raw;
       } catch (parseErr) {
         console.warn(`[SB State] Gateway ${gateway} JSON parse failed: ${parseErr.message} — trying next.`);
@@ -782,7 +893,8 @@ async function persistSnapshot(snapshot, cid, stateHash) {
         block_num: snapshot.block_num,
         timestamp: snapshot.timestamp,
         registry:  compactRegistry,
-        equipped:  snapshot.equipped || {}
+        equipped:  snapshot.equipped || {},
+        transfer_intents: snapshot.transfer_intents || {}
       },
       savedAt:   Date.now()
     });
@@ -825,7 +937,14 @@ async function loadPersistedSnapshot() {
             _nftRegistry.set(k, { type });
             if (v?.o) ownership[k] = _normUser(v.o);
           }
-          const cleanSnap = { version: snap.version, block_num: snap.block_num, timestamp: snap.timestamp, ownership, equipped: snap.equipped || {} };
+          const cleanSnap = {
+            version: snap.version,
+            block_num: snap.block_num,
+            timestamp: snap.timestamp,
+            ownership,
+            equipped: snap.equipped || {},
+            transfer_intents: snap.transfer_intents || {}
+          };
           resolve({ ...row, snapshot: cleanSnap });
         } else if (snap._registry) {
           // Full snapshot hydration: replace runtime registry atomically.
@@ -836,8 +955,10 @@ async function loadPersistedSnapshot() {
             _nftRegistry.set(k, v);
           }
           const { _registry, ...cleanSnap } = snap;
+          if (!cleanSnap.transfer_intents) cleanSnap.transfer_intents = {};
           resolve({ ...row, snapshot: cleanSnap });
         } else {
+          if (!snap.transfer_intents) snap.transfer_intents = {};
           resolve(row);
         }
       };
@@ -950,24 +1071,12 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
     console.warn("[SB State] Canonical checkpoint scan failed:", e);
   }
 
-  // Discover community accounts that have ever published a checkpoint by scanning
-  // all-time steembiota-tagged posts, with bounded paged refresh and local cache.
+  // Discover community accounts that have ever published a checkpoint.
+  // Uses resume-able all-time discovery slices until exhausted.
   try {
-    const cpCache = _loadDiscoveryCache(DISCOVERY_CACHE_KEY_CHECKPOINTS);
-    const cachedAuthors = cpCache?.authors || [];
-    const scanResult = await _fetchAllPostsSince(null, {
-      maxPages: DISCOVERY_PAGE_BUDGET,
-      startCursor: cpCache?.cursor || null
-    });
-    const discoveredAuthors = scanResult.posts.map(p => p.author);
-    const communityAccounts = [...new Set([...cachedAuthors, ...discoveredAuthors].map(_normUser).filter(Boolean))]
+    const discovery = await _discoverAllTimeAuthors(DISCOVERY_CACHE_KEY_CHECKPOINTS);
+    const communityAccounts = [...new Set((discovery.authors || []).map(_normUser).filter(Boolean))]
       .filter(a => a !== CHECKPOINT_AUTHOR);
-
-    _saveDiscoveryCache(DISCOVERY_CACHE_KEY_CHECKPOINTS, {
-      authors: communityAccounts,
-      cursor: scanResult.nextCursor,
-      exhausted: scanResult.exhausted
-    });
 
     await Promise.allSettled(communityAccounts.map(async (account) => {
       try {
@@ -1211,7 +1320,7 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes
   const REPLY_SCAN_CONCURRENCY = 6;
   const REPLY_TYPES = filterTypes instanceof Set
     ? filterTypes
-    : new Set(["transfer_accept", "feed", "wear_on", "wear_off"]);
+    : new Set(["transfer_offer", "transfer_cancel", "transfer_accept", "feed", "wear_on", "wear_off"]);
   const allResults = [];
 
   await _mapWithConcurrency(accounts, REPLY_SCAN_CONCURRENCY, async (account) => {
@@ -1344,13 +1453,24 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     let snapshotCid   = null;
 
     if (checkpoint) {
-      // If we already have an IDB snapshot for this CID, skip the IPFS download
+      // If we already have an IDB snapshot for this CID, verify its hash before reuse.
       if (persisted && persisted.cid === checkpoint.snapshot_cid) {
-        status(`✅ Local cache is current (block ${persisted.snapshot?.block_num ?? "?"}).`);
-        snapshot     = persisted.snapshot;
-        snapshotHash = persisted.stateHash;
-        snapshotCid  = persisted.cid;
-      } else {
+        try {
+          const persistedHash = await hashState(persisted.snapshot || {});
+          if (persistedHash === checkpoint.state_hash) {
+            status(`✅ Local cache is current (block ${persisted.snapshot?.block_num ?? "?"}).`);
+            snapshot     = persisted.snapshot;
+            snapshotHash = persistedHash;
+            snapshotCid  = persisted.cid;
+          } else {
+            console.warn("[SB State] Local cache hash mismatch for matching CID — forcing IPFS re-download.");
+            status("⚠️ Local cache integrity mismatch — revalidating from IPFS…");
+          }
+        } catch (e) {
+          console.warn("[SB State] Local cache hash verification failed — forcing IPFS re-download:", e);
+        }
+      }
+      if (!snapshot) {
         status(`📥 Downloading snapshot ${checkpoint.snapshot_cid.slice(0, 8)}… from IPFS`);
         try {
           // Security hardening: fetchSnapshot currently inflates registry data
@@ -1490,23 +1610,13 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
       if (isGenesis || mergedSoFar.size < 3) {
         try {
           status("🔍 Scanning all-time participants for reply discovery…");
-          const cachedParticipants = _loadDiscoveryCache(DISCOVERY_CACHE_KEY_PARTICIPANTS);
-          const participantScan = await _fetchAllPostsSince(null, {
-            maxPages: DISCOVERY_PAGE_BUDGET,
-            startCursor: cachedParticipants?.cursor || null,
-            onProgress: ({ pages, fetched }) => {
-              status(`🔍 Participant discovery… ${fetched} post(s) over ${pages} page(s)`);
+          const participantDiscovery = await _discoverAllTimeAuthors(DISCOVERY_CACHE_KEY_PARTICIPANTS, {
+            onSlice: ({ slices, authors, exhausted }) => {
+              status(`🔍 Participant discovery… ${authors} author(s), slice ${slices} (${exhausted ? "complete" : "partial"})`);
             }
           });
-          allTimeAuthors = [...new Set([
-            ...(cachedParticipants?.authors || []),
-            ...participantScan.posts.map(p => p.author)
-          ].map(_normUser).filter(Boolean))];
-          _saveDiscoveryCache(DISCOVERY_CACHE_KEY_PARTICIPANTS, {
-            authors: allTimeAuthors,
-            cursor: participantScan.nextCursor,
-            exhausted: participantScan.exhausted
-          });
+          allTimeAuthors = [...new Set((participantDiscovery.authors || []).map(_normUser).filter(Boolean))];
+          status(`🔍 Participant discovery ${participantDiscovery.exhausted ? "complete" : "partial"} — ${allTimeAuthors.length} known participant(s).`);
         } catch (e) {
           console.warn("[SB State] All-time tag scan failed (non-fatal):", e);
         }
@@ -1621,7 +1731,17 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
 
     // Merge and sort by creation time (oldest first) so state transitions
     // are applied in the correct chronological order regardless of source.
-    rawPosts.sort((a, b) => new Date(a.created) - new Date(b.created));
+    rawPosts.sort((a, b) => {
+      const ta = new Date(a.created).getTime();
+      const tb = new Date(b.created).getTime();
+      if (ta !== tb) return ta - tb;
+      const ba = Number.isInteger(a.block_num) ? a.block_num : (Number.isInteger(a.block) ? a.block : 0);
+      const bb = Number.isInteger(b.block_num) ? b.block_num : (Number.isInteger(b.block) ? b.block : 0);
+      if (ba !== bb) return ba - bb;
+      const ka = `${String(a.author || "")}/${String(a.permlink || "")}`;
+      const kb = `${String(b.author || "")}/${String(b.permlink || "")}`;
+      return ka < kb ? -1 : ka > kb ? 1 : 0;
+    });
     const ordered = rawPosts;
     let applied = 0;
     const totalOps = ordered.length;
@@ -2020,6 +2140,39 @@ const CheckpointManager = {
       }
     },
 
+    async _postJsonWithTimeout(url, payload, { connectMs = 8000, bodyMs = 20000 } = {}) {
+      const connectTimeout = _makeTimeoutSignal(connectMs);
+      let response;
+      try {
+        response = await fetch(url, {
+          method:  "POST",
+          body:    JSON.stringify(payload),
+          signal:  connectTimeout.signal,
+          headers: {
+            "Content-Type": "application/json",
+            "X-App-Secret": "GcB9QYuCD5VU6z5aJ8T4LcQwvCdhTPv"
+          }
+        });
+      } finally {
+        connectTimeout.cancel();
+      }
+
+      if (!response.ok) throw new Error(`Proxy returned HTTP ${response.status}`);
+
+      let bodyTimer;
+      const bodyTimeout = new Promise((_, reject) => {
+        bodyTimer = setTimeout(() => reject(new Error(`Proxy response timed out after ${Math.round(bodyMs / 1000)}s`)), bodyMs);
+      });
+      try {
+        const raw = await Promise.race([response.text(), bodyTimeout]);
+        clearTimeout(bodyTimer);
+        return JSON.parse(raw);
+      } catch (e) {
+        clearTimeout(bodyTimer);
+        throw e;
+      }
+    },
+
     /**
      * Bug Fix #5 — One-Click Checkpoint via Cloudflare Worker IPFS proxy.
      *
@@ -2047,24 +2200,17 @@ const CheckpointManager = {
         // but not the other, causing every checkpoint to fail verification.
         const uploadData = _buildSnapshotPayload(gs, _nftRegistry);
 
-        const response = await fetch("https://dark-limit-826f.john-smjth.workers.dev/", {
-          method:  "POST",
-          body:    JSON.stringify(uploadData),
-          headers: {
-            "Content-Type": "application/json",
-            // BUG 1 FIX: The Cloudflare Worker requires this shared secret to
-            // prevent random bots from spamming the Pinata account.  Since this
-            // is a public JS file the secret is visible to users — it is only a
-            // rate-limit guard, not a true authentication mechanism.
-            "X-App-Secret": "GcB9QYuCD5VU6z5aJ8T4LcQwvCdhTPv"
-          }
-        });
-
-        if (!response.ok) {
-          throw new Error(`Proxy returned HTTP ${response.status}`);
+        // One retry on timeout/network errors for better operator UX.
+        const endpoint = "https://dark-limit-826f.john-smjth.workers.dev/";
+        let result;
+        try {
+          result = await this._postJsonWithTimeout(endpoint, uploadData, { connectMs: 8000, bodyMs: 20000 });
+        } catch (firstErr) {
+          this.statusDetail = "Retrying upload after timeout/network error…";
+          this.notify("Proxy upload timed out/failed once. Retrying…", "info");
+          result = await this._postJsonWithTimeout(endpoint, uploadData, { connectMs: 8000, bodyMs: 20000 });
         }
 
-        const result = await response.json(); // Expected: { cid: "Qm…" or "bafy…" }
         if (!result?.cid) throw new Error("Proxy response missing CID field.");
         if (!isValidIpfsCid(result.cid)) throw new Error("Proxy returned malformed CID.");
 
@@ -2077,7 +2223,13 @@ const CheckpointManager = {
       } catch (e) {
         this.busy         = false;
         this.statusDetail = "";
-        this.notify("Proxy upload failed: " + e.message, "error");
+        const timedOut = /timed out|timeout/i.test(String(e?.message || ""));
+        this.notify(
+          timedOut
+            ? ("Proxy upload timed out. Please retry. Details: " + e.message)
+            : ("Proxy upload failed: " + e.message),
+          "error"
+        );
       }
     }
   },
