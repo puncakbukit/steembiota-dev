@@ -37,7 +37,7 @@ if (cidMatches.length === 0) {
   process.exit(1);
 }
 for (const cid of cidMatches) {
-  const ok = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/.test(cid) || /^bafy[1-9A-HJ-NP-Za-km-z]{20,}$/i.test(cid);
+  const ok = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/.test(cid) || /^bafy[a-z2-7]{20,}$/.test(cid);
   if (!ok) {
     console.error(`Invalid snapshot_cid in CHECKPOINT_ROOTS: ${cid}`);
     process.exit(1);
