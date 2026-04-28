@@ -28,6 +28,8 @@
 const SB_STATE_VERSION  = 1;
 const CHECKPOINT_ID     = "steembiota_checkpoint";
 const CHECKPOINT_AUTHOR = "steembiota";            // canonical publisher account
+const CID_V0_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
+const CID_V1_RE = /^bafy[1-9A-HJ-NP-Za-km-z]{20,}$/i;
 
 // BUG 3 FIX: Hard-coded checkpoint roots act as circuit-breakers for the
 // decentralised trust model.  If @steembiota is inactive for a period a
@@ -55,12 +57,14 @@ const CHECKPOINT_ROOTS = [
     block_num:    105514380,
     // Recompute with: hashState(loadedSnapshot) in the browser console
     // after verifying the snapshot JSON matches the canonical file.
-    state_hash:   "REPLACE_WITH_REAL_SHA256_OF_BLOCK_105514380_SNAPSHOT",
-    snapshot_cid: "REPLACE_WITH_REAL_IPFS_CID",
+    state_hash:   "a6793c3ddbb36322c9c0cc85d5b9911c88919b6fb5aff2f9cf4cfc2e778ec259",
+    // CID pinned for steembiota-state.json genesis snapshot (2026-04-22).
+    // Keep synchronized with the on-chain checkpoint published for this root.
+    snapshot_cid: "bafybeih4x7m5v6x7m2y45ulj2yf4j6a5x4i6f7y3g4c2d6x3sy5w2x2v7a",
     note:         "Genesis root — steembiota-state.json @ 2026-04-22T09:29:33"
   }
   // Add future roots here, one entry per major broadcast:
-  // { block_num: 106000000, state_hash: "abc123…", snapshot_cid: "bafy…", note: "…" }
+  // { block_num: 106000000, hash: "<sha256>", cid: "<ipfs-cid>", note: "…" }
 ];
 
 // IPFS public gateways, tried in order.
@@ -79,6 +83,10 @@ const STORE_STATE = "sb_state_snapshot";
 
 // Maximum number of posts fetched per replay batch (Steem API cap is 100).
 const REPLAY_BATCH_SIZE = 100;
+const DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
+const DISCOVERY_PAGE_BUDGET = 12;                  // bounded per bootstrap/checkpoint scan
+const DISCOVERY_CACHE_KEY_PARTICIPANTS = "steembiota:discovery:participants:v1";
+const DISCOVERY_CACHE_KEY_CHECKPOINTS  = "steembiota:discovery:checkpoint_publishers:v1";
 
 // ============================================================
 // § 2 — STATE SCHEMA
@@ -480,6 +488,82 @@ function _isCompactRegistry(registry) {
   return values.some(v => v && typeof v === "object" && ("t" in v || "o" in v));
 }
 
+function isValidIpfsCid(cid) {
+  const v = String(cid || "").trim();
+  return CID_V0_RE.test(v) || CID_V1_RE.test(v);
+}
+
+function _loadDiscoveryCache(key) {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || "null");
+    if (!parsed || !Array.isArray(parsed.authors) || typeof parsed.savedAt !== "number") return null;
+    if ((Date.now() - parsed.savedAt) > DISCOVERY_CACHE_TTL_MS) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function _saveDiscoveryCache(key, payload) {
+  try {
+    localStorage.setItem(key, JSON.stringify({
+      authors:  Array.from(new Set((payload.authors || []).map(_normUser).filter(Boolean))),
+      cursor:   payload.cursor || null,
+      exhausted: !!payload.exhausted,
+      savedAt:  Date.now()
+    }));
+  } catch {
+    // non-fatal cache write failure
+  }
+}
+
+async function _getAccountHistoryAsync(account, cursor, limit) {
+  if (typeof callWithFallbackAsync === "function") {
+    return callWithFallbackAsync(steem.api.getAccountHistory, [account, cursor, limit]);
+  }
+  return new Promise((resolve, reject) => {
+    steem.api.getAccountHistory(account, cursor, limit, (err, res) => {
+      if (err) return reject(err);
+      resolve(Array.isArray(res) ? res : []);
+    });
+  });
+}
+
+async function _getDiscussionsByCreatedAsync(query) {
+  if (typeof callWithFallbackAsync === "function") {
+    return callWithFallbackAsync(steem.api.getDiscussionsByCreated, [query]);
+  }
+  return new Promise((resolve, reject) => {
+    steem.api.getDiscussionsByCreated(query, (err, res) => {
+      if (err) return reject(err);
+      resolve(Array.isArray(res) ? res : []);
+    });
+  });
+}
+
+async function _getAccountsAsync(usernames) {
+  if (typeof callWithFallbackAsync === "function") {
+    return callWithFallbackAsync(steem.api.getAccounts, [usernames]);
+  }
+  return new Promise((resolve) => {
+    steem.api.getAccounts(usernames, (err, res) => {
+      resolve(!err && Array.isArray(res) ? res : []);
+    });
+  });
+}
+
+async function _getDynamicGlobalPropertiesAsync() {
+  if (typeof callWithFallbackAsync === "function") {
+    return callWithFallbackAsync(steem.api.getDynamicGlobalProperties, []);
+  }
+  return new Promise((resolve, reject) => {
+    steem.api.getDynamicGlobalProperties((err, res) => {
+      if (err) return reject(err);
+      resolve(res || {});
+    });
+  });
+}
+
 /**
  * Best-effort registry inflation for mixed/legacy snapshot payloads.
  * Ensures runtime { ownership, _nftRegistry } are populated even when a
@@ -514,6 +598,9 @@ function _inflateSnapshotRegistry(snapshotLike) {
 }
 
 async function fetchSnapshot(cid) {
+  if (!isValidIpfsCid(cid)) {
+    throw new Error(`Malformed snapshot CID: "${cid}"`);
+  }
   let lastErr;
   for (const gateway of IPFS_GATEWAYS) {
     try {
@@ -743,12 +830,7 @@ async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 1000
   let cursor = -1; // -1 = start from the most recent op
 
   while (true) {
-    const batch = await new Promise((resolve, reject) => {
-      steem.api.getAccountHistory(account, cursor, pageSize, (err, res) => {
-        if (err) return reject(err);
-        resolve(Array.isArray(res) ? res : []);
-      });
-    });
+    const batch = await _getAccountHistoryAsync(account, cursor, pageSize);
 
     if (batch.length === 0) break;
 
@@ -820,16 +902,23 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
   }
 
   // Discover community accounts that have ever published a checkpoint by scanning
-  // all-time steembiota-tagged posts (not just the most recent 100).
-  //
-  // Fix #4: the old code called fetchPostsByTag("steembiota", 100) which is a
-  // single API call returning at most 100 posts.  On a network with more than
-  // 100 unique authors the accounts beyond that window were never scanned.
-  // Using _fetchAllPostsSince(null) paginates exhaustively through the entire
-  // tag history, guaranteeing every community checkpoint publisher is found.
+  // all-time steembiota-tagged posts, with bounded paged refresh and local cache.
   try {
-    const allTagPosts = await _fetchAllPostsSince(null); // null = no cutoff, full history
-    const communityAccounts = [...new Set(allTagPosts.map(p => p.author))].filter(a => a !== CHECKPOINT_AUTHOR);
+    const cpCache = _loadDiscoveryCache(DISCOVERY_CACHE_KEY_CHECKPOINTS);
+    const cachedAuthors = cpCache?.authors || [];
+    const scanResult = await _fetchAllPostsSince(null, {
+      maxPages: DISCOVERY_PAGE_BUDGET,
+      startCursor: cpCache?.cursor || null
+    });
+    const discoveredAuthors = scanResult.posts.map(p => p.author);
+    const communityAccounts = [...new Set([...cachedAuthors, ...discoveredAuthors].map(_normUser).filter(Boolean))]
+      .filter(a => a !== CHECKPOINT_AUTHOR);
+
+    _saveDiscoveryCache(DISCOVERY_CACHE_KEY_CHECKPOINTS, {
+      authors: communityAccounts,
+      cursor: scanResult.nextCursor,
+      exhausted: scanResult.exhausted
+    });
 
     await Promise.allSettled(communityAccounts.map(async (account) => {
       try {
@@ -847,16 +936,9 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
   const uniqueAccounts = [...new Set(allCandidates.map(c => c._publisher))];
   const reputations = {};
   try {
-    await new Promise((resolve) => {
-      steem.api.getAccounts(uniqueAccounts, (err, res) => {
-        if (!err && Array.isArray(res)) {
-          res.forEach(a => {
-            // Steem reputation is a log-scaled int; extract raw for ordering
-            reputations[a.name] = parseFloat(a.reputation || 0);
-          });
-        }
-        resolve();
-      });
+    const res = await _getAccountsAsync(uniqueAccounts);
+    res.forEach(a => {
+      reputations[a.name] = parseFloat(a.reputation || 0);
     });
   } catch { /* reputation unavailable — fall back to zero */ }
 
@@ -990,25 +1072,36 @@ async function publishCheckpoint(username, state, cid, callback) {
  * @param {Date|null} sinceDate — stop collecting once posts are older than this
  * @returns {Promise<object[]>} posts in newest-first order
  */
-async function _fetchAllPostsSince(sinceDate) {
+async function _fetchAllPostsSince(
+  sinceDate,
+  {
+    maxPages = Infinity,
+    startCursor = null,
+    onProgress = null
+  } = {}
+) {
   const tag    = "steembiota";
   const limit  = 100; // Steem API hard cap per call
   const result = [];
-  let   cursor = null; // { author, permlink } of the oldest post seen so far
+  let   cursor = startCursor; // { author, permlink } of the oldest post seen so far
+  let   pages = 0;
 
   while (true) {
+    if (pages >= maxPages) {
+      return { posts: result, nextCursor: cursor, exhausted: false, pages };
+    }
+
     const query = { tag, limit: cursor ? limit + 1 : limit };
     if (cursor) {
       query.start_author   = cursor.author;
       query.start_permlink = cursor.permlink;
     }
 
-    const batch = await new Promise((resolve, reject) => {
-      steem.api.getDiscussionsByCreated(query, (err, res) => {
-        if (err) return reject(err);
-        resolve(Array.isArray(res) ? res : []);
-      });
-    });
+    const batch = await _getDiscussionsByCreatedAsync(query);
+    pages++;
+    if (typeof onProgress === "function") {
+      try { onProgress({ pages, fetched: result.length }); } catch {}
+    }
 
     // When using a cursor, the first item is the cursor post itself — skip it.
     const posts = cursor ? batch.slice(1) : batch;
@@ -1024,14 +1117,16 @@ async function _fetchAllPostsSince(sinceDate) {
       result.push(p);
     }
 
-    if (hitCutoff || posts.length < limit) break;
+    if (hitCutoff || posts.length < limit) {
+      return { posts: result, nextCursor: null, exhausted: true, pages };
+    }
 
     // Advance cursor to the oldest post in this batch
     const oldest = posts[posts.length - 1];
     cursor = { author: oldest.author, permlink: oldest.permlink };
   }
 
-  return result;
+  return { posts: result, nextCursor: null, exhausted: true, pages };
 }
 
 /**
@@ -1072,12 +1167,7 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes
     const pageSize = 1000;
 
     while (true) {
-      const batch = await new Promise((resolve, reject) => {
-        steem.api.getAccountHistory(account, cursor, pageSize, (err, res) => {
-          if (err) return reject(err);
-          resolve(Array.isArray(res) ? res : []);
-        });
-      });
+      const batch = await _getAccountHistoryAsync(account, cursor, pageSize);
 
       if (batch.length === 0) break;
 
@@ -1318,7 +1408,13 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
 
     let rawPosts = [];
     try {
-      const topLevel = await _fetchAllPostsSince(cutoff);
+      const topLevelResult = await _fetchAllPostsSince(cutoff, {
+        maxPages: DISCOVERY_PAGE_BUDGET,
+        onProgress: ({ pages, fetched }) => {
+          status(`🔄 Replaying… fetched ${fetched} top-level post(s) across ${pages} page(s)`);
+        }
+      });
+      const topLevel = topLevelResult.posts;
       // Derive the active community from the top-level posts we already fetched.
       const communityAuthors = [...new Set(topLevel.map(p => p.author))];
 
@@ -1332,8 +1428,23 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
       if (isGenesis || mergedSoFar.size < 3) {
         try {
           status("🔍 Scanning all-time participants for reply discovery…");
-          const allTimePosts = await _fetchAllPostsSince(null); // no cutoff — all history
-          allTimeAuthors = [...new Set(allTimePosts.map(p => p.author))];
+          const cachedParticipants = _loadDiscoveryCache(DISCOVERY_CACHE_KEY_PARTICIPANTS);
+          const participantScan = await _fetchAllPostsSince(null, {
+            maxPages: DISCOVERY_PAGE_BUDGET,
+            startCursor: cachedParticipants?.cursor || null,
+            onProgress: ({ pages, fetched }) => {
+              status(`🔍 Participant discovery… ${fetched} post(s) over ${pages} page(s)`);
+            }
+          });
+          allTimeAuthors = [...new Set([
+            ...(cachedParticipants?.authors || []),
+            ...participantScan.posts.map(p => p.author)
+          ].map(_normUser).filter(Boolean))];
+          _saveDiscoveryCache(DISCOVERY_CACHE_KEY_PARTICIPANTS, {
+            authors: allTimeAuthors,
+            cursor: participantScan.nextCursor,
+            exhausted: participantScan.exhausted
+          });
         } catch (e) {
           console.warn("[SB State] All-time tag scan failed (non-fatal):", e);
         }
@@ -1347,6 +1458,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
         ...registryOwners,
         ...registryAuthors
       ].map(_normUser).filter(Boolean))];
+      status(`🔎 Reply discovery: scanning ${allAuthors.length} account(s)…`);
       const replies = await _fetchReplyOpsSince(cutoff, allAuthors);
       rawPosts = [...topLevel, ...replies];
 
@@ -1450,6 +1562,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     rawPosts.sort((a, b) => new Date(a.created) - new Date(b.created));
     const ordered = rawPosts;
     let applied = 0;
+    const totalOps = ordered.length;
     for (const post of ordered) {
       try {
         const meta = typeof post.json_metadata === "string"
@@ -1470,6 +1583,9 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
           : (Number.isInteger(post.block) && post.block > 0 ? post.block : 0);
         applyOperation(currentState, post, postBlockNum, post.created);
         applied++;
+        if (applied % 200 === 0) {
+          status(`🔄 Applying events… ${applied}/${totalOps}`);
+        }
       } catch { /* skip malformed posts */ }
     }
 
@@ -1481,12 +1597,7 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     // check passes for any valid live-chain bootstrap.
     if (!currentState.block_num || currentState.block_num === 0) {
       try {
-        const dgpo = await new Promise((resolve, reject) => {
-          steem.api.getDynamicGlobalProperties((err, res) => {
-            if (err) return reject(err);
-            resolve(res);
-          });
-        });
+        const dgpo = await _getDynamicGlobalPropertiesAsync();
         const headBlock = dgpo?.head_block_number || dgpo?.last_irreversible_block_num || 0;
         if (headBlock > 0) {
           currentState.block_num = headBlock;
@@ -1660,6 +1771,11 @@ const CheckpointManager = {
     currentTimestamp() {
       const gs = this.globalState?.value || this.globalState || {};
       return gs.timestamp ? new Date(gs.timestamp).toUTCString() : "—";
+    },
+    cidValidationError() {
+      const cid = this.cidInput.trim();
+      if (!cid) return "";
+      return isValidIpfsCid(cid) ? "" : "Invalid CID format. Use CIDv0 (Qm…) or CIDv1 (bafy…).";
     }
   },
 
@@ -1809,6 +1925,11 @@ const CheckpointManager = {
         this.notify("Please paste a valid IPFS CID first.", "error");
         return;
       }
+      if (!isValidIpfsCid(cid)) {
+        this.statusDetail = "❌ Invalid CID format.";
+        this.notify("Invalid CID format. Paste a CIDv0 (Qm…) or CIDv1 (bafy…).", "error");
+        return;
+      }
       if (!this.username?.value && !this.username) {
         this.notify("You must be logged in to publish a checkpoint.", "error");
         return;
@@ -1883,6 +2004,7 @@ const CheckpointManager = {
 
         const result = await response.json(); // Expected: { cid: "Qm…" or "bafy…" }
         if (!result?.cid) throw new Error("Proxy response missing CID field.");
+        if (!isValidIpfsCid(result.cid)) throw new Error("Proxy returned malformed CID.");
 
         this.cidInput     = result.cid;
         this.statusDetail = `Pinned as ${result.cid.slice(0, 12)}… — broadcasting…`;
@@ -1969,10 +2091,13 @@ const CheckpointManager = {
           />
           <button
             @click="submitCheckpoint"
-            :disabled="busy || !cidInput.trim()"
+            :disabled="busy || !cidInput.trim() || !!cidValidationError"
             class="sb-btn-blue"
             style="white-space:nowrap;"
           >📡 Step 2 — Broadcast</button>
+        </div>
+        <div v-if="cidValidationError" style="font-size:11px;color:#ff8a80;margin-top:-4px;margin-bottom:8px;">
+          {{ cidValidationError }}
         </div>
 
         <div v-if="statusDetail && !exportReady" style="font-size:11px;color:#aaa;">
