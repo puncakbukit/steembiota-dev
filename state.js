@@ -29,7 +29,9 @@ const SB_STATE_VERSION  = 1;
 const CHECKPOINT_ID     = "steembiota_checkpoint";
 const CHECKPOINT_AUTHOR = "steembiota";            // canonical publisher account
 const CID_V0_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
-const CID_V1_RE = /^bafy[1-9A-HJ-NP-Za-km-z]{20,}$/i;
+// Strict CIDv1 (base32 lowercase) for bafy... family.
+// Base32 alphabet is a-z2-7; digits 0/1/8/9 are invalid.
+const CID_V1_RE = /^bafy[a-z2-7]{20,}$/;
 
 // BUG 3 FIX: Hard-coded checkpoint roots act as circuit-breakers for the
 // decentralised trust model.  If @steembiota is inactive for a period a
@@ -84,7 +86,7 @@ const STORE_STATE = "sb_state_snapshot";
 // Maximum number of posts fetched per replay batch (Steem API cap is 100).
 const REPLAY_BATCH_SIZE = 100;
 const DISCOVERY_CACHE_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
-const DISCOVERY_PAGE_BUDGET = 12;                  // bounded per bootstrap/checkpoint scan
+const DISCOVERY_PAGE_BUDGET = 12;                  // bounded for optional discovery cache refreshes only
 const DISCOVERY_CACHE_KEY_PARTICIPANTS = "steembiota:discovery:participants:v1";
 const DISCOVERY_CACHE_KEY_CHECKPOINTS  = "steembiota:discovery:checkpoint_publishers:v1";
 
@@ -564,6 +566,30 @@ async function _getDynamicGlobalPropertiesAsync() {
   });
 }
 
+// Run async jobs with bounded in-flight concurrency.
+async function _mapWithConcurrency(items, concurrency, worker) {
+  const list = Array.isArray(items) ? items : [];
+  const max = Math.max(1, Number(concurrency) || 1);
+  const out = new Array(list.length);
+  let idx = 0;
+
+  async function runOne() {
+    while (true) {
+      const myIdx = idx++;
+      if (myIdx >= list.length) return;
+      try {
+        out[myIdx] = await worker(list[myIdx], myIdx);
+      } catch (e) {
+        out[myIdx] = e;
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(max, list.length || 1) }, () => runOne());
+  await Promise.all(workers);
+  return out;
+}
+
 /**
  * Best-effort registry inflation for mixed/legacy snapshot payloads.
  * Ensures runtime { ownership, _nftRegistry } are populated even when a
@@ -660,6 +686,8 @@ async function fetchSnapshot(cid) {
         // Also handle old-format snapshots ({ ownership, registry: { type } })
         // so stale IPFS-pinned files are never silently discarded.
         if (raw.registry && _isCompactRegistry(raw.registry)) {
+          // Full snapshot hydration: replace runtime registry atomically.
+          _nftRegistry.clear();
           // Compact format (with or without an explicit ownership map) —
           // always merge ownership from registry.o fields so profile ownership
           // never disappears when snapshots include both shapes.
@@ -677,9 +705,11 @@ async function fetchSnapshot(cid) {
             equipped:  raw.equipped || {}
           };
         } else if (raw.ownership && raw.registry) {
+          // Full snapshot hydration: replace runtime registry atomically.
+          _nftRegistry.clear();
           // Old split format — hydrate _nftRegistry from the separate registry map.
           for (const [k, v] of Object.entries(raw.registry)) {
-            if (!_nftRegistry.has(k)) _nftRegistry.set(k, v);
+            _nftRegistry.set(k, v);
           }
           const { registry: _ignored, ...rest } = raw;
           return rest;
@@ -784,6 +814,8 @@ async function loadPersistedSnapshot() {
         // and the old { ownership, _registry } split format so existing cached
         // snapshots are not silently discarded after the upgrade.
         if (snap.registry && !snap._registry && _isCompactRegistry(snap.registry)) {
+          // Full snapshot hydration: replace runtime registry atomically.
+          _nftRegistry.clear();
           // Compact format (with or without ownership map) — expand back into
           // runtime structures and merge ownership from registry.o fields.
           const ownership = { ...(snap.ownership || {}) };
@@ -796,6 +828,8 @@ async function loadPersistedSnapshot() {
           const cleanSnap = { version: snap.version, block_num: snap.block_num, timestamp: snap.timestamp, ownership, equipped: snap.equipped || {} };
           resolve({ ...row, snapshot: cleanSnap });
         } else if (snap._registry) {
+          // Full snapshot hydration: replace runtime registry atomically.
+          _nftRegistry.clear();
           // Legacy format (old split schema) — migrate on the fly.
           const sortedEntries = Object.entries(snap._registry).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0);
           for (const [k, v] of sortedEntries) {
@@ -1000,26 +1034,29 @@ async function fetchLatestCheckpoint(minBlockNum = 0) {
     g.score += trustBonus + rep + recency;
   }
 
-  // ── 4. Pick the highest-scoring group ─────────────────────────────────────
-  const best = Object.values(groups).sort((a, b) => b.score - a.score)[0];
-  if (!best) return null;
+  // ── 4. Pick the highest-scoring ROOT-VALID group ─────────────────────────
+  // Security hardening: never return null just because the top-ranked candidate
+  // is invalid against roots. Instead, iterate candidates in score order and
+  // return the first root-valid one.
+  const ranked = Object.values(groups).sort((a, b) => b.score - a.score);
+  if (ranked.length === 0) return null;
 
-  // BUG 3 FIX: Validate the winning candidate against hard-coded checkpoint
-  // roots.  If a root exists for a block number >= the candidate's block_num,
-  // the candidate's state_hash must match that root — otherwise it is a
-  // potential "poisoned checkpoint" and must be rejected outright.
-  for (const root of CHECKPOINT_ROOTS) {
-    if (best.payload.block_num <= root.block_num) {
-      if (best.payload.state_hash !== root.state_hash) {
-        console.error(
-          `[SB State] SECURITY: Checkpoint rejected — hash ${best.payload.state_hash.slice(0, 16)}… ` +
-          `does not match root ${root.state_hash.slice(0, 16)}… for block ${root.block_num}. ` +
-          `Publishers: ${best.publishers.join(", ")}`
-        );
-        return null;
+  const best = ranked.find((candidate) => {
+    for (const root of CHECKPOINT_ROOTS) {
+      if (candidate.payload.block_num <= root.block_num) {
+        if (candidate.payload.state_hash !== root.state_hash) {
+          console.error(
+            `[SB State] SECURITY: Checkpoint rejected — hash ${candidate.payload.state_hash.slice(0, 16)}… ` +
+            `does not match root ${root.state_hash.slice(0, 16)}… for block ${root.block_num}. ` +
+            `Publishers: ${candidate.publishers.join(", ")}`
+          );
+          return false;
+        }
       }
     }
-  }
+    return true;
+  });
+  if (!best) return null;
 
   // BUG 3 FIX: Attach publisher metadata so the UI can display a
   // "Verified by @steembiota" badge vs. a community-sourced checkpoint.
@@ -1171,12 +1208,13 @@ async function _fetchAllPostsSince(
 async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes = null) {
   // Always include the canonical account; deduplicate the rest.
   const accounts = [...new Set([CHECKPOINT_AUTHOR, ...communityAuthors].map(_normUser).filter(Boolean))];
+  const REPLY_SCAN_CONCURRENCY = 6;
   const REPLY_TYPES = filterTypes instanceof Set
     ? filterTypes
     : new Set(["transfer_accept", "feed", "wear_on", "wear_off"]);
   const allResults = [];
 
-  await Promise.allSettled(accounts.map(async (account) => {
+  await _mapWithConcurrency(accounts, REPLY_SCAN_CONCURRENCY, async (account) => {
     const accountResults = [];
     let cursor   = -1;
     const pageSize = 1000;
@@ -1252,9 +1290,9 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes
       if (sinceDate && oldestTimestamp && oldestTimestamp <= sinceDate) break;
     }
 
-    // Push this account's results into the shared array (thread-safe via allSettled).
+    // Push this account's results into the shared array.
     allResults.push(...accountResults);
-  }));
+  });
 
   return allResults;
 }
@@ -1434,7 +1472,6 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
     let rawPosts = [];
     try {
       const topLevelResult = await _fetchAllPostsSince(cutoff, {
-        maxPages: DISCOVERY_PAGE_BUDGET,
         onProgress: ({ pages, fetched }) => {
           status(`🔄 Replaying… fetched ${fetched} top-level post(s) across ${pages} page(s)`);
         }
@@ -1960,7 +1997,7 @@ const CheckpointManager = {
         return;
       }
       this.busy         = true;
-      this.statusDetail = "Verifying CID against local state…";
+      this.statusDetail = "Preparing checkpoint payload…";
       try {
         const gs = this.globalState?.value || this.globalState || createEmptyState();
         await this._recoverEquippedIfEmpty(gs);
