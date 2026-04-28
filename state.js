@@ -839,7 +839,22 @@ async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 1000
       if (op && op[0] === "custom_json" && op[1]?.id === CHECKPOINT_ID) {
         try {
           const payload = JSON.parse(op[1].json);
-          if (payload && payload.block_num) found.push(payload);
+          // Strict shape validation: malformed payloads are ignored early so
+          // they can never dominate checkpoint scoring with forged block numbers
+          // (e.g. block_num=999999999 with missing/invalid CID/hash).
+          if (!payload || typeof payload !== "object") continue;
+          const bn = Number(payload.block_num);
+          if (!Number.isInteger(bn) || bn <= 0) continue;
+          if (!isValidIpfsCid(payload.snapshot_cid)) continue;
+          if (!/^[a-f0-9]{64}$/i.test(String(payload.state_hash || ""))) continue;
+          const ver = Number(payload.version);
+          if (Number.isInteger(ver) && ver !== SB_STATE_VERSION) continue;
+          found.push({
+            version: Number.isInteger(ver) ? ver : SB_STATE_VERSION,
+            block_num: bn,
+            state_hash: String(payload.state_hash).toLowerCase(),
+            snapshot_cid: String(payload.snapshot_cid).trim()
+          });
         } catch { /* malformed — skip */ }
       }
     }
@@ -1300,9 +1315,19 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
       } else {
         status(`📥 Downloading snapshot ${checkpoint.snapshot_cid.slice(0, 8)}… from IPFS`);
         try {
+          // Security hardening: fetchSnapshot currently inflates registry data
+          // into the module-level _nftRegistry while decoding JSON. If the
+          // downloaded blob later fails hash verification, that side effect must
+          // be rolled back; otherwise a tampered gateway response can poison the
+          // in-memory registry even though the snapshot itself is rejected.
+          const registryBeforeFetch = new Map(_nftRegistry);
           const raw  = await fetchSnapshot(checkpoint.snapshot_cid);
           const hash = await hashState(raw);
           if (hash !== checkpoint.state_hash) {
+            _nftRegistry.clear();
+            for (const [k, v] of registryBeforeFetch.entries()) {
+              _nftRegistry.set(k, v);
+            }
             throw new Error("Hash mismatch — snapshot may be tampered. Ignored.");
           }
           snapshot     = raw;
