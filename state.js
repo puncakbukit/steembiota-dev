@@ -1024,7 +1024,10 @@ async function loadPersistedSnapshot() {
  *
  * Returns an array of parsed checkpoint payloads (unsorted).
  */
-async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 1000) {
+// NOTE: pageSize is capped at 100 — the Steem API hard limit for
+// get_account_history. Requesting more than 100 returns an RPC error on
+// api.steemit.com and api.justyy.com, triggering an endless retry loop.
+async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 100) {
   const found = [];
   let cursor = -1; // -1 = start from the most recent op
 
@@ -1370,7 +1373,7 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes
   await _mapWithConcurrency(accounts, REPLY_SCAN_CONCURRENCY, async (account) => {
     const accountResults = [];
     let cursor   = -1;
-    const pageSize = 1000;
+    const pageSize = 100; // Steem API hard cap for get_account_history
 
     while (true) {
       const batch = await _getAccountHistoryAsync(account, cursor, pageSize);

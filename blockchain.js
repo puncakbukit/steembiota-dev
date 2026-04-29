@@ -19,11 +19,13 @@ const APP_URL = "https://puncakbukit.github.io/steembiota";
 // on GitHub Pages.
 const RPC_NODES = [
   "https://api.steemit.com",
-  "https://api.steem.fans",
-  "https://api.justyy.com"
-  // steemd.steemworld.org
-  // intermittently blocks browser origins with CORS,
-  // which causes accessory wear lookups to fail/flap on GitHub Pages.
+  "https://api.justyy.com",
+  "https://api.moecki.online"
+  // api.steem.fans removed: returns 503 Service Unavailable and has CORS
+  // issues from browser origins on GitHub Pages, causing endless retry loops.
+  //
+  // steemd.steemworld.org removed: intermittently blocks browser origins
+  // with CORS, which causes accessory wear lookups to fail/flap on GitHub Pages.
 ];
 
 let currentRPCIndex = 0;
