@@ -19,13 +19,13 @@ const APP_URL = "https://puncakbukit.github.io/steembiota";
 // on GitHub Pages.
 const RPC_NODES = [
   "https://api.steemit.com",
-  "https://api.justyy.com",
-  "https://api.moecki.online"
-  // api.steem.fans removed: returns 503 Service Unavailable and has CORS
-  // issues from browser origins on GitHub Pages, causing endless retry loops.
-  //
-  // steemd.steemworld.org removed: intermittently blocks browser origins
-  // with CORS, which causes accessory wear lookups to fail/flap on GitHub Pages.
+  "https://api.moecki.online",
+  // api.steem.fans: removed — returns 503 and has CORS issues from GitHub Pages.
+  // api.justyy.com: removed — enforces 429 rate-limiting aggressively and has
+  //   intermittent CORS preflight failures from browser origins.
+  // steemd.steemworld.org
+  // intermittently blocks browser origins with CORS,
+  // which causes accessory wear lookups to fail/flap on GitHub Pages.
 ];
 
 let currentRPCIndex = 0;
@@ -52,6 +52,19 @@ steem.api.setOptions({ url: RPC_NODES[currentRPCIndex] });
 
 // Safe API wrapper with automatic RPC fallback on error.
 // BUG D FIX: After exhausting all nodes the old code left currentRPCIndex
+// Errors that are fundamentally unsupported by the Steem network — retrying
+// on different nodes will not help and risks rate-limiting (HTTP 429).
+const FATAL_RPC_ERROR_PATTERNS = [
+  /upper limit is \d+/i,            // get_account_history limit exceeded
+  /follow_api_plugin not enabled/i,  // node lacks follow plugin
+  /Assert Exception.*_follow_api/i,  // same error, different wording
+];
+function isFatalRpcError(err) {
+  if (!err) return false;
+  const msg = err.message || String(err);
+  return FATAL_RPC_ERROR_PATTERNS.some(re => re.test(msg));
+}
+
 // past the end of RPC_NODES, making every subsequent call fail immediately
 // without trying any node.  The fix resets currentRPCIndex to 0 after a
 // full rotation and applies exponential backoff (capped at RPC_BACKOFF_MAX_MS)
@@ -64,6 +77,11 @@ function callWithFallback(apiCall, args, callback, attempt = 0) {
   let done = false;
 
   const handleFailure = (err) => {
+    // Non-retryable: abort immediately instead of cycling all nodes.
+    if (isFatalRpcError(err)) {
+      console.warn("[RPC] Fatal (non-retryable) error, aborting:", err.message || err);
+      return callback(err);
+    }
     const nextIndex = currentRPCIndex + 1;
     if (nextIndex < RPC_NODES.length) {
       // Still have nodes to try in this rotation — switch immediately.

@@ -1024,9 +1024,7 @@ async function loadPersistedSnapshot() {
  *
  * Returns an array of parsed checkpoint payloads (unsorted).
  */
-// NOTE: pageSize is capped at 100 — the Steem API hard limit for
-// get_account_history. Requesting more than 100 returns an RPC error on
-// api.steemit.com and api.justyy.com, triggering an endless retry loop.
+// pageSize capped at 100 — hard API limit for get_account_history.
 async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 100) {
   const found = [];
   let cursor = -1; // -1 = start from the most recent op
