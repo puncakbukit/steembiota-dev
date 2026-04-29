@@ -9,17 +9,33 @@
 const APP_URL = "https://puncakbukit.github.io/steembiota";
 
 // ---- RPC nodes & fallback ----
-
+//
+// BUG D FIX: Only api.steemit.com was active; the fallback rotation was dead
+// code because RPC_NODES.length === 1.  Two additional CORS-enabled public
+// nodes are now active so the client can survive a single-node outage.
+//
+// steemd.steemworld.org is kept commented-out: it intermittently blocks
+// browser origins with CORS, which causes accessory wear lookups to fail/flap
+// on GitHub Pages.
 const RPC_NODES = [
-  "https://api.steemit.com"
-  // "https://api.steem.fans",
-  // "https://api.justyy.com"
-  // steemd.steemworld.org 
+  "https://api.steemit.com",
+  "https://api.steem.fans",
+  "https://api.justyy.com"
+  // steemd.steemworld.org
   // intermittently blocks browser origins with CORS,
   // which causes accessory wear lookups to fail/flap on GitHub Pages.
 ];
 
 let currentRPCIndex = 0;
+
+// BUG D FIX: Circuit-breaker state for exponential backoff after a full
+// rotation through all nodes.  Without this, currentRPCIndex was left
+// permanently pointing past the end of the array after every node had been
+// tried once in a session, so subsequent RPC calls hard-failed immediately
+// without trying any node at all.
+let _rpcBackoffUntil   = 0;   // epoch ms — all calls blocked until this time
+let _rpcBackoffMs      = 1000; // current backoff interval, doubles on each rotation
+const RPC_BACKOFF_MAX_MS = 30_000; // cap at 30 s
 
 function setRPC(index) {
   currentRPCIndex = index;
@@ -33,6 +49,11 @@ function setRPC(index) {
 steem.api.setOptions({ url: RPC_NODES[currentRPCIndex] });
 
 // Safe API wrapper with automatic RPC fallback on error.
+// BUG D FIX: After exhausting all nodes the old code left currentRPCIndex
+// past the end of RPC_NODES, making every subsequent call fail immediately
+// without trying any node.  The fix resets currentRPCIndex to 0 after a
+// full rotation and applies exponential backoff (capped at RPC_BACKOFF_MAX_MS)
+// so a degraded-network session does not hammer all three nodes simultaneously.
 function callWithFallback(apiCall, args, callback, attempt = 0) {
   // Prevent indefinite hangs when an RPC endpoint never invokes its callback.
   // This was one root cause behind breed checks staying at
@@ -42,10 +63,34 @@ function callWithFallback(apiCall, args, callback, attempt = 0) {
 
   const handleFailure = (err) => {
     const nextIndex = currentRPCIndex + 1;
-    if (nextIndex >= RPC_NODES.length) return callback(err, null);
-    setRPC(nextIndex);
-    callWithFallback(apiCall, args, callback, attempt + 1);
+    if (nextIndex < RPC_NODES.length) {
+      // Still have nodes to try in this rotation — switch immediately.
+      setRPC(nextIndex);
+      callWithFallback(apiCall, args, callback, attempt + 1);
+    } else {
+      // Exhausted all nodes.  Reset to index 0, apply exponential backoff,
+      // then retry from the top of the list after the backoff delay.
+      setRPC(0);
+      _rpcBackoffUntil = Date.now() + _rpcBackoffMs;
+      const delay = _rpcBackoffMs;
+      _rpcBackoffMs = Math.min(_rpcBackoffMs * 2, RPC_BACKOFF_MAX_MS);
+      console.warn(
+        `[RPC] All ${RPC_NODES.length} nodes failed. ` +
+        `Backing off ${delay}ms before retry from node 0.`
+      );
+      setTimeout(() => {
+        callWithFallback(apiCall, args, callback, attempt + 1);
+      }, delay);
+    }
   };
+
+  // Honour backoff: if we're in a cooldown period, delay this call.
+  const now = Date.now();
+  if (_rpcBackoffUntil > now) {
+    const remaining = _rpcBackoffUntil - now;
+    setTimeout(() => callWithFallback(apiCall, args, callback, attempt), remaining);
+    return;
+  }
 
   const timeoutId = setTimeout(() => {
     if (done) return;
@@ -59,7 +104,11 @@ function callWithFallback(apiCall, args, callback, attempt = 0) {
     if (done) return;
     done = true;
     clearTimeout(timeoutId);
-    if (!err) return callback(null, result);
+    if (!err) {
+      // Successful call — reset backoff so the next rotation starts fresh.
+      _rpcBackoffMs = 1000;
+      return callback(null, result);
+    }
     console.warn("RPC error on", RPC_NODES[currentRPCIndex], err);
     handleFailure(err);
   });

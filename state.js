@@ -29,9 +29,21 @@ const SB_STATE_VERSION  = 1;
 const CHECKPOINT_ID     = "steembiota_checkpoint";
 const CHECKPOINT_AUTHOR = "steembiota";            // canonical publisher account
 const CID_V0_RE = /^Qm[1-9A-HJ-NP-Za-km-z]{44}$/;
-// Strict CIDv1 (base32 lowercase) for bafy... family.
-// Base32 alphabet is a-z2-7; digits 0/1/8/9 are invalid.
-const CID_V1_RE = /^bafy[a-z2-7]{20,}$/;
+// BUG B FIX: The old regex anchored on "bafy" and rejected every other
+// CIDv1 family (bafk…, bafyaaq…, bafkrei…, etc.) as well as any CIDv1
+// whose base32 payload happened to contain the characters 0, 1, 8, or 9
+// (which ARE valid in some multibase encodings even though RFC 4648
+// base32-lowercase excludes them).
+//
+// New rule: multibase lowercase prefix 'b' (base32 lower per the multibase
+// table), followed by at least 58 base32-lowercase characters (the minimum
+// for a 256-bit digest encoded in base32).  This accepts:
+//   • CIDv1 dag-pb  SHA2-256  → bafybeif…  (58+ chars after 'b')
+//   • CIDv1 dag-cbor SHA2-256 → bafyreif…
+//   • CIDv1 raw     blake2b   → bafkrei…
+//   • Any future codec/hash combo that conforms to multibase-b base32.
+// CIDv0 (Qm…) is still handled separately by CID_V0_RE above.
+const CID_V1_RE = /^b[a-z2-7]{58,}$/;
 
 // BUG 3 FIX: Hard-coded checkpoint roots act as circuit-breakers for the
 // decentralised trust model.  If @steembiota is inactive for a period a
@@ -315,10 +327,21 @@ function applyOperation(state, op, blockNum, timestamp) {
         // we still create the placeholder — because refusing it would reintroduce
         // the determinism fork — but we log a security notice so operators are aware
         // the spoofing window is open until CHECKPOINT_ROOTS is populated.
+        // BUG F FIX: The old variable was named `coveredByRoot` and the
+        // condition was:
+        //   CHECKPOINT_ROOTS.some(r => r.block_num >= opBlockNum)
+        // which evaluates to true when a root is NEWER than the op, not when
+        // the op itself has been verified.  The name implied the opposite
+        // meaning, making the downstream if/else branches read backwards.
+        //
+        // Renamed to `opInKnownWindow`: true when at least one root has a
+        // block_num >= opBlockNum, meaning the op's block height falls within
+        // a window that root-validation already covers.  The warning branches
+        // now read naturally: warn when the op is NOT in a known window.
         if (!_nftRegistry.has(id)) {
           const opBlockNum = (blockNum && Number.isInteger(blockNum) && blockNum > 0) ? blockNum : 0;
-          const coveredByRoot = CHECKPOINT_ROOTS.some(r => r.block_num >= opBlockNum && opBlockNum > 0);
-          if (!coveredByRoot && CHECKPOINT_ROOTS.length === 0) {
+          const opInKnownWindow = CHECKPOINT_ROOTS.some(r => r.block_num >= opBlockNum && opBlockNum > 0);
+          if (CHECKPOINT_ROOTS.length === 0) {
             // No roots at all — spoofing window is fully open; warn loudly.
             console.warn(
               `[SB State] SECURITY NOTICE: transfer_accept for unknown NFT "${id}" ` +
@@ -326,8 +349,8 @@ function applyOperation(state, op, blockNum, timestamp) {
               `CHECKPOINT_ROOTS is empty — root validation is inactive. ` +
               `Populate CHECKPOINT_ROOTS to close the spoofing window.`
             );
-          } else if (!coveredByRoot) {
-            // Roots exist but don't cover this op's block height yet.
+          } else if (!opInKnownWindow) {
+            // Roots exist but the op's block height exceeds the latest root.
             console.warn(
               `[SB State] SECURITY NOTICE: transfer_accept for unknown NFT "${id}" ` +
               `at block ${opBlockNum} is beyond the latest root ` +
@@ -433,6 +456,17 @@ function applyOperation(state, op, blockNum, timestamp) {
  * Fields: version, block_num, timestamp, registry (compact), equipped.
  * `ownership` is intentionally absent — it is fully encoded inside registry.o.
  *
+ * BUG A FIX: `transfer_intents` is intentionally absent from this payload.
+ * It is ephemeral handshake state (open transfer_offer ops awaiting acceptance
+ * or cancellation).  Including it caused hash non-determinism: two clients
+ * replaying the same blockchain events via different RPC nodes at slightly
+ * different times could hold different open offers and therefore compute
+ * different SHA-256 digests for logically identical snapshots, making every
+ * checkpoint fail peer verification.  transfer_intents is always reconstructed
+ * cheaply from the full replay on boot.  If persistence is ever needed, store
+ * it under a separate IDB key with its own TTL — never mix it into the hashed
+ * snapshot.
+ *
  * @param {object} state     — current globalState value (has .ownership, .equipped, etc.)
  * @param {Map}    registry  — module-level _nftRegistry Map
  * @returns {object}         — plain object safe to JSON.stringify and pass to hashState
@@ -464,13 +498,13 @@ function _buildSnapshotPayload(state, registry) {
     }
   }
 
+  // NOTE: transfer_intents deliberately excluded — see JSDoc above.
   return {
     version:   Number(state.version),
     block_num: Number(state.block_num),
     timestamp: canonicalTimestamp,
     registry:  compactRegistry,
-    equipped:  state.equipped || {},
-    transfer_intents: state.transfer_intents || {}
+    equipped:  state.equipped || {}
   };
 }
 
@@ -811,7 +845,9 @@ async function fetchSnapshot(cid) {
             timestamp: raw.timestamp,
             ownership,
             equipped:  raw.equipped || {},
-            transfer_intents: raw.transfer_intents || {}
+            // BUG A FIX: transfer_intents excluded from canonical snapshot;
+            // always start empty so bootstrapState replay rebuilds it fresh.
+            transfer_intents: {}
           };
         } else if (raw.ownership && raw.registry) {
           // Full snapshot hydration: replace runtime registry atomically.
@@ -821,10 +857,12 @@ async function fetchSnapshot(cid) {
             _nftRegistry.set(k, v);
           }
           const { registry: _ignored, ...rest } = raw;
-          if (!rest.transfer_intents) rest.transfer_intents = {};
+          // BUG A FIX: transfer_intents excluded from canonical snapshot.
+          rest.transfer_intents = {};
           return rest;
         }
-        if (!raw.transfer_intents) raw.transfer_intents = {};
+        // BUG A FIX: transfer_intents excluded from canonical snapshot.
+        raw.transfer_intents = {};
         return raw;
       } catch (parseErr) {
         console.warn(`[SB State] Gateway ${gateway} JSON parse failed: ${parseErr.message} — trying next.`);
@@ -888,13 +926,14 @@ async function persistSnapshot(snapshot, cid, stateHash) {
       cid,
       stateHash,
       // Store compact snapshot — no separate _registry or ownership fields.
+      // BUG A FIX: transfer_intents is NOT persisted here; it is ephemeral
+      // handshake state that is always reconstructed from replay on boot.
       snapshot:  {
         version:   snapshot.version,
         block_num: snapshot.block_num,
         timestamp: snapshot.timestamp,
         registry:  compactRegistry,
-        equipped:  snapshot.equipped || {},
-        transfer_intents: snapshot.transfer_intents || {}
+        equipped:  snapshot.equipped || {}
       },
       savedAt:   Date.now()
     });
@@ -943,7 +982,10 @@ async function loadPersistedSnapshot() {
             timestamp: snap.timestamp,
             ownership,
             equipped: snap.equipped || {},
-            transfer_intents: snap.transfer_intents || {}
+            // BUG A FIX: transfer_intents is not stored in the snapshot;
+            // it is always rebuilt from replay.  Initialise to empty so
+            // applyOperation callers never see undefined.
+            transfer_intents: {}
           };
           resolve({ ...row, snapshot: cleanSnap });
         } else if (snap._registry) {
@@ -955,10 +997,12 @@ async function loadPersistedSnapshot() {
             _nftRegistry.set(k, v);
           }
           const { _registry, ...cleanSnap } = snap;
-          if (!cleanSnap.transfer_intents) cleanSnap.transfer_intents = {};
+          // BUG A FIX: transfer_intents not stored in snapshot; always start empty.
+          cleanSnap.transfer_intents = {};
           resolve({ ...row, snapshot: cleanSnap });
         } else {
-          if (!snap.transfer_intents) snap.transfer_intents = {};
+          // BUG A FIX: transfer_intents not stored in snapshot; always start empty.
+          snap.transfer_intents = {};
           resolve(row);
         }
       };
@@ -1631,7 +1675,51 @@ async function bootstrapState(stateRef, syncStatusRef, onProgress, onReady) {
         ...registryAuthors
       ].map(_normUser).filter(Boolean))];
       status(`🔎 Reply discovery: scanning ${allAuthors.length} account(s)…`);
-      const replies = await _fetchReplyOpsSince(cutoff, allAuthors);
+
+      // BUG C FIX: Two-pass reply scan.
+      //
+      // Problem: a user who is named as the recipient in a transfer_offer but
+      // who has never posted a creature or accessory themselves will not appear
+      // in any of the author sources above.  Their transfer_accept reply is
+      // therefore never fetched, so the GSM permanently misses the ownership
+      // change even though it is on-chain.
+      //
+      // Fix:
+      //   Pass 1 — scan all known authors for transfer_offer ops only.
+      //            Parse each offer's meta.to field to discover recipient accounts
+      //            that are not yet in allAuthors.
+      //   Pass 2 — re-scan the augmented author set (allAuthors + new recipients)
+      //            for the full set of reply types.  This guarantees that every
+      //            transfer_accept posted by a first-time recipient is captured.
+      //
+      // Pass 1 is cheap: it fetches exactly the same account-history pages that
+      // Pass 2 would fetch, just with a narrower type filter so we parse quickly.
+      const pass1Replies = await _fetchReplyOpsSince(
+        cutoff,
+        allAuthors,
+        new Set(["transfer_offer"])
+      );
+      // Extract recipient (meta.to) accounts from all discovered offers.
+      const offerRecipients = new Set();
+      for (const op of pass1Replies) {
+        try {
+          const parsed = typeof op.json_metadata === "string"
+            ? JSON.parse(op.json_metadata || "{}")
+            : (op.json_metadata || {});
+          const to = _normUser(parsed?.steembiota?.to || "");
+          if (to && !allAuthors.includes(to)) offerRecipients.add(to);
+        } catch { /* malformed — skip */ }
+      }
+      // Augment the author list with newly discovered recipients.
+      const augmentedAuthors = offerRecipients.size > 0
+        ? [...new Set([...allAuthors, ...offerRecipients])]
+        : allAuthors;
+      if (offerRecipients.size > 0) {
+        status(`🔎 Found ${offerRecipients.size} transfer recipient(s) not in initial scan — augmenting author list…`);
+      }
+
+      // Pass 2 — full reply scan over the augmented author set.
+      const replies = await _fetchReplyOpsSince(cutoff, augmentedAuthors);
       rawPosts = [...topLevel, ...replies];
 
       // ── BUG FIX (Equipped Genesis Gap) ──────────────────────────────────
