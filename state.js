@@ -662,11 +662,19 @@ async function _discoverAllTimeAuthors(cacheKey, { onSlice } = {}) {
 }
 
 async function _getAccountHistoryAsync(account, cursor, limit) {
+  // Steem API enforces: start >= limit (i.e. cursor >= limit).
+  // When cursor is a concrete sequence number (not -1), cap limit so we never
+  // request more items than can exist from position 0 to cursor (inclusive).
+  const API_HARD_CAP = 100;
+  let safeLimit = Math.min(limit, API_HARD_CAP);
+  if (cursor !== -1 && cursor >= 0) {
+    safeLimit = Math.min(safeLimit, cursor + 1);
+  }
   if (typeof callWithFallbackAsync === "function") {
-    return callWithFallbackAsync(steem.api.getAccountHistory, [account, cursor, limit]);
+    return callWithFallbackAsync(steem.api.getAccountHistory, [account, cursor, safeLimit]);
   }
   return new Promise((resolve, reject) => {
-    steem.api.getAccountHistory(account, cursor, limit, (err, res) => {
+    steem.api.getAccountHistory(account, cursor, safeLimit, (err, res) => {
       if (err) return reject(err);
       resolve(Array.isArray(res) ? res : []);
     });
@@ -1024,8 +1032,7 @@ async function loadPersistedSnapshot() {
  *
  * Returns an array of parsed checkpoint payloads (unsorted).
  */
-// pageSize capped at 100 — hard API limit for get_account_history.
-async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 100) {
+async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 1000) {
   const found = [];
   let cursor = -1; // -1 = start from the most recent op
 
@@ -1371,7 +1378,7 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes
   await _mapWithConcurrency(accounts, REPLY_SCAN_CONCURRENCY, async (account) => {
     const accountResults = [];
     let cursor   = -1;
-    const pageSize = 100; // Steem API hard cap for get_account_history
+    const pageSize = 1000;
 
     while (true) {
       const batch = await _getAccountHistoryAsync(account, cursor, pageSize);

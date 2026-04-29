@@ -55,9 +55,10 @@ steem.api.setOptions({ url: RPC_NODES[currentRPCIndex] });
 // Errors that are fundamentally unsupported by the Steem network — retrying
 // on different nodes will not help and risks rate-limiting (HTTP 429).
 const FATAL_RPC_ERROR_PATTERNS = [
-  /upper limit is \d+/i,            // get_account_history limit exceeded
-  /follow_api_plugin not enabled/i,  // node lacks follow plugin
-  /Assert Exception.*_follow_api/i,  // same error, different wording
+  /upper limit is \d+/i,              // get_account_history limit exceeded
+  /follow_api_plugin not enabled/i,    // node lacks follow plugin
+  /Assert Exception.*_follow_api/i,    // same error, different wording
+  /args\.start >= args\.limit/i,     // start < limit — caller bug, not retryable
 ];
 function isFatalRpcError(err) {
   if (!err) return false;
