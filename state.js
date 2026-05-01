@@ -662,14 +662,15 @@ async function _discoverAllTimeAuthors(cacheKey, { onSlice } = {}) {
 }
 
 async function _getAccountHistoryAsync(account, cursor, limit) {
-  // Steem API enforces: start >= limit (i.e. cursor >= limit).
-  // When cursor is a concrete sequence number (not -1), cap limit so we never
-  // request more items than can exist from position 0 to cursor (inclusive).
+  // Steem API requires: start >= limit. Cap limit so we never violate this
+  // when cursor is a small concrete sequence number near the start of history.
   const API_HARD_CAP = 100;
   let safeLimit = Math.min(limit, API_HARD_CAP);
   if (cursor !== -1 && cursor >= 0) {
     safeLimit = Math.min(safeLimit, cursor + 1);
   }
+  // Brief inter-page pause to avoid overwhelming public RPC nodes.
+  await new Promise(r => setTimeout(r, 300));
   if (typeof callWithFallbackAsync === "function") {
     return callWithFallbackAsync(steem.api.getAccountHistory, [account, cursor, safeLimit]);
   }
@@ -1032,7 +1033,7 @@ async function loadPersistedSnapshot() {
  *
  * Returns an array of parsed checkpoint payloads (unsorted).
  */
-async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 1000) {
+async function _scanAccountCheckpoints(account, minBlockNum = 0, pageSize = 100) {
   const found = [];
   let cursor = -1; // -1 = start from the most recent op
 
@@ -1369,7 +1370,7 @@ async function _fetchAllPostsSince(
 async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes = null) {
   // Always include the canonical account; deduplicate the rest.
   const accounts = [...new Set([CHECKPOINT_AUTHOR, ...communityAuthors].map(_normUser).filter(Boolean))];
-  const REPLY_SCAN_CONCURRENCY = 6;
+  const REPLY_SCAN_CONCURRENCY = 1; // Reduced from 6 — avoid hammering fragile public nodes
   const REPLY_TYPES = filterTypes instanceof Set
     ? filterTypes
     : new Set(["transfer_offer", "transfer_cancel", "transfer_accept", "feed", "wear_on", "wear_off"]);
@@ -1378,7 +1379,7 @@ async function _fetchReplyOpsSince(sinceDate, communityAuthors = [], filterTypes
   await _mapWithConcurrency(accounts, REPLY_SCAN_CONCURRENCY, async (account) => {
     const accountResults = [];
     let cursor   = -1;
-    const pageSize = 1000;
+    const pageSize = 100; // capped — safeLimit in _getAccountHistoryAsync enforces API hard cap
 
     while (true) {
       const batch = await _getAccountHistoryAsync(account, cursor, pageSize);
